@@ -1,0 +1,47 @@
+[
+  {
+    "schema": "billing",
+    "file": "V1__billing_operations.sql",
+    "sha256": "f64ce443c9d2ad0e1f7d1df1e48236e40e016e7c58da3b1d50a49b2f5633d67c"
+  },
+  {
+    "schema": "billing",
+    "file": "V2__dead_letter_audit.sql",
+    "sha256": "d2636ddfad0027162865dec61e4a3eab303e927e033705102d3f619d470d695a"
+  },
+  {
+    "schema": "billing",
+    "file": "V3__consumer_effect_idempotency.sql",
+    "sha256": "b31908e2c205ac10814ca8e3bf4117994e0330f31cd3b0c7082190ae03942b9c"
+  },
+  {
+    "schema": "billing",
+    "file": "V4__settlement_evidence.sql",
+    "sha256": "66ea78821c4c46a3e7a0ff549d544724f404fde58b362a14bd8af47dfeb6d05f"
+  },
+  {
+    "schema": "billing",
+    "file": "V5__safe_unsubmitted_cancellation.sql",
+    "sha256": "db0f29afe698edf6136f61d6f66cfdcd781bab302de7422b60a011b4944e827f"
+  },
+  {
+    "schema": "billing",
+    "file": "V6__unique_bank_credit.sql",
+    "sha256": "d3161ce8d031c832add828331ff134d65f64652dd8c6cee1c49cf32e578f53f4"
+  },
+  {
+    "schema": "billing",
+    "file": "V7__approved_refund_recovery_index.sql",
+    "sha256": "0cf2725b0a8a899824a0e04cffcc0874a1edb6158dbcf6be9135da62858a204d"
+  },
+  {
+    "schema": "billing",
+    "file": "V8__preserve_bank_reference_case.sql",
+    "sha256": "aadf87e2effe986ee35edefb8c5d5ab32a1ebde48f9e96f83dccb60bfea70ad6"
+  },
+  {
+    "schema": "identity",
+    "file": "V1__identity_users.sql",
+    "sha256": "04ff7e961ad7c7f58132f3c96e2b0ada5eb6a3d09f3c3504a2b6eb572dca1ac3"
+  }
+]

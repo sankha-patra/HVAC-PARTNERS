@@ -1,0 +1,7 @@
+app:
+  jwt:
+    cookie-secure: true
+management:
+  endpoint:
+    health:
+      show-details: never

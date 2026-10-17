@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: invoice-payments-local
+    orgId: 1
+    folder: Invoice payments local
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

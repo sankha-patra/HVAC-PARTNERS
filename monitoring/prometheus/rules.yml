@@ -1,0 +1,53 @@
+# Demonstration thresholds, not measured production SLOs.
+groups:
+  - name: invoice-payments-recording
+    rules:
+      - record: invoice-payments:http_requests:rate5m
+        expr: sum by (service) (rate(http_server_requests_seconds_count{job="invoice-payments",uri!~"/actuator.*"}[5m]))
+      - record: invoice-payments:http_5xx:rate5m
+        expr: sum by (service) (rate(http_server_requests_seconds_count{job="invoice-payments",uri!~"/actuator.*",status=~"5.."}[5m]))
+      - record: invoice-payments:http_5xx:ratio5m
+        expr: (invoice-payments:http_5xx:rate5m or on (service) (0 * invoice-payments:http_requests:rate5m)) / clamp_min(invoice-payments:http_requests:rate5m, 0.001)
+      - record: invoice-payments:http_latency:p95_5m
+        expr: histogram_quantile(0.95, sum by (service, le) (rate(http_server_requests_seconds_bucket{job="invoice-payments",uri!~"/actuator.*"}[5m])))
+      - record: invoice-payments:db_pool:utilization
+        expr: sum by (service) (hikaricp_connections_active{job="invoice-payments"}) / clamp_min(sum by (service) (hikaricp_connections_max{job="invoice-payments"}), 1)
+
+  - name: invoice-payments-local-alerts
+    rules:
+      - alert: ApplicationScrapeUnavailable
+        expr: up{job="invoice-payments"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          environment: local
+        annotations:
+          summary: "Cannot scrape {{ $labels.service }}"
+          description: "Check the app, private management port, scrape access and Compose network. This is scrape availability, not a completed-payment SLI."
+      - alert: ElevatedHttpServerErrors
+        expr: (invoice-payments:http_5xx:ratio5m > 0.05) and on (service) (invoice-payments:http_requests:rate5m * 300 >= 100)
+        for: 5m
+        labels:
+          severity: warning
+          environment: local
+        annotations:
+          summary: "HTTP 5xx exceed 5% for {{ $labels.service }}"
+          description: "Demo threshold with at least 100 requests per five minutes. Inspect logs/traces; HTTP success is not evidence of bank settlement."
+      - alert: ElevatedHttpLatency
+        expr: (invoice-payments:http_latency:p95_5m > 2) and on (service) (invoice-payments:http_requests:rate5m * 300 >= 100)
+        for: 5m
+        labels:
+          severity: warning
+          environment: local
+        annotations:
+          summary: "HTTP p95 exceeds two seconds for {{ $labels.service }}"
+          description: "Demo threshold. Compare gateway, service, database pool and provider latency before changing capacity."
+      - alert: DatabaseConnectionsQueued
+        expr: sum by (service) (hikaricp_connections_pending{job="invoice-payments"}) > 0
+        for: 2m
+        labels:
+          severity: warning
+          environment: local
+        annotations:
+          summary: "Requests are waiting for database connections in {{ $labels.service }}"
+          description: "Check transaction duration, pool use and DB locks. Increasing the pool is not automatically the fix."

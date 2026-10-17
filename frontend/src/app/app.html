@@ -1,0 +1,25 @@
+@if (showChrome()) {
+  <div class="app-shell" [class.app-shell--dimmed]="pageBlurred()">
+    <mat-toolbar class="top-bar frost-nav">
+      <span class="brand">Invoice payments</span>
+      <nav class="nav">
+        <a mat-button routerLink="/invoices" routerLinkActive="active" class="nav-pill">Invoice payments</a>
+        <a mat-button routerLink="/finance" routerLinkActive="active" class="nav-pill">Finance</a>
+        <a mat-button routerLink="/reconciliation" routerLinkActive="active" class="nav-pill">Reconciliation</a>
+        <span class="user-chip" *ngIf="user() as u">
+          <span class="user-chip-name">{{ u.displayName }}</span>
+          <span class="user-chip-email">{{ u.email }}</span>
+        </span>
+        <button mat-button type="button" class="nav-pill" (click)="logout()">Logout</button>
+      </nav>
+    </mat-toolbar>
+
+    <main class="content">
+      <router-outlet></router-outlet>
+    </main>
+  </div>
+} @else {
+  <router-outlet></router-outlet>
+}
+
+<app-glass-message />

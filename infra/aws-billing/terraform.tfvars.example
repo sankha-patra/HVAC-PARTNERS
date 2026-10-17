@@ -1,0 +1,26 @@
+# Copy to local.auto.tfvars (ignored). These are non-secret examples, not deployable account details.
+region              = "us-east-1"
+name                = "invoice-payments"
+environment         = "reference"
+route53_zone_id     = "REPLACE_WITH_PUBLIC_ZONE_ID"
+api_origin_hostname = "billing-origin.example.com"
+frontend_hostname   = "billing.example.com"
+
+# First apply creates infrastructure only. Follow docs/aws-billing-deployment.md
+# to initialize separate database roles/schemas, Kafka topics and immutable images.
+application_enabled = false
+
+# Populate only after real images have been built, scanned and pushed:
+# image_digests = {
+#   identity = "sha256:<64 hexadecimal characters>"
+#   billing = "sha256:<64 hexadecimal characters>"
+# }
+# database_secret_arns = {
+#   identity = "arn:aws:secretsmanager:REGION:ACCOUNT:secret:identity-db-SUFFIX"
+#   billing = "arn:aws:secretsmanager:REGION:ACCOUNT:secret:billing-db-SUFFIX"
+# }
+# jwt_secret_arn    = "arn:aws:secretsmanager:REGION:ACCOUNT:secret:jwt-SUFFIX"
+# stripe_secret_arn = "arn:aws:secretsmanager:REGION:ACCOUNT:secret:stripe-test-SUFFIX"
+# provider_merchant_id = "UUID_OF_THE_PROVISIONED_MERCHANT_BOUND_TO_THIS_PROVIDER_ACCOUNT"
+# secret_kms_key_arns = ["arn:aws:kms:REGION:ACCOUNT:key/UUID"]
+# alarm_action_arns = ["arn:aws:sns:REGION:ACCOUNT:operations"]

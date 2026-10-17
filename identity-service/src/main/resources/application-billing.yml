@@ -1,0 +1,50 @@
+spring:
+  flyway:
+    enabled: true
+    default-schema: identity
+    schemas: identity
+    locations: classpath:db/identity
+    clean-disabled: true
+  jpa:
+    show-sql: false
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: identity
+        format_sql: false
+  cache:
+    type: none
+billing:
+  public-url: ${BILLING_PUBLIC_URL:http://localhost:4200}
+app:
+  jwt:
+    ttl-seconds: 900
+    cookie-secure: ${APP_JWT_COOKIE_SECURE:false}
+  internal:
+    token: ""
+server:
+  error:
+    include-message: never
+    include-binding-errors: never
+    include-stacktrace: never
+    include-exception: false
+logging:
+  level:
+    com.invoicepayments.identity: INFO
+    org.springframework.cache: WARN
+    org.hibernate.SQL: "OFF"
+    org.hibernate.orm.jdbc.bind: "OFF"
+    org.hibernate.type.descriptor.sql.BasicBinder: "OFF"
+management:
+  server:
+    port: 9090
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db

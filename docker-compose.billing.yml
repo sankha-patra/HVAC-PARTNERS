@@ -1,0 +1,218 @@
+# Standalone US B2B reference stack. Does not mount or reuse the legacy database volumes.
+x-kafka-env: &kafka-env
+  CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+  KAFKA_LOG_RETENTION_HOURS: 168
+  KAFKA_HEAP_OPTS: -Xms256m -Xmx384m
+x-app-env: &app-env
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/invoice_payments
+  SPRING_DATASOURCE_USERNAME: invoice_local
+  SPRING_DATASOURCE_PASSWORD: ${BILLING_DB_PASSWORD:?Run scripts/start-billing.ps1 to create local secrets}
+  APP_JWT_SECRET: ${BILLING_JWT_SECRET:?Run scripts/start-billing.ps1 to create local secrets}
+  APP_JWT_COOKIE_SECURE: "false"
+  BILLING_PUBLIC_URL: http://localhost:${BILLING_FRONTEND_PORT:-4400}
+  BILLING_OUTBOX_INTERVAL_MS: "100"
+  # Prometheus scrapes metrics locally; traces stay off until a collector is configured.
+  MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "0.0"
+  JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -Djava.io.tmpdir=/tmp
+services:
+  postgres:
+    image: postgres:17-alpine
+    mem_limit: 512m
+    environment:
+      POSTGRES_DB: invoice_payments
+      POSTGRES_USER: invoice_local
+      POSTGRES_PASSWORD: ${BILLING_DB_PASSWORD:?Set BILLING_DB_PASSWORD}
+    volumes: [billing_postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U invoice_local -d invoice_payments"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  kafka-storage:
+    image: busybox:1.37.0
+    user: "0:0"
+    command: [sh, -c, "chown 1000:1000 /kafka1 /kafka2 /kafka3"]
+    volumes: [billing_kafka1:/kafka1, billing_kafka2:/kafka2, billing_kafka3:/kafka3]
+    restart: "no"
+  kafka-1:
+    image: apache/kafka:3.9.1
+    mem_limit: 768m
+    user: "1000:1000"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+    volumes: [billing_kafka1:/var/lib/kafka/data]
+    healthcheck:
+      test: [CMD-SHELL, "KAFKA_HEAP_OPTS='-Xms32m -Xmx64m' /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 20s
+      timeout: 20s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      kafka-storage: {condition: service_completed_successfully}
+    restart: unless-stopped
+  kafka-2:
+    image: apache/kafka:3.9.1
+    mem_limit: 768m
+    user: "1000:1000"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+    volumes: [billing_kafka2:/var/lib/kafka/data]
+    healthcheck:
+      test: [CMD-SHELL, "KAFKA_HEAP_OPTS='-Xms32m -Xmx64m' /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 20s
+      timeout: 20s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      kafka-storage: {condition: service_completed_successfully}
+    restart: unless-stopped
+  kafka-3:
+    image: apache/kafka:3.9.1
+    mem_limit: 768m
+    user: "1000:1000"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+    volumes: [billing_kafka3:/var/lib/kafka/data]
+    healthcheck:
+      test: [CMD-SHELL, "KAFKA_HEAP_OPTS='-Xms32m -Xmx64m' /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 20s
+      timeout: 20s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      kafka-storage: {condition: service_completed_successfully}
+    restart: unless-stopped
+  identity-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.java
+      target: identity
+    mem_limit: 512m
+    environment:
+      <<: *app-env
+      SPRING_PROFILES_ACTIVE: billing,local-observability
+      APP_DEMO_USERS_ENABLED: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:9090/actuator/health/readiness]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 40s
+    restart: unless-stopped
+  billing-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.java
+      target: billing
+    mem_limit: 768m
+    environment:
+      <<: *app-env
+      SPRING_PROFILES_ACTIVE: billing,local-observability
+      BILLING_DEMO_ENABLED: "true"
+      BILLING_SIMULATOR_ENABLED: "true"
+      BILLING_ERP_SIMULATOR_ENABLED: "true"
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-SIMULATOR}
+      BILLING_STRIPE_SECRET_KEY: ${BILLING_STRIPE_SECRET_KEY:-}
+      BILLING_STRIPE_WEBHOOK_SECRET: ${BILLING_STRIPE_WEBHOOK_SECRET:-}
+      KAFKA_BOOTSTRAP: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    depends_on:
+      identity-service: {condition: service_healthy}
+      kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:9090/actuator/health/readiness]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 40s
+    restart: unless-stopped
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.java
+      target: gateway
+    mem_limit: 384m
+    environment:
+      APP_JWT_SECRET: ${BILLING_JWT_SECRET:?Set BILLING_JWT_SECRET}
+      SPRING_PROFILES_ACTIVE: billing,local-observability
+      BILLING_SERVICE_URL: http://billing-service:8084
+      AUTH_SERVICE_URL: http://identity-service:8081
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+      MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "0.0"
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70
+    ports: ["127.0.0.1:${BILLING_GATEWAY_PORT:-8280}:8080"]
+    depends_on:
+      identity-service: {condition: service_healthy}
+      billing-service: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:9090/actuator/health/readiness]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 40s
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    mem_limit: 128m
+    ports: ["127.0.0.1:${BILLING_FRONTEND_PORT:-4400}:80"]
+    depends_on:
+      api-gateway: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1/login]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.13.4
+    mem_limit: 512m
+    command: [--config.file=/etc/prometheus/billing.yml, --storage.tsdb.retention.time=7d, --storage.tsdb.retention.size=1GB]
+    ports: ["127.0.0.1:${BILLING_PROMETHEUS_PORT:-9290}:9090"]
+    volumes: ["./monitoring/prometheus:/etc/prometheus:ro", "billing_prometheus:/prometheus"]
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:13.2.4
+    mem_limit: 384m
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${BILLING_GRAFANA_PASSWORD:?Set BILLING_GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports: ["127.0.0.1:${BILLING_GRAFANA_PORT:-3200}:3000"]
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - billing_grafana:/var/lib/grafana
+    restart: unless-stopped
+volumes:
+  billing_postgres:
+  billing_kafka1:
+  billing_kafka2:
+  billing_kafka3:
+  billing_prometheus:
+  billing_grafana:

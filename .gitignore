@@ -1,0 +1,15 @@
+**/target/
+**/node_modules/
+**/dist/
+**/.angular/
+**/.terraform/
+**/*.tfstate*
+**/*.tfplan
+.env*
+!.env.example
+.tmp-notes/
+.maven-cache/
+*.log
+.idea/
+.vscode/
+*.iml

@@ -1,0 +1,747 @@
+{
+  "sourceRepository": "ebusiness-platform",
+  "sourceBranch": "codex/billing-recovery-drills",
+  "basis": "Explicit source allowlist from a dirty working tree; no old Git history, secrets, dumps, build outputs or dependency folders imported.",
+  "files": [
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingAdvice.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingAdvice.java",
+      "sourceSha256": "6916c375e2046afd63a5b412a1ae5c054242d95cbdc5ef106e5558643ce84f4e"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingApplication.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingApplication.java",
+      "sourceSha256": "a33ff4a325a6ff204cf63a77643312dcfc1523937ae0e1e8e46845a1d225a03c"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingConfiguration.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingConfiguration.java",
+      "sourceSha256": "18c4584a8850d584b4e69549b21d8e039c23bf6238e8d0d057bc14f373538c05"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingController.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingController.java",
+      "sourceSha256": "232836b3e1936f35a2d3249dc63688be98fb0b443eb6fc9e700f04a9f76a264c"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingDemoSeeder.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingDemoSeeder.java",
+      "sourceSha256": "7820ceabc0f5baf5788d9cf0575c475fcfbaf98d5d223d34832f02d74a635305"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingEvents.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingEvents.java",
+      "sourceSha256": "0605d1c83cb9ef49a89baf8ad2cce626f7fcea94fa77215fecb3de6b718fd1a1"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingInbox.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingInbox.java",
+      "sourceSha256": "99fd430b1e22ca888231a3974c27bb43a7592eb483575e540d71efe79482f465"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingKafkaConfiguration.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingKafkaConfiguration.java",
+      "sourceSha256": "d5d0da4bfb29c0acff5635f5dc1a0c9b873c506966a618de9b388b7d9a6b03a8"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingMetrics.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingMetrics.java",
+      "sourceSha256": "047242f88c4e74811e0b806544115587c632607aafafc5b7afda2a5300d50172"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingProblem.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingProblem.java",
+      "sourceSha256": "764e2c8b66984332f0fae4637f61c7598473b29ae6e1ce849b890ddca30e3088"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingReconciliation.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingReconciliation.java",
+      "sourceSha256": "b6d58be42bc3c47865ac278d7b3c8c450b11acdbae3d6ca68d122e5cd547df41"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingRecovery.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingRecovery.java",
+      "sourceSha256": "069266c35150a70906065f5af40aa918463c27a1f2554c5ff27e9f1ba319ab17"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingRefundService.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingRefundService.java",
+      "sourceSha256": "5980a864a5644fcec002b79a7389a5740e522340e88ccb5c24c4ab1e8831ca7e"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingRequestLimit.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingRequestLimit.java",
+      "sourceSha256": "2a7ea9e26ce66573e408c6394668210d45857c231a7ecfa49c20adbf27b0568e"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingSecurity.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingSecurity.java",
+      "sourceSha256": "250f777f00ec184935704a3bbec33de77f0fe9ba9b6790dbfeacd9f3ca6edc5a"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingService.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingService.java",
+      "sourceSha256": "f0c3486edf8812e5d1cf185ecdef03862dc4d1f27c44e12e16003b0b80e10d7e"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingStore.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingStore.java",
+      "sourceSha256": "e2df9db10a3e5da9f1f37d0fb43dd3f17aa452d7cc6104d165c7e1f39ab6134c"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/BillingWorkers.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/BillingWorkers.java",
+      "sourceSha256": "43f0684e37ac00346ca580a67bab4c17aa8b2dbc922f4d426dd66efb2758786a"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/BillingProvider.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/BillingProvider.java",
+      "sourceSha256": "5f5cb6c7a6e7e14d29da2aea720b126ea36e7ab9e30fc71e1f5a1e2e5e0a493b"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/InvalidProviderWebhookException.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/InvalidProviderWebhookException.java",
+      "sourceSha256": "69e6709d95807dfb1b885cadca649544016ce0248ce346e680c0eda5ca26e209"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/package-info.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/package-info.java",
+      "sourceSha256": "d8686377f621ff9f9af554c7d1cacd6bf86be8ef3a6e5a85d810bc5b74986ec4"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/ProviderCommand.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderCommand.java",
+      "sourceSha256": "624f666d3ef3887844b16a3d10940585579c9510aa5955f1bee27924eb397bdc"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/ProviderResult.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderResult.java",
+      "sourceSha256": "0e9723165d9d3b376c5c003bd0eb331c5f7d708a6ea6409b3db6c948da0dfaac"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/ProviderUncertainException.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderUncertainException.java",
+      "sourceSha256": "583626ca1440989eb235615e7f34dd39f9869b8ff977bab211767e063213ad78"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/ProviderValidation.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderValidation.java",
+      "sourceSha256": "639cbadbd7e168971306c908f558d84ba733a7870e0b5e06e1857e240eab6132"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/ProviderWebhookEvent.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderWebhookEvent.java",
+      "sourceSha256": "9ceb3e6ce52ead9265de858ebc832b3b5a03a08aebac06a292e12b1c21108e5b"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/RefundCommand.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/RefundCommand.java",
+      "sourceSha256": "e6d4dddd6828748656c898d61c0e54ef6ced83228bdb271351c78c0eb573f470"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/SimulatorBillingProvider.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/SimulatorBillingProvider.java",
+      "sourceSha256": "1b4376835ea5ae0c0b19dce0685367e9ca9c018e9004a94d099107a87b815cf3"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/StripeBillingProvider.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/StripeBillingProvider.java",
+      "sourceSha256": "793040cca67af2eb5f7ccfb6fac1a77705d9497214c4342f7390583a56c1a563"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/billing/provider/StripeWebhookVerifier.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/billing/provider/StripeWebhookVerifier.java",
+      "sourceSha256": "cb0303b0842d1ccf59749afca7978368d9799ee0f4598b712a1ac7070fe38344"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/security/JwtAuthFilter.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/security/JwtAuthFilter.java",
+      "sourceSha256": "129c4e09cf87fe3f3dc6061aa2c2dafa216700ccf220011efd01c54fc4f83c46"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/security/JwtService.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/security/JwtService.java",
+      "sourceSha256": "31d2db9339ab0f3414dfaa74c566b4270d841b98c37ce1baa4bfcf99a2915dc7"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/security/SecurityConfig.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/security/SecurityConfig.java",
+      "sourceSha256": "e5dc4c8cafc30c7950d923c14cd658a9e1c7ebaa17e1d5718349c70d76aa444f"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/BillingConfigurationTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/BillingConfigurationTest.java",
+      "sourceSha256": "536771abf19c2f512c107a1b6034645b51c2c396eaa6eec0910d6c97ea9dbb3e"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/BillingFinancialDatabaseTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/BillingFinancialDatabaseTest.java",
+      "sourceSha256": "947ea2be7c0ef473983cfd340ae041e28cfb1c8c24ab3c6329d327162cf875fc"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/BillingHttpSecurityDatabaseTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/BillingHttpSecurityDatabaseTest.java",
+      "sourceSha256": "28509165992e36afba930117ba01639ce7b8621829f27569d98c905dac1c65e1"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/BillingKafkaIntegrationTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/BillingKafkaIntegrationTest.java",
+      "sourceSha256": "cf6f28a4a7377fd2cc5e1861a6b7c7d32a221e7d8331a3cda91c609f73ab9290"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/BillingMetricsDatabaseTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/BillingMetricsDatabaseTest.java",
+      "sourceSha256": "cc5f8b63216f1a5c12a32dced6442cae4908cdcca0c6e11164add319403682c5"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/BillingMskIamConfigurationTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/BillingMskIamConfigurationTest.java",
+      "sourceSha256": "e9d95cd4603e87c234164390b334f038320de6805d702d63a04d2f07bf0e1a57"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/BillingSimulationLabTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/BillingSimulationLabTest.java",
+      "sourceSha256": "220bb8a3d43c1206d1fcd7109ebd31ad29c88cb8bbb1fc306cd2ac5533a075dc"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/provider/LocalPaymentLab.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/provider/LocalPaymentLab.java",
+      "sourceSha256": "e7b0ba40d7dd43e2e166ea16f7cd2568ed8bf3476d687479ec5c909b806043ff"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/provider/SimulatorBillingProviderDatabaseTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/provider/SimulatorBillingProviderDatabaseTest.java",
+      "sourceSha256": "05b03e83e718a989247712a9ff702332aa83d0cb114c0a9089c878824b4d9288"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/provider/StripeBillingProviderTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/provider/StripeBillingProviderTest.java",
+      "sourceSha256": "1367d5a7a8b6366c9e8811ff4f6ebfc61ff2336e0b07139f4e02141379b17221"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/billing/provider/StripeWebhookVerifierTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/billing/provider/StripeWebhookVerifierTest.java",
+      "sourceSha256": "6d9989ff4fd8dfd0d5d4878397eb9522ede8076c5377d0eb0d99156c0a1c0bc3"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/identity/IdentityAdvice.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/IdentityAdvice.java",
+      "sourceSha256": "5dff6c05f87e9a7063e55665f527d54c34adae82ced7ea3cae405d2c9f9dee38"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/identity/IdentityApplication.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/IdentityApplication.java",
+      "sourceSha256": "97955656a205fbdd9a9c525a8736b3aafe69b3a4065b289ea099393bc34050a2"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/identity/IdentityConfiguration.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/IdentityConfiguration.java",
+      "sourceSha256": "e086d84021fc1f30323cb0fa5b58d03d5f21f7a85577bbfde855cb259a7ce506"
+    },
+    {
+      "source": "backend/src/test/java/com/ebusiness/identity/IdentityApplicationDatabaseTest.java",
+      "target": "identity-service/src/test/java/com/invoicepayments/identity/IdentityApplicationDatabaseTest.java",
+      "sourceSha256": "bb13f9721b154fda4faed4b57cab641555d0655f527a08fa14310bfd595eabcc"
+    },
+    {
+      "source": "backend/src/test/java/com/ebusiness/identity/IdentityConfigurationTest.java",
+      "target": "identity-service/src/test/java/com/invoicepayments/identity/IdentityConfigurationTest.java",
+      "sourceSha256": "a75d29b1c7f8cb33444c8b5c335c4efab5c075659eab9beafdc1d02bac1abcb5"
+    },
+    {
+      "source": "payment-service/src/main/java/com/ebusiness/payment/config/LocalMonitoringSecurityConfig.java",
+      "target": "billing-service/src/main/java/com/invoicepayments/monitoring/LocalMonitoringSecurityConfig.java",
+      "sourceSha256": "ed123fe09c4088efdd959e12046550687b79974a21d2f2c58fecc4f3a9236cfe"
+    },
+    {
+      "source": "payment-service/src/test/java/com/ebusiness/payment/config/LocalMonitoringSecurityConfigTest.java",
+      "target": "billing-service/src/test/java/com/invoicepayments/monitoring/LocalMonitoringSecurityConfigTest.java",
+      "sourceSha256": "b1e4b5966cd347db9b7584039a6a377a94df9a344d6a784b5d96c897dfc37ac1"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/entity/AppUser.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/entity/AppUser.java",
+      "sourceSha256": "0408658a3bcdb0f38882ba23adbbc0895c74d5d234b76015a311ab7a9ea6ca82"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/repository/AppUserRepository.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/repository/AppUserRepository.java",
+      "sourceSha256": "c598a14fa117bc99bd079a82d6c4fa7f4202ca9eb044791dff1c10b6a6c644f7"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/controller/AuthController.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/controller/AuthController.java",
+      "sourceSha256": "b88e472075dedd87ec1c503a84afcc27d7cead6f5aee35607a1472213097d39a"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/service/AuthService.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/service/AuthService.java",
+      "sourceSha256": "dbc18a91a3177f7848c9190cb89c9c88aec3ae0372235922f42d1afa7127b929"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/security/JwtAuthFilter.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/security/JwtAuthFilter.java",
+      "sourceSha256": "2b91172a434686f8fea62a2117a2f90160cc4dc19ee2eb980578c31727e22ea3"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/security/JwtService.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/security/JwtService.java",
+      "sourceSha256": "8186eb1dcd2be90752df6e1b845c5cda1ed8bc78b9bddf0389cfbe299ff63199"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/security/SecurityConfig.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/security/SecurityConfig.java",
+      "sourceSha256": "4d4f0278b5bd1547b1987a655061bb0ca40de56f405b278af0c195e86a5b5d76"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/dto/LoginRequest.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/dto/LoginRequest.java",
+      "sourceSha256": "29ee2b679963c1160debe62d935e6c860fc25fbe3910323cc6379d92fac5ef59"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/dto/LoginResponse.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/dto/LoginResponse.java",
+      "sourceSha256": "99127a094d7a5a583a0d776c7e8d4e8075704c326b07f79de45ac2d8192c607a"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/dto/UserResponse.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/dto/UserResponse.java",
+      "sourceSha256": "fc2801661b69c7b147d8d25d3503a645edf3cd60706c9d05e595fbba4b96e797"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/config/DemoUserSeeder.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/config/DemoUserSeeder.java",
+      "sourceSha256": "ec45a04211a36d188afe5b202b2b9d86d7a66df483b6e6d9ce9844376487c6af"
+    },
+    {
+      "source": "backend/src/main/java/com/ebusiness/platform/config/LocalMonitoringSecurityConfig.java",
+      "target": "identity-service/src/main/java/com/invoicepayments/identity/config/LocalMonitoringSecurityConfig.java",
+      "sourceSha256": "bd5d9e405ca343d49f2cb769225cacb5a72a8b1f73d8c776dab8f89ddfd39f67"
+    },
+    {
+      "source": "backend/src/test/java/com/ebusiness/platform/config/DemoUserSeederTest.java",
+      "target": "identity-service/src/test/java/com/invoicepayments/identity/config/DemoUserSeederTest.java",
+      "sourceSha256": "1c590eac5e717fab1dffd4ef7673343b3a102296ab9311a2a2567de4f9e04f59"
+    },
+    {
+      "source": "backend/src/test/java/com/ebusiness/platform/config/LocalMonitoringSecurityConfigTest.java",
+      "target": "identity-service/src/test/java/com/invoicepayments/identity/config/LocalMonitoringSecurityConfigTest.java",
+      "sourceSha256": "028bf973fff827b279f38f3b7ca052216a5be1868b91c8c845616f4a2a7062d5"
+    },
+    {
+      "source": "api-gateway/src/main/java/com/ebusiness/gateway/ApiGatewayApplication.java",
+      "target": "api-gateway/src/main/java/com/invoicepayments/gateway/ApiGatewayApplication.java",
+      "sourceSha256": "b6c08560b6b6323d402381118e21cf7ef4b21c2008891dcfc3495ef9aab5aa06"
+    },
+    {
+      "source": "api-gateway/src/main/java/com/ebusiness/gateway/security/JwtAuthGatewayFilter.java",
+      "target": "api-gateway/src/main/java/com/invoicepayments/gateway/security/JwtAuthGatewayFilter.java",
+      "sourceSha256": "8c82390dc6b4fd47dc8f2c6a65e05164d9e3b9925781474235ccd784665b7122"
+    },
+    {
+      "source": "api-gateway/src/main/java/com/ebusiness/gateway/security/JwtService.java",
+      "target": "api-gateway/src/main/java/com/invoicepayments/gateway/security/JwtService.java",
+      "sourceSha256": "e5a787b23d0655c19b02c8d65c4607dd3fbbba5d440b72b49e382ed3d5d44221"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V1__billing_operations.sql",
+      "target": "billing-service/src/main/resources/db/billing/V1__billing_operations.sql",
+      "sourceSha256": "f64ce443c9d2ad0e1f7d1df1e48236e40e016e7c58da3b1d50a49b2f5633d67c"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V2__dead_letter_audit.sql",
+      "target": "billing-service/src/main/resources/db/billing/V2__dead_letter_audit.sql",
+      "sourceSha256": "d2636ddfad0027162865dec61e4a3eab303e927e033705102d3f619d470d695a"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V3__consumer_effect_idempotency.sql",
+      "target": "billing-service/src/main/resources/db/billing/V3__consumer_effect_idempotency.sql",
+      "sourceSha256": "b31908e2c205ac10814ca8e3bf4117994e0330f31cd3b0c7082190ae03942b9c"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V4__settlement_evidence.sql",
+      "target": "billing-service/src/main/resources/db/billing/V4__settlement_evidence.sql",
+      "sourceSha256": "66ea78821c4c46a3e7a0ff549d544724f404fde58b362a14bd8af47dfeb6d05f"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V5__safe_unsubmitted_cancellation.sql",
+      "target": "billing-service/src/main/resources/db/billing/V5__safe_unsubmitted_cancellation.sql",
+      "sourceSha256": "db0f29afe698edf6136f61d6f66cfdcd781bab302de7422b60a011b4944e827f"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V6__unique_bank_credit.sql",
+      "target": "billing-service/src/main/resources/db/billing/V6__unique_bank_credit.sql",
+      "sourceSha256": "d3161ce8d031c832add828331ff134d65f64652dd8c6cee1c49cf32e578f53f4"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V7__approved_refund_recovery_index.sql",
+      "target": "billing-service/src/main/resources/db/billing/V7__approved_refund_recovery_index.sql",
+      "sourceSha256": "0cf2725b0a8a899824a0e04cffcc0874a1edb6158dbcf6be9135da62858a204d"
+    },
+    {
+      "source": "payment-service/src/main/resources/db/billing/V8__preserve_bank_reference_case.sql",
+      "target": "billing-service/src/main/resources/db/billing/V8__preserve_bank_reference_case.sql",
+      "sourceSha256": "aadf87e2effe986ee35edefb8c5d5ab32a1ebde48f9e96f83dccb60bfea70ad6"
+    },
+    {
+      "source": "backend/src/main/resources/db/identity/V1__identity_users.sql",
+      "target": "identity-service/src/main/resources/db/identity/V1__identity_users.sql",
+      "sourceSha256": "04ff7e961ad7c7f58132f3c96e2b0ada5eb6a3d09f3c3504a2b6eb572dca1ac3"
+    },
+    {
+      "source": "payment-service/src/main/resources/application-billing.yml",
+      "target": "billing-service/src/main/resources/application-billing.yml",
+      "sourceSha256": "3f0a07cd59262ffb0037712212cae318a6a916abad8a075dd8f102ad2e5f495e"
+    },
+    {
+      "source": "payment-service/src/main/resources/application-local-observability.yml",
+      "target": "billing-service/src/main/resources/application-local-observability.yml",
+      "sourceSha256": "d36f43c2a984010993cb389177004bc388e9bd532bb091c15325cec70bc49d23"
+    },
+    {
+      "source": "payment-service/src/main/resources/application-prod.yml",
+      "target": "billing-service/src/main/resources/application-prod.yml",
+      "sourceSha256": "f15ce4f2b7538100700ef86d509c3d61e0d4de96d880bbbbda66a7a94612dcef"
+    },
+    {
+      "source": "backend/src/main/resources/application-billing.yml",
+      "target": "identity-service/src/main/resources/application-billing.yml",
+      "sourceSha256": "b6ab277b450e20301b15964caa6a5002285e6392cd534556ba5f9505ec48ee39"
+    },
+    {
+      "source": "backend/src/main/resources/application-local-observability.yml",
+      "target": "identity-service/src/main/resources/application-local-observability.yml",
+      "sourceSha256": "d36f43c2a984010993cb389177004bc388e9bd532bb091c15325cec70bc49d23"
+    },
+    {
+      "source": "api-gateway/src/main/resources/application-billing.yml",
+      "target": "api-gateway/src/main/resources/application-billing.yml",
+      "sourceSha256": "11406d92e8abac5911b4ca47581b887ce59fdf247639487092a6c95d7b9540e7"
+    },
+    {
+      "source": "api-gateway/src/main/resources/application-local-observability.yml",
+      "target": "api-gateway/src/main/resources/application-local-observability.yml",
+      "sourceSha256": "7411e717d77e63f5e5c1ca3b2db5d12c0d3b0f01466c1021029a79b07efcb776"
+    },
+    {
+      "source": "frontend/angular.json",
+      "target": "frontend/angular.json",
+      "sourceSha256": "195e3e8dfc8043b99a3e9c47c3c7781a9444d09f1487cbd7aa52221a0e8c619a"
+    },
+    {
+      "source": "frontend/package.json",
+      "target": "frontend/package.json",
+      "sourceSha256": "88347cc9e11e1946a70a4c0434c5d21fc1242cc8483ab72658546e7239ac27c5"
+    },
+    {
+      "source": "frontend/package-lock.json",
+      "target": "frontend/package-lock.json",
+      "sourceSha256": "a23c65e2d3154d834b5a31f7aae38e78f4a6d9038c86033a68fdd532e6c6d9db"
+    },
+    {
+      "source": "frontend/tsconfig.json",
+      "target": "frontend/tsconfig.json",
+      "sourceSha256": "a4810e927e51717b4811de61a9c61c7a903abbcb2862baa6aadc781cbf6f9ed0"
+    },
+    {
+      "source": "frontend/tsconfig.app.json",
+      "target": "frontend/tsconfig.app.json",
+      "sourceSha256": "ef0951130d6161f26968e606a4a5b7fa0b72d282e638bca68364fa154f9b7966"
+    },
+    {
+      "source": "frontend/tsconfig.spec.json",
+      "target": "frontend/tsconfig.spec.json",
+      "sourceSha256": "9b0620adcb42ef8500deee34709d053fedf51b673321f744ee28436735c98fd8"
+    },
+    {
+      "source": "frontend/.editorconfig",
+      "target": "frontend/.editorconfig",
+      "sourceSha256": "9da1d179fa691e796ec7cb26d719e2308a073594b7c7c77756d1ba4560e295be"
+    },
+    {
+      "source": "frontend/.prettierrc",
+      "target": "frontend/.prettierrc",
+      "sourceSha256": "7bbd911f1ad35a68fd6c04d83c101b4ab1d08c1f8008623c056a27070a735532"
+    },
+    {
+      "source": "frontend/Dockerfile",
+      "target": "frontend/Dockerfile",
+      "sourceSha256": "7e3469f9b9a3a3b80f67e0bcb57ee9e27dcca07b03572990ce97e6f7c6657785"
+    },
+    {
+      "source": "frontend/.dockerignore",
+      "target": "frontend/.dockerignore",
+      "sourceSha256": "f2acb17a737d20d53d62f376815fd9eaf3bea9026becb6c37e1af4f1343c0c4d"
+    },
+    {
+      "source": "frontend/nginx.conf",
+      "target": "frontend/nginx.conf",
+      "sourceSha256": "4677e127d2510c4f5ec1580d31e1a7ec3224e9a3f7f0af6fff1114ebfcbd4619"
+    },
+    {
+      "source": "frontend/proxy.conf.json",
+      "target": "frontend/proxy.conf.json",
+      "sourceSha256": "7360abb3025207f42116566b7e7cf9fded8cd1d2c05935ade31bf8136940d1f1"
+    },
+    {
+      "source": "frontend/src/app/billing/billing-api.ts",
+      "target": "frontend/src/app/billing/billing-api.ts",
+      "sourceSha256": "47923c7648ea95695f54a6d13635233fb411e206544345500b88155c997f9850"
+    },
+    {
+      "source": "frontend/src/app/billing/billing.scss",
+      "target": "frontend/src/app/billing/billing.scss",
+      "sourceSha256": "c2731d3d573021fe4f4249b617c34871f93d621fc96b61319fcc7e66eeaa5996"
+    },
+    {
+      "source": "frontend/src/app/billing/finance.spec.ts",
+      "target": "frontend/src/app/billing/finance.spec.ts",
+      "sourceSha256": "bbe0f9026ffd579fb5fa0e76f5de859ec04f1233c37dd764bbafd6273a4c5479"
+    },
+    {
+      "source": "frontend/src/app/billing/finance.ts",
+      "target": "frontend/src/app/billing/finance.ts",
+      "sourceSha256": "b7214dde313f1302dd05b4ff14139cf2b809b563c93747e4ead0af51395b2fed"
+    },
+    {
+      "source": "frontend/src/app/billing/invoices.html",
+      "target": "frontend/src/app/billing/invoices.html",
+      "sourceSha256": "aa891adfc99e304eed4c5f8845e0d1a5863360a74ef104b6d9b4df979118262d"
+    },
+    {
+      "source": "frontend/src/app/billing/invoices.spec.ts",
+      "target": "frontend/src/app/billing/invoices.spec.ts",
+      "sourceSha256": "c58344bb6ae247c6953de1396f0802f51900af9fa828013a75c443d2b4fbf6cb"
+    },
+    {
+      "source": "frontend/src/app/billing/invoices.ts",
+      "target": "frontend/src/app/billing/invoices.ts",
+      "sourceSha256": "d2a8a8ddb7d1e8c4a6bb092888f2d2c0f0a78e52a7e6261377ca44ae9919fd3b"
+    },
+    {
+      "source": "frontend/src/app/billing/reconciliation.spec.ts",
+      "target": "frontend/src/app/billing/reconciliation.spec.ts",
+      "sourceSha256": "2406d34a71622a225f00cbad4f2b68714b7bee77a1564ec1c4ec3b40bf7fcf49"
+    },
+    {
+      "source": "frontend/src/app/billing/reconciliation.ts",
+      "target": "frontend/src/app/billing/reconciliation.ts",
+      "sourceSha256": "b594b0150f3e7900dfc053648854e635656b002a4ae4048ea57868832dc2bacd"
+    },
+    {
+      "source": "frontend/src/app/login/login.html",
+      "target": "frontend/src/app/login/login.html",
+      "sourceSha256": "4143b80040f2a833969c87d7bbb573f28dde70a8788f54bc09feb5a3be98ed3c"
+    },
+    {
+      "source": "frontend/src/app/login/login.scss",
+      "target": "frontend/src/app/login/login.scss",
+      "sourceSha256": "f747fe780dd7b2681d7fc4335b4252555769714ccd00311b1843ad3645596c67"
+    },
+    {
+      "source": "frontend/src/app/login/login.ts",
+      "target": "frontend/src/app/login/login.ts",
+      "sourceSha256": "601873d27e7aec14f5aa3c2be1bf2759ec6c8c8aa64e51ef61e73ada8d577a73"
+    },
+    {
+      "source": "frontend/public/favicon.ico",
+      "target": "frontend/public/favicon.ico",
+      "sourceSha256": "f9102be80297c0529207607be5277b4f90bca89d65988fa1771b91c7894e815f"
+    },
+    {
+      "source": "frontend/src/styles.scss",
+      "target": "frontend/src/styles.scss",
+      "sourceSha256": "d3243cb824c30417ce516fa0c231ed56c0b8168c5bb5e3caa2a00b085d037511"
+    },
+    {
+      "source": "frontend/src/index.html",
+      "target": "frontend/src/index.html",
+      "sourceSha256": "cc55d9cb26897d5bd041d9091e6551c2423775a8c32185fb9f06aa4a71c8d724"
+    },
+    {
+      "source": "frontend/src/app/app.config.ts",
+      "target": "frontend/src/app/app.config.ts",
+      "sourceSha256": "03b295d38e956863d00000510acd608155489f2e3189d77f8560eff5c7c1c4a2"
+    },
+    {
+      "source": "frontend/src/app/app.scss",
+      "target": "frontend/src/app/app.scss",
+      "sourceSha256": "3c9ac50fc0c6ddde7d2d42215f292db894f0ec9e03555969c4b94641e99b997c"
+    },
+    {
+      "source": "frontend/src/app/shared/auth.service.ts",
+      "target": "frontend/src/app/shared/auth.service.ts",
+      "sourceSha256": "e781a8670a3aa84aaeb118d16d4018dfa5183d8792e55cf278790b385396b056"
+    },
+    {
+      "source": "frontend/src/app/shared/auth.guard.ts",
+      "target": "frontend/src/app/shared/auth.guard.ts",
+      "sourceSha256": "48ce8a31bb55f4286514fefdbb76e85bfc0fbe823e2b8a8bfec5fb2d8c56cc0f"
+    },
+    {
+      "source": "frontend/src/app/shared/auth.interceptor.ts",
+      "target": "frontend/src/app/shared/auth.interceptor.ts",
+      "sourceSha256": "dce7bc242f1b5f3dcf89c6017ecc680cf299bb3252869268985d3297b6232932"
+    },
+    {
+      "source": "frontend/src/app/shared/auth.interceptor.spec.ts",
+      "target": "frontend/src/app/shared/auth.interceptor.spec.ts",
+      "sourceSha256": "872e720102cfe54a8c1721b7fd1097ba37f77fdf870ae568243a853e07223f1d"
+    },
+    {
+      "source": "frontend/src/app/shared/message.service.ts",
+      "target": "frontend/src/app/shared/message.service.ts",
+      "sourceSha256": "9b73ece0166b7b23815eadb8e7bb6ce59f05499c1a58fb1809da090460b6a4b0"
+    },
+    {
+      "source": "frontend/src/app/shared/glass-message.ts",
+      "target": "frontend/src/app/shared/glass-message.ts",
+      "sourceSha256": "cc2528f6796342b39db39109890cce317d6ec2c434bdc40fac833fb5da3cd642"
+    },
+    {
+      "source": "frontend/src/app/shared/models.ts",
+      "target": "frontend/src/app/shared/models.ts",
+      "sourceSha256": "a39071c4cc51a7527885230ee3f4dce95b80380384bd832340bebf508af1fb68"
+    },
+    {
+      "source": "frontend/src/app/shared/utc-date.pipe.ts",
+      "target": "frontend/src/app/shared/utc-date.pipe.ts",
+      "sourceSha256": "1314dace574e69bfea440b2232cad536fca82ffbf25deb3a4cce865b76d71127"
+    },
+    {
+      "source": "monitoring/prometheus/billing.yml",
+      "target": "monitoring/prometheus/billing.yml",
+      "sourceSha256": "2c953046b3399453131268674e5d04584c34bf39a41d28e2c557cbce8ea26907"
+    },
+    {
+      "source": "monitoring/prometheus/billing-rules.yml",
+      "target": "monitoring/prometheus/billing-rules.yml",
+      "sourceSha256": "9c3f090e3c9f90b359daa1fef3b33f237fe3d08c0971e029d97ad22d8019ecb0"
+    },
+    {
+      "source": "monitoring/prometheus/billing-rules.test.yml",
+      "target": "monitoring/prometheus/billing-rules.test.yml",
+      "sourceSha256": "d5c63848c1a82ee69c2b7263160ae037c83ad18e0b41964484bb474277a703d8"
+    },
+    {
+      "source": "monitoring/prometheus/rules.yml",
+      "target": "monitoring/prometheus/rules.yml",
+      "sourceSha256": "0eb67c9682231da48e6836f795631f5f3628999eee2a55338b4f1924d6f34bdf"
+    },
+    {
+      "source": "monitoring/grafana/dashboards/billing-reference.json",
+      "target": "monitoring/grafana/dashboards/billing-reference.json",
+      "sourceSha256": "9d2b7b9613f6384643bc3ff34405775fc225b13fbeb18ac783f493e47883cfbb"
+    },
+    {
+      "source": "monitoring/grafana/provisioning/datasources/prometheus.yml",
+      "target": "monitoring/grafana/provisioning/datasources/prometheus.yml",
+      "sourceSha256": "18c28a270c81f264626807ff92df4a812fc80a7e5bc13fe765d888676aa15eea"
+    },
+    {
+      "source": "monitoring/grafana/provisioning/dashboards/ebusiness.yml",
+      "target": "monitoring/grafana/provisioning/dashboards/ebusiness.yml",
+      "sourceSha256": "ade5ed34270402dfa7037c48fbd1b67bfedbfa8464128a3c6f14f42a07209f0e"
+    },
+    {
+      "source": "infra/aws-billing/.terraform.lock.hcl",
+      "target": "infra/aws-billing/.terraform.lock.hcl",
+      "sourceSha256": "6bedf2d537bab4d1b1f5c22fc3df7201f8cda58ab717c78e113af11e01a33b0e"
+    },
+    {
+      "source": "infra/aws-billing/compute.tf",
+      "target": "infra/aws-billing/compute.tf",
+      "sourceSha256": "cff9ffbb2251eab15a724383bc4bb354d40e9d556a6c763101fc8ef5dc61db3f"
+    },
+    {
+      "source": "infra/aws-billing/data.tf",
+      "target": "infra/aws-billing/data.tf",
+      "sourceSha256": "2094ce9ba2b625d444754b29e0f1bc38d8d5eb76e28cbe194ff5e73c10ce6345"
+    },
+    {
+      "source": "infra/aws-billing/edge.tf",
+      "target": "infra/aws-billing/edge.tf",
+      "sourceSha256": "73b30d642ff4f143932242e8373d25dda60caa33496fb63c2875a2579b46d10b"
+    },
+    {
+      "source": "infra/aws-billing/network.tf",
+      "target": "infra/aws-billing/network.tf",
+      "sourceSha256": "2f23515eff2775ab65e069304e45201349521f26f9078ae2e75c8a35ff3ebf95"
+    },
+    {
+      "source": "infra/aws-billing/observability.tf",
+      "target": "infra/aws-billing/observability.tf",
+      "sourceSha256": "d1e07f5b6d6f6ed99c3cb7983a41c2a48ab54c71f847d700f86a555b87712d87"
+    },
+    {
+      "source": "infra/aws-billing/outputs.tf",
+      "target": "infra/aws-billing/outputs.tf",
+      "sourceSha256": "088f29ed3ffd5f77dbe97ecf023560d60955a41a3f61e7f7e7ec3778c82e9606"
+    },
+    {
+      "source": "infra/aws-billing/spa.js",
+      "target": "infra/aws-billing/spa.js",
+      "sourceSha256": "0c87b36e7513442016f8e89ae341faec2c4162294df5647f8cee6a6b34bf0651"
+    },
+    {
+      "source": "infra/aws-billing/terraform.tfvars.example",
+      "target": "infra/aws-billing/terraform.tfvars.example",
+      "sourceSha256": "f76f1fa17e51c508f285dc5f8dcc626dade7f698fed89d3a45a6995b81c00b13"
+    },
+    {
+      "source": "infra/aws-billing/variables.tf",
+      "target": "infra/aws-billing/variables.tf",
+      "sourceSha256": "31b42fad5f61e3f4181882dcf771cc3ec8585fbddb5dda5330e5a01caa3e5b00"
+    },
+    {
+      "source": "infra/aws-billing/versions.tf",
+      "target": "infra/aws-billing/versions.tf",
+      "sourceSha256": "0cf3a1805da38f5eb865736b3c92ed2f6fef6ccb8be63d95fda66819fa6b3d75"
+    },
+    {
+      "source": "infra/aws-billing/tests/backup-helper.tests.ps1",
+      "target": "infra/aws-billing/tests/backup-helper.tests.ps1",
+      "sourceSha256": "d1de5f38ccb97cfdfac2610d68959667eef0ea0b4ac26059218e5615b5631513"
+    },
+    {
+      "source": "infra/aws-billing/tests/security.tftest.hcl",
+      "target": "infra/aws-billing/tests/security.tftest.hcl",
+      "sourceSha256": "0e2926fbb346ddfdae207f06ae7fd733d6f94279e1b39f46a3836c54c80398df"
+    },
+    {
+      "source": "infra/aws-billing/tests/spa.test.cjs",
+      "target": "infra/aws-billing/tests/spa.test.cjs",
+      "sourceSha256": "101e8b53a74f65da55da711752cd25f69daa2e8e4f9d8f54b0ce7413bd6f7f43"
+    },
+    {
+      "source": "scripts/backup-billing.ps1",
+      "target": "scripts/backup-billing.ps1",
+      "sourceSha256": "c2afbe54b69bf54d3dfe3a794215af666061cbb7f17b4d65f5bd3b005f5d4b11"
+    },
+    {
+      "source": "docker-compose.billing.yml",
+      "target": "docker-compose.billing.yml",
+      "sourceSha256": "1c73dd9ddd48b5d67ca941f97cf43f94b2839b72568296c67c4426909b54e9c5"
+    },
+    {
+      "source": "scripts/start-billing.ps1",
+      "target": "scripts/start-billing.ps1",
+      "sourceSha256": "7f1e9362e8e35196369ce37ee38f800349f3aed6b9832b798f60d9838cd59205"
+    },
+    {
+      "source": "scripts/verify-billing.ps1",
+      "target": "scripts/verify-billing.ps1",
+      "sourceSha256": "b47c6598d6ab3c3ded2f9ba5f8593d0cb4c7c5a2a19900a9d9797ef83f41616d"
+    },
+    {
+      "source": "scripts/verify-billing-stack.ps1",
+      "target": "scripts/verify-billing-stack.ps1",
+      "sourceSha256": "05ce844294220f6257baef20aaa2e62405fc996ae023f8b8ca0dae52bb6300fd"
+    },
+    {
+      "source": "scripts/run-billing-lab.ps1",
+      "target": "scripts/run-billing-lab.ps1",
+      "sourceSha256": "96ab199ef17598ede4017b09389e5299db50acf8950080a47b708f90a8b25558"
+    }
+  ]
+}

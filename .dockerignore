@@ -1,0 +1,14 @@
+**/.git
+**/target
+**/node_modules
+**/dist
+**/.angular
+.env*
+.tmp-notes
+.maven-cache
+frontend
+docs
+infra
+monitoring
+scripts
+*.log

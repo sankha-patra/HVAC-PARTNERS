@@ -1,0 +1,287 @@
+@use '@angular/material' as mat;
+
+html {
+  color-scheme: light;
+  @include mat.theme((
+    color: (
+      theme-type: light,
+      primary: mat.$azure-palette,
+      tertiary: mat.$azure-palette
+    ),
+    typography: Roboto,
+    density: -1
+  ));
+  scrollbar-gutter: stable;
+}
+
+:root {
+  --mat-sys-primary: #111111;
+  --mat-sys-on-primary: #ffffff;
+  --mat-sys-secondary: #333333;
+  --mat-sys-on-secondary: #ffffff;
+  --mat-sys-surface: #ffffff;
+  --mat-sys-on-surface: #111111;
+  --mat-sys-surface-container: #f7f7f7;
+  --mat-sys-outline: #d6d6d6;
+  --app-radius: 14px;
+  --app-font: 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif;
+  --app-font-display: 'Plus Jakarta Sans', 'Inter', 'Segoe UI', sans-serif;
+  --frost-blue: #cceef8;
+  --frost-blue-deep: #7eb8e0;
+  --frost-blue-mid: #acd5f3;
+  --navy: #0d3b66;
+  --card-bg: #ffffff;
+  --card-border: #e5e5e5;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  font-family: var(--app-font);
+  font-size: 15px;
+  line-height: 1.45;
+  background: #ffffff;
+  color: #111;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+h1, h2, h3, .mat-mdc-card-title {
+  font-family: var(--app-font-display);
+  letter-spacing: -0.02em;
+}
+
+code {
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  background: #efefef;
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+  font-size: 0.86em;
+}
+
+.page-card.mat-mdc-card,
+.product-card.mat-mdc-card {
+  position: relative;
+  --mdc-elevated-card-container-color: var(--card-bg);
+  --mdc-outlined-card-container-color: var(--card-bg);
+  --mdc-outlined-card-outline-color: transparent;
+  background: var(--card-bg) !important;
+  border: 1px solid var(--card-border) !important;
+  box-shadow: none !important;
+  border-radius: var(--app-radius) !important;
+  overflow: hidden;
+}
+
+.page-card.mat-mdc-card::after,
+.product-card.mat-mdc-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(
+    120deg,
+    var(--frost-blue),
+    var(--frost-blue-mid),
+    var(--frost-blue-deep),
+    var(--frost-blue),
+    var(--frost-blue-mid)
+  );
+  background-size: 300% 300%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.25s ease;
+}
+
+.page-card.mat-mdc-card:hover::after,
+.product-card.mat-mdc-card:hover::after {
+  opacity: 1;
+  animation: liquid-border 2.8s linear infinite;
+}
+
+@keyframes liquid-border {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+/* Shared liquid-glass panel (login + message popup) */
+.glass-panel {
+  position: relative;
+  background: rgba(255, 255, 255, 0.82) !important;
+  border: 1px solid rgba(255, 255, 255, 0.65) !important;
+  border-radius: var(--app-radius, 14px) !important;
+  box-shadow: 0 16px 48px rgba(13, 59, 102, 0.12) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  overflow: hidden;
+}
+
+.glass-panel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(
+    120deg,
+    var(--frost-blue),
+    var(--frost-blue-mid),
+    var(--frost-blue-deep),
+    var(--frost-blue),
+    var(--frost-blue-mid)
+  );
+  background-size: 300% 300%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: liquid-border 2.8s linear infinite;
+  pointer-events: none;
+}
+
+/* Shared liquid border used by nav + all app buttons */
+.liquid-border-layer {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(
+    120deg,
+    var(--frost-blue),
+    var(--frost-blue-mid),
+    var(--frost-blue-deep),
+    var(--frost-blue),
+    var(--frost-blue-mid)
+  );
+  background-size: 300% 300%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.25s ease;
+}
+
+.mat-mdc-form-field {
+  --mdc-outlined-text-field-outline-color: rgba(13, 59, 102, 0.22);
+  --mdc-outlined-text-field-hover-outline-color: rgba(13, 59, 102, 0.4);
+}
+
+/* ---- Uniform buttons (match navbar liquid pills) ---- */
+.mat-mdc-button,
+.mat-mdc-outlined-button,
+.mat-mdc-unelevated-button,
+.mat-mdc-raised-button {
+  position: relative !important;
+  overflow: hidden !important;
+  border-radius: 999px !important;
+  font-family: var(--app-font) !important;
+  font-weight: 500 !important;
+  letter-spacing: 0 !important;
+  min-height: 36px !important;
+  line-height: 36px !important;
+  padding: 0 1rem !important;
+  transition: background 0.2s ease, color 0.2s ease !important;
+  box-shadow: none !important;
+}
+
+.mat-mdc-button::after,
+.mat-mdc-outlined-button::after,
+.mat-mdc-unelevated-button::after,
+.mat-mdc-raised-button::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(
+    120deg,
+    var(--frost-blue),
+    var(--frost-blue-mid),
+    var(--frost-blue-deep),
+    var(--frost-blue),
+    var(--frost-blue-mid)
+  );
+  background-size: 300% 300%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.25s ease;
+}
+
+.mat-mdc-button:hover:not(:disabled)::after,
+.mat-mdc-outlined-button:hover:not(:disabled)::after,
+.mat-mdc-unelevated-button:hover:not(:disabled)::after,
+.mat-mdc-raised-button:hover:not(:disabled)::after,
+.mat-mdc-button:focus-visible::after,
+.mat-mdc-outlined-button:focus-visible::after,
+.mat-mdc-unelevated-button:focus-visible::after {
+  opacity: 1;
+  animation: liquid-border 2.8s linear infinite;
+}
+
+/* Page buttons: ice blue like navbar, navy on hover (nav pills excluded) */
+.mat-mdc-button:not(.nav-pill),
+.mat-mdc-outlined-button,
+.mat-mdc-unelevated-button,
+.mat-mdc-raised-button,
+.mat-mdc-unelevated-button.mat-primary {
+  color: var(--navy) !important;
+  background: var(--frost-blue) !important;
+  border: 1px solid transparent !important;
+}
+
+.mat-mdc-button:not(.nav-pill):hover:not(:disabled),
+.mat-mdc-outlined-button:hover:not(:disabled),
+.mat-mdc-unelevated-button:hover:not(:disabled),
+.mat-mdc-raised-button:hover:not(:disabled),
+.mat-mdc-unelevated-button.mat-primary:hover:not(:disabled) {
+  background: var(--navy) !important;
+  color: #fff !important;
+}
+
+.mat-mdc-button:disabled,
+.mat-mdc-outlined-button:disabled,
+.mat-mdc-unelevated-button:disabled {
+  opacity: 0.45 !important;
+}
+
+.mat-mdc-button .mdc-button__label,
+.mat-mdc-outlined-button .mdc-button__label,
+.mat-mdc-unelevated-button .mdc-button__label {
+  position: relative;
+  z-index: 1;
+}
+
+.mat-mdc-snack-bar-container.payment-success-snack {
+  --mdc-snackbar-container-color: var(--navy);
+  --mdc-snackbar-supporting-text-color: #fff;
+  border-radius: 12px !important;
+}

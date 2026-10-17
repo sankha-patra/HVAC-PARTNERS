@@ -1,0 +1,22 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: api-gateway
+  profiles:
+    default: billing
+app:
+  jwt:
+    secret: ${APP_JWT_SECRET:}
+management:
+  server:
+    port: 9090
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never

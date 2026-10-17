@@ -1,0 +1,27 @@
+@if (msg(); as m) {
+  <div class="glass-layer" role="presentation">
+    <div class="glass-scrim" (click)="dismiss()"></div>
+    <div
+      class="glass-panel glass-dialog"
+      [class.tone-success]="m.tone === 'success'"
+      [class.tone-error]="m.tone === 'error'"
+      role="dialog"
+      aria-modal="true"
+      aria-live="polite"
+      (click)="$event.stopPropagation()"
+    >
+      <h2 class="glass-title">{{ m.title }}</h2>
+      <p class="glass-body">{{ m.body }}</p>
+      @if (m.details) {
+        <ul class="glass-details">
+          @for (entry of detailsEntries(m.details); track entry[0]) {
+            <li><strong>{{ entry[0] }}:</strong> {{ entry[1] }}</li>
+          }
+        </ul>
+      }
+      <button mat-flat-button type="button" class="glass-btn" (click)="dismiss()">
+        {{ m.actionLabel || 'OK' }}
+      </button>
+    </div>
+  </div>
+}

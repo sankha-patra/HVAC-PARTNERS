@@ -1,0 +1,58 @@
+# New financial workflow owns only the versioned billing schema.
+spring:
+  flyway:
+    enabled: true
+    default-schema: billing
+    schemas: billing
+    locations: classpath:db/billing
+    clean-disabled: true
+  jpa:
+    show-sql: false
+    hibernate:
+      ddl-auto: none
+  cache:
+    type: none
+app:
+  jwt:
+    ttl-seconds: 900
+    cookie-secure: ${APP_JWT_COOKIE_SECURE:false}
+  internal:
+    token: ""
+server:
+  error:
+    include-message: never
+    include-binding-errors: never
+    include-stacktrace: never
+    include-exception: false
+logging:
+  level:
+    com.invoicepayments.billing: INFO
+    org.hibernate.SQL: "OFF"
+    org.hibernate.orm.jdbc.bind: "OFF"
+    org.hibernate.type.descriptor.sql.BasicBinder: "OFF"
+billing:
+  enabled: true
+  provider: ${BILLING_PROVIDER:SIMULATOR}
+  simulator-enabled: ${BILLING_SIMULATOR_ENABLED:false}
+  demo-enabled: ${BILLING_DEMO_ENABLED:false}
+  erp-simulator-enabled: ${BILLING_ERP_SIMULATOR_ENABLED:false}
+  public-url: ${BILLING_PUBLIC_URL:http://localhost:4200}
+  workers-enabled: ${BILLING_WORKERS_ENABLED:true}
+  outbox-interval-ms: ${BILLING_OUTBOX_INTERVAL_MS:100}
+  events-topic: billing.events.v1
+  kafka-enabled: ${BILLING_KAFKA_ENABLED:true}
+  stripe:
+    secret-key: ${BILLING_STRIPE_SECRET_KEY:}
+    webhook-secret: ${BILLING_STRIPE_WEBHOOK_SECRET:}
+  provider-merchant-id: ${BILLING_PROVIDER_MERCHANT_ID:10000000-0000-0000-0000-000000000001}
+management:
+  server:
+    port: 9090
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db

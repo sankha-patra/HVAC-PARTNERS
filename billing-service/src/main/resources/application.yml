@@ -1,0 +1,26 @@
+server:
+  port: 8084
+spring:
+  application:
+    name: billing-service
+  profiles:
+    default: billing
+  main:
+    web-application-type: servlet
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:127.0.0.1:9092}
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://127.0.0.1:5432/invoice_payments}
+    username: ${SPRING_DATASOURCE_USERNAME:invoice_local}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 2
+      connection-timeout: 30000
+app:
+  jwt:
+    secret: ${APP_JWT_SECRET:}
+    ttl-seconds: 900
+    cookie-secure: ${APP_JWT_COOKIE_SECURE:false}
+  internal:
+    token: ""

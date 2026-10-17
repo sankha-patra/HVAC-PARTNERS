@@ -1,0 +1,40 @@
+# Activate with SPRING_PROFILES_ACTIVE=prod. Laptop Compose must not use this profile.
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP}
+    properties:
+      security.protocol: SASL_SSL
+      sasl.mechanism: AWS_MSK_IAM
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        linger.ms: 5
+        batch.size: 32768
+        compression.type: snappy
+
+kafka:
+  topic:
+    partitions: 12
+    replicas: 3
+    min-insync-replicas: 2
+
+
+management:
+  tracing:
+    sampling:
+      probability: 0.1
+  health:
+  endpoint:
+    health:
+      show-details: when_authorized
+
+logging:
+  level:
+    com.invoicepayments.billing: INFO
+    org.springframework.kafka: WARN
+    org.hibernate.SQL: WARN

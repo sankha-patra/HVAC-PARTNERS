@@ -1,0 +1,287 @@
+{
+  "title": "Billing â€” collections and recovery",
+  "tags": [
+    "billing",
+    "reference"
+  ],
+  "timezone": "browser",
+  "uid": "billing-reference",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "editable": false,
+  "panels": [
+    {
+      "options": {
+        "mode": "markdown",
+        "content": "Capture, invoice allocation, ERP posting, and bank settlement are separate records. PROCESSING/REQUIRES_ACTION can be normal for ACH. The API latency graph measures HTTP responses, not time until a bank payment settles. Missing data is not zero. Example alert thresholds are local settings, not production SLOs. These aggregate metrics contain no payment or customer identifiers."
+      },
+      "title": "US B2B collections â€” local reference",
+      "gridPos": {
+        "h": 4,
+        "x": 0,
+        "w": 24,
+        "y": 0
+      },
+      "id": 99,
+      "type": "text"
+    },
+    {
+      "title": "Payments awaiting an outcome",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 0,
+        "w": 8,
+        "y": 4.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "billing_payments_unresolved"
+        }
+      ],
+      "id": 1,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Oldest awaiting outcome (ACH may legitimately take days)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 8,
+        "w": 8,
+        "y": 4.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "billing_payments_oldest_unresolved_seconds"
+        }
+      ],
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Webhooks needing review",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 16,
+        "w": 8,
+        "y": 4.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "billing_webhooks_unmatched"
+        }
+      ],
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Unpublished outbox events",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 0,
+        "w": 8,
+        "y": 12.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "billing_outbox_pending"
+        }
+      ],
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Oldest unpublished event",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 8,
+        "w": 8,
+        "y": 12.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "billing_outbox_oldest_seconds"
+        }
+      ],
+      "id": 5,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Open finance cases",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 16,
+        "w": 8,
+        "y": 12.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "billing_cases_open"
+        }
+      ],
+      "id": 6,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Dead letters awaiting recovery",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 0,
+        "w": 8,
+        "y": 20.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "billing_deadletters_open"
+        }
+      ],
+      "id": 7,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Billing API request rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 8,
+        "w": 8,
+        "y": 20.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"invoice-payments\",service=\"billing-service\",uri=~\"/api/v1/billing.*\"}[5m]))"
+        }
+      ],
+      "id": 8,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Billing API p95 response time",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "x": 16,
+        "w": 8,
+        "y": 20.0
+      },
+      "targets": [
+        {
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by(le) (rate(http_server_requests_seconds_bucket{job=\"invoice-payments\",service=\"billing-service\",uri=~\"/api/v1/billing.*\"}[5m])))"
+        }
+      ],
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "invoice-payments-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "description": "Aggregate business signals for the standalone billing reference"
+}

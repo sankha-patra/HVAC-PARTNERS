@@ -1,0 +1,87 @@
+import { Injectable, inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { environment } from '../../environments/environment';
+
+export type PaymentMethod = 'CARD' | 'ACH';
+export type SimulationOutcome = 'CAPTURED' | 'FAILED' | 'PROCESSING' | 'RETURNED' | 'TIMEOUT_AFTER_ACCEPT';
+export interface BillingAccount { id: string; name: string; merchantId: string; role: string; }
+export interface Invoice {
+  id: string; number: string; currency: string; totalMinor: number; paidMinor: number;
+  reservedMinor: number; status: string; dueDate: string;
+}
+export interface BillingIntent {
+  id: string; accountId: string; currency: string; amountMinor: number; status: string;
+  provider: string; simulatorEnabled?: boolean; checkoutUrl?: string; message?: string;
+  method?: PaymentMethod;
+  createdAt?: string;
+  allocations?: { invoiceId: string; amountMinor: number; state: string }[];
+  timeline?: { type: string; at: string; message: string }[];
+}
+export interface FinanceCase { id: string; intentId: string; reason: string; status: string; createdAt: string; }
+export interface FinancePayment {
+  id: string; accountId: string; merchantId: string; accountName: string; amountMinor: number; refundedMinor: number;
+  availableRefundMinor: number; currency: string; status: string; method: PaymentMethod; createdAt: string;
+  canRequestRefund: boolean;
+  provider?: string;
+}
+export interface FinanceRefund {
+  id: string; intentId: string; amountMinor: number; reason: string; requestedBy: string;
+  approvedBy?: string; status: string; createdAt: string; canApprove?: boolean;
+  provider?: string;
+}
+export interface FinanceMerchant { id: string; name: string; canImport: boolean; canConfirm: boolean; }
+export interface SettlementReport {
+  id: string; merchantId: string; currency: string; externalId: string; source: string;
+  grossMinor: number; feeMinor: number; netMinor: number; bankReference: string; status: string;
+  createdAt: string; canConfirm: boolean; paymentIds: string[];
+}
+export interface SettlementLine { intentId: string; amountMinor: number; }
+export interface SettlementImport {
+  merchantId: string; externalId: string; source: 'SIMULATOR' | 'PROVIDER'; grossMinor: number;
+  feeMinor: number; netMinor: number; bankReference: string; lines: SettlementLine[];
+}
+export interface BankCreditConfirmation { bankReference: string; amountMinor: number; evidenceHash: string; }
+export interface IntentRequest { invoiceIds: string[]; method: PaymentMethod; }
+
+@Injectable({ providedIn: 'root' })
+export class BillingApi {
+  private readonly http = inject(HttpClient);
+  private readonly base = `${environment.apiUrl}/billing`;
+
+  accounts() { return this.http.get<BillingAccount[]>(`${this.base}/accounts`); }
+  invoices(accountId: string) {
+    return this.http.get<Invoice[]>(`${this.base}/accounts/${encodeURIComponent(accountId)}/invoices`);
+  }
+  create(accountId: string, request: IntentRequest, key: string) {
+    return this.http.post<BillingIntent>(`${this.base}/accounts/${encodeURIComponent(accountId)}/intents`, request,
+      { headers: { 'Idempotency-Key': key } });
+  }
+  intent(id: string) { return this.http.get<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}`); }
+  history(accountId: string) {
+    return this.http.get<BillingIntent[]>(`${this.base}/accounts/${encodeURIComponent(accountId)}/intents`);
+  }
+  submit(id: string) { return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}/submit`, {}); }
+  cancel(id: string) { return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}/cancel`, {}); }
+  receiptUrl(id: string) { return `${this.base}/intents/${encodeURIComponent(id)}/receipt`; }
+  simulate(id: string, outcome: SimulationOutcome) {
+    return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}/simulate`, { outcome });
+  }
+  cases() { return this.http.get<FinanceCase[]>(`${this.base}/finance/cases`); }
+  financePayments() { return this.http.get<FinancePayment[]>(`${this.base}/finance/payments`); }
+  refunds() { return this.http.get<FinanceRefund[]>(`${this.base}/finance/refunds`); }
+  requestRefund(intentId: string, body: { amountMinor: number; reason: string }, key: string) {
+    return this.http.post<FinanceRefund>(`${this.base}/finance/intents/${encodeURIComponent(intentId)}/refunds`, body,
+      { headers: { 'Idempotency-Key': key } });
+  }
+  approveRefund(refundId: string) {
+    return this.http.post<FinanceRefund>(`${this.base}/finance/refunds/${encodeURIComponent(refundId)}/approve`, {});
+  }
+  reconciliationMerchants() { return this.http.get<FinanceMerchant[]>(`${this.base}/finance/merchants`); }
+  settlements() { return this.http.get<SettlementReport[]>(`${this.base}/finance/settlements`); }
+  importSettlement(body: SettlementImport) {
+    return this.http.post<{ id: string; externalId: string; source: string; state: string }>(`${this.base}/finance/reconciliation/import`, body);
+  }
+  confirmBankCredit(reportId: string, body: BankCreditConfirmation) {
+    return this.http.post<SettlementReport>(`${this.base}/finance/settlements/${encodeURIComponent(reportId)}/bank-confirmation`, body);
+  }
+}

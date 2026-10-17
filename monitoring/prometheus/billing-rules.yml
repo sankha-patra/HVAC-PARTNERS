@@ -1,0 +1,24 @@
+groups:
+  - name: billing-business-alerts
+    rules:
+      - alert: BillingWebhookNeedsMatching
+        expr: billing_webhooks_unmatched > 0
+        for: 2m
+        labels: {severity: warning, environment: local}
+        annotations:
+          summary: Authenticated payment evidence needs matching or finance review
+          description: Open the finance exception queue; do not discard the inbox record or overwrite a payment status.
+      - alert: BillingOutboxNotDraining
+        expr: billing_outbox_oldest_seconds > 60
+        for: 3m
+        labels: {severity: warning, environment: local}
+        annotations:
+          summary: Committed billing events are not reaching Kafka promptly
+          description: Check Kafka availability and publisher retries. Retain the outbox; duplicate delivery is safe for idempotent consumers.
+      - alert: BillingDeadLetterNeedsReview
+        expr: billing_deadletters_open > 0
+        for: 2m
+        labels: {severity: warning, environment: local}
+        annotations:
+          summary: Billing events require audited recovery
+          description: Inspect the cause before replay. Operations may replay validated original events; malformed source data requires correction at its owner.
