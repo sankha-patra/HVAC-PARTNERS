@@ -163,9 +163,11 @@ try{
             $result=Query $metric
             if(@($result.data.result).Count -ne 1 -or $result.data.result[0].value[1] -in @('NaN','+Inf','-Inf')){throw "Business metric unavailable: $metric"}
         }
-        $rules=Invoke-RestMethod -Uri "$prom/api/v1/rules" -TimeoutSec 8
-        $stuckRules=@($rules.data.groups | ForEach-Object {$_.rules} | Where-Object {$_.name -ceq 'BillingPaymentStuck'})
-        if($stuckRules.Count -ne 1 -or $stuckRules[0].health -cne 'ok'){throw 'Stuck-payment alert rule is missing or unhealthy'}
+        $null=Wait-For 'reloaded stuck-payment alert rule completes a healthy evaluation' {
+            $rules=Invoke-RestMethod -Uri "$prom/api/v1/rules" -TimeoutSec 8
+            $stuckRules=@($rules.data.groups | ForEach-Object {$_.rules} | Where-Object {$_.name -ceq 'BillingPaymentStuck'})
+            $stuckRules.Count -eq 1 -and $stuckRules[0].health -ceq 'ok'
+        } 60
         'Angular bundle -> nginx -> gateway -> identity and billing; cookie session and private metrics targets healthy'
     }
     if($Quick){
