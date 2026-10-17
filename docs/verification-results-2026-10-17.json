@@ -149,11 +149,50 @@
     "deployed": false
   },
   "runtimeSmoke": {
-    "completedChecks": 0,
-    "status": "INCOMPLETE",
-    "dockerEngineAvailableAfterFailure": false,
-    "cause": "Not established",
-    "billingExitCode": 137,
-    "evidence": ".tmp-notes/billing-stack/20261017T124640005Z/report.json"
+    "status": "PASS",
+    "completedChecks": 3,
+    "startedUtc": "2026-10-17T13:03:32.3560238Z",
+    "finishedUtc": "2026-10-17T13:04:02.8613891Z",
+    "evidence": ".tmp-notes/billing-stack/20261017T130332320Z/report.json",
+    "checks": [
+      {
+        "name": "Full stack, browser assets, identity, CSRF and customer API",
+        "status": "PASS",
+        "seconds": 13.893,
+        "evidence": "Angular bundle -> nginx -> gateway -> identity and billing; cookie session and private metrics targets healthy"
+      },
+      {
+        "name": "Simulated capture reaches Kafka and ERP exactly once",
+        "status": "PASS",
+        "seconds": 9.591,
+        "evidence": {
+          "integrity": "Balanced journals, valid invoice balances, no duplicate ERP effect",
+          "journals": 1,
+          "kafkaDeliverySeconds": 2.642,
+          "erpPostings": 1,
+          "intent": "f5d510d4-8b02-421b-b1c2-5d4c05b34dc0"
+        }
+      },
+      {
+        "name": "Provisioned Grafana dashboard queries live Prometheus data",
+        "status": "PASS",
+        "seconds": 1.572,
+        "evidence": {
+          "queryCount": 9,
+          "datasource": "OK",
+          "outboxPending": 0,
+          "dashboardUid": "billing-reference"
+        }
+      }
+    ],
+    "scope": "Source-extraction smoke: real local stack and Kafka, simulated payment/ERP, live dashboard queries. No restart, outage, alert-firing or backup-restoration drill in this mode.",
+    "priorAttempt": {
+      "completedChecks": 0,
+      "status": "INCOMPLETE",
+      "dockerEngineAvailableAfterFailure": false,
+      "cause": "Not established",
+      "billingExitCode": 137,
+      "evidence": ".tmp-notes/billing-stack/20261017T124640005Z/report.json"
+    }
   }
 }
