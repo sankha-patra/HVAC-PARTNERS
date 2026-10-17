@@ -1,0 +1,1 @@
+CREATE DATABASE invoice_payments_simulation_test OWNER billing_test;

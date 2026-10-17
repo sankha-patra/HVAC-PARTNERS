@@ -34,8 +34,15 @@ foreach($check in @(@{Module='identity-service';Tests=$identityTests},@{Module='
     $arguments+=@('-f',(Join-Path $projectRoot "$($check.Module)/pom.xml"),"-Dtest=$($check.Tests)",'test')
     Write-Host "$($check.Module): $($check.Tests)"
     if(!$ListOnly) {
+        $startedUtc=[DateTime]::UtcNow
         & $Maven @arguments
         if($LASTEXITCODE -ne 0) {throw "$($check.Module) billing checks failed"}
+        foreach($test in $check.Tests.Split(',')) {
+            $reports=@(Get-ChildItem -LiteralPath (Join-Path $projectRoot "$($check.Module)/target/surefire-reports") -Filter "TEST-*.$test.xml")
+            if($reports.Count -ne 1 -or $reports[0].LastWriteTimeUtc -lt $startedUtc){throw "Missing fresh report for $test; process exit alone is not proof of success"}
+            [xml]$report=Get-Content -LiteralPath $reports[0].FullName -Raw
+            if([int]$report.testsuite.tests -lt 1 -or [int]$report.testsuite.failures -ne 0 -or [int]$report.testsuite.errors -ne 0 -or [int]$report.testsuite.skipped -ne 0){throw "Incomplete or failed test report: $test"}
+        }
     }
 }
 if(!$SkipFrontend) {

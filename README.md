@@ -33,6 +33,14 @@ npm test -- --watch=false
 npm run build
 ```
 
+For a complete Java/database/Kafka/synthetic-network suite with no host Java or PostgreSQL setup:
+
+```powershell
+./scripts/verify-container-tests.ps1
+```
+
+This builds a dedicated verification image, creates two disposable PostgreSQL databases inside Docker, and collects JUnit and synthetic lab reports under ignored `.tmp-notes/container-tests/`. It publishes no database ports and removes only its own test containers. Its fixed test password is a public fixture for these isolated, ephemeral databases.
+
 `scripts/verify-billing.ps1` runs the curated service and Angular checks. Add `-Online` for a first Maven dependency download. Database checks require `-WithDatabase` and the exact disposable PostgreSQL database `invoice_payments_test` on port 15432, role `billing_test`, with `BILLING_TEST_JDBC_URL`, `BILLING_TEST_DB_USER` and `BILLING_TEST_DB_PASSWORD` set. They reset test tables. The separate synthetic network/load lab uses `invoice_payments_simulation_test` and the corresponding `BILLING_LAB_*` variables; run `scripts/run-billing-lab.ps1 -Online`. These are development checks, not production capacity measurements.
 
 Run `scripts/check-repository.ps1` to verify repository boundaries and migration hashes. Add `-CheckArtifacts` after packaging to inspect the three executable JARs for legacy code and dependencies.
