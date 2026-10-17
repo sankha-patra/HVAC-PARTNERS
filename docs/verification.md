@@ -1,29 +1,95 @@
 # Verification of the extracted repository
 
-Executed on 17 October 2026. These results belong to the independent source extraction. Raw transcripts, local secrets and temporary data are excluded from Git. The sanitized [result manifest](verification-results-2026-10-17.json) records individual Java suites.
+## Current outbox and alert fixes — 17 October 2026
+
+Verified code commit: [`bdbb284ed080`](https://github.com/sankha-patra/HVAC-PARTNERS/commit/bdbb284ed080756acbb1c3fd0309ea123c9c05e6).
+The full drill ran against a clean working tree at that commit and recorded hashes
+of the publisher, Kafka configuration, metrics, simulator, V9/V10, alert rules and
+runner. Each hash was checked against the Git blob before this report was written.
+The subsequent documentation commit does not change the tested application code.
 
 | Check | Result |
 | --- | --- |
-| Fresh local clone: package all three Java modules | PASS |
-| Independent Git/source boundary and packaged JAR audit | PASS; no legacy runtime classes or libraries |
-| Preserved migration hashes | PASS; nine unchanged SQL files |
-| Complete Docker Java suite | 181 passed; zero failures, errors or skipped tests, across 15 classes |
-| Financial database invariants | 53 of the 181 tests |
-| Embedded three-broker Kafka transport | Four of the 181 tests |
-| Synthetic PSP/bank/ERP network and bounded-load scenarios | Seven of the 181 tests |
-| Angular tests and optimized build | 39 passed; build passed |
-| Extracted Terraform configuration | Validation and both mocked plan scenarios passed; no AWS deployment |
-| AWS backup helper and SPA function | Four mocked backup boundary checks and five route checks passed |
-| Extracted application stack integration smoke | PASS; all three checks passed against the independently built running stack |
+| Complete Java suite | 210 passed; zero failures, errors or skips; 16 classes |
+| Financial database tests | 78 of the 210 |
+| Identity tests | 25 of the 210 |
+| Real embedded three-broker Kafka transport and DLT | 4 of the 210 |
+| Producer safety settings independent of production YAML | 4 of the 210 |
+| Synthetic network and bounded-load scenarios | 7 of the 210 |
+| Eight pending Kafka sends with a one-connection Hikari pool | PASS; no borrowed connection or transaction during broker waits; outbox rows remained lockable |
+| Poison event, attempt budget, expired owner and audit-write failure | PASS; durable quarantine, successor release, fenced updates and rollback on failed audit |
+| Prometheus rule tests | PASS; grace, firing, resolution and transient-spike cases |
+| Source separation and nine preserved migration hashes | PASS |
+| Full seven-check recovery drill after V9 and V10 | PASS; rebuilt application images; no Quick flag |
 
-The Java suite ran inside a disposable Maven verification container sharing a loopback network with its own PostgreSQL 17.11 test container. It did not use the application databases or the host Windows PostgreSQL installation. Initial Windows-native runs stalled during connection setup; interrupted/incomplete runs are not counted as passing. Native verification now requires a fresh, passing JUnit report for every requested class. A clean-clone packaging check reused downloaded public Maven dependencies; no old application source or compiled JARs were supplied.
+| Full drill check | Result |
+| --- | --- |
+| Full stack, browser assets, identity, CSRF and customer API | PASS |
+| Background payment recovery survives an abrupt application restart | PASS |
+| Kafka outage retains outbox, fires a real alert and drains after restart | PASS |
+| Application outage fires and resolves the scrape alert | PASS |
+| Database outage rejects writes and recovery preserves committed money | PASS |
+| Logical backup restores every identity and billing table into a separate database | PASS |
+| Provisioned Grafana dashboard queries live Prometheus data | PASS |
 
-The frontend tests/build ran on the extracted frontend with a fresh `npm ci`. Its runtime Docker image was also built independently from the new repository. The original app's earlier results are not being relabeled as results of this repository.
+Sanitized, shareable evidence: [verification manifest](outbox-verification-2026-10-17.json).
+Raw JUnit evidence stays in ignored `.tmp-notes/container-tests/20261017T155048291Z`;
+the full drill report and local backup stay in ignored `.tmp-notes/billing-stack/20261017T162933603Z`.
+Do not publish local secrets, backups or identity data.
 
-The complete seven-check failure/recovery runner is retained in `scripts/verify-billing-stack.ps1`. Its full mode exercises abrupt application restart, broker interruption, actual alert firing and resolution, database interruption, idempotent recovery, and logical backup/restoration with table comparisons and a restored application boot. That longer full mode was not rerun after extraction. `-Quick` is separately labeled integration smoke coverage and cannot establish those recovery results.
+The Java rerun compiled the current billing source mounted read-only into the
+cached verification runtime, against fresh disposable PostgreSQL databases. The
+application images were rebuilt from `7f3c11e3e977`. The final full drill
+reused those images with `-SkipBuild` because only the runner's test-session renewal
+changed; the application/build-source trees were checked identical between that
+build and the verified commit. The tests did not use host PostgreSQL.
 
-No live PSP, bank, ERP, AWS runtime, production traffic, multi-host failover or PITR was tested. Local tests do not certify production readiness, latency, capacity or recovery objectives.
+To reproduce from a fresh checkout:
 
-The resumed integration smoke check passed at 10/17/2026 13:04:02. Evidence: .tmp-notes/billing-stack/20261017T130332320Z/report.json. It verified the Angular bundle through nginx, gateway, identity and billing; cookie authentication and CSRF; all three private Prometheus scrape targets; a simulated capture delivered through real Kafka to exactly one ERP posting; balanced journals and valid invoice balances; and 9 provisioned Grafana queries against live Prometheus data. The outbox drained to zero. These are API and asset-delivery checks, not visual browser acceptance.
+```powershell
+./scripts/verify-container-tests.ps1
+./scripts/start-billing.ps1 -ValidateOnly
+./scripts/verify-billing-stack.ps1
+```
 
-The earlier attempt at .tmp-notes/billing-stack/20261017T124640005Z/report.json failed before executing integration checks: billing exited with code 137 and Docker subsequently became unavailable. Its cause was not established. After Docker was restarted, the existing independent stack became healthy and the resumed check above passed without rebuilding or repeating the completed Java/frontend suites. This smoke result does not establish restart, outage, alert-firing or backup-restoration coverage after extraction.
+The full drill intentionally stops its own labeled services. Quick mode covers
+only three integration checks and cannot establish outage or restore results.
+The drill uses app http://localhost:4500, Grafana http://localhost:3300 and
+Prometheus http://localhost:9390. It reloads current monitoring rules and checks
+that the stuck-payment gauge and alert rule are present and healthy.
+
+## Interpretation and limits
+
+See [publication and alert policy](payment-ordering-and-alerts.md). Kafka sends
+take place outside database transactions. Lease tokens fence database completion,
+not the send itself. Transport remains at least once; consumers deduplicate event
+IDs. Normal retries retain queue order, but quarantine releases successors and
+manual replay or a paused owner can produce late records. Do not claim absolute
+order, exactly-once transport or automatic recovery from every permanent error.
+
+PSP, bank and ERP are simulated. There was no live Stripe sandbox transaction,
+AWS runtime, real bank or external ERP validation. One local logical backup/restore
+does not establish production RPO/RTO, multi-host failover or PITR. Synthetic local
+load results do not establish production capacity or latency. API/asset checks do
+not establish visual browser acceptance. Prometheus firing does not prove an
+external notification receiver delivered a page.
+
+## Earlier extraction checkpoint
+
+The [initial extraction manifest](verification-results-2026-10-17.json) records
+181 passing Java tests and the earlier independent build/source checks. At that
+checkpoint the Angular suite had 39 passing tests and an optimized build, and the
+three-check smoke run passed. These frontend checks were not rerun for the backend
+outbox changes. The current results above supersede the earlier statement that only
+the smoke runner had executed after extraction.
+
+An early extraction attempt exited with code 137 and Docker became unavailable;
+the cause was not established. That failed attempt is not counted as passing.
+The revised outbox verification initially found assertion type mismatches and an
+existing simulator race on its second unique index; both were corrected before
+the complete passing rerun recorded above. An initial full drill passed four checks
+then stopped because its test JWT expired before the database-outage phase. The
+runner now renews its session and CSRF cookie between phases and before the
+restored-history check, and waits for the first rule evaluation after Prometheus restart;
+the application's 15-minute token lifetime was not increased. That failed drill
+is not counted as a full pass.

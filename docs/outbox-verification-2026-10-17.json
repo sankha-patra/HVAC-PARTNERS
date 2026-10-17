@@ -1,0 +1,238 @@
+{
+  "date": "2026-10-17",
+  "scope": "Local Docker; simulated PSP/bank/ERP, no live provider or cloud",
+  "codeCommit": "bdbb284ed080756acbb1c3fd0309ea123c9c05e6",
+  "applicationBuildCommit": "7f3c11e3e97745c45d799d9530625c9f2e5797a0",
+  "java": {
+    "summary": {
+      "errors": 0,
+      "failures": 0,
+      "tests": 210,
+      "skipped": 0
+    },
+    "suites": [
+      {
+        "name": "com.invoicepayments.billing.BillingConfigurationTest",
+        "tests": "5",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.079"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingFinancialDatabaseTest",
+        "tests": "78",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "174.907"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingHttpSecurityDatabaseTest",
+        "tests": "11",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "11.38"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingKafkaIntegrationTest",
+        "tests": "4",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "44.244"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingMetricsDatabaseTest",
+        "tests": "1",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "29.036"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingMskIamConfigurationTest",
+        "tests": "2",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "4.817"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingProducerSafetyTest",
+        "tests": "4",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.13"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingSimulationLabTest",
+        "tests": "7",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "36.069"
+      },
+      {
+        "name": "com.invoicepayments.billing.provider.SimulatorBillingProviderDatabaseTest",
+        "tests": "10",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "2.072"
+      },
+      {
+        "name": "com.invoicepayments.billing.provider.StripeBillingProviderTest",
+        "tests": "30",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.484"
+      },
+      {
+        "name": "com.invoicepayments.billing.provider.StripeWebhookVerifierTest",
+        "tests": "27",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.482"
+      },
+      {
+        "name": "com.invoicepayments.monitoring.LocalMonitoringSecurityConfigTest",
+        "tests": "6",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "1.553"
+      },
+      {
+        "name": "com.invoicepayments.identity.config.DemoUserSeederTest",
+        "tests": "7",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "16.314"
+      },
+      {
+        "name": "com.invoicepayments.identity.config.LocalMonitoringSecurityConfigTest",
+        "tests": "6",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.218"
+      },
+      {
+        "name": "com.invoicepayments.identity.IdentityApplicationDatabaseTest",
+        "tests": "8",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "54.633"
+      },
+      {
+        "name": "com.invoicepayments.identity.IdentityConfigurationTest",
+        "tests": "4",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.144"
+      }
+    ]
+  },
+  "prometheusRuleTests": "PASS: grace, firing, resolution and transient-spike cases",
+  "recovery": {
+    "mode": "full-recovery",
+    "status": "PASS",
+    "gitCommit": "bdbb284ed080756acbb1c3fd0309ea123c9c05e6",
+    "gitWorkingTreeClean": true,
+    "sourceHashes": {
+      "billing-service/src/main/java/com/invoicepayments/billing/provider/SimulatorBillingProvider.java": "baca5b5fb7ebff3dd658b1cf91176338a47cc2544b5b8fbb5da1b9c3d5ac3fac",
+      "billing-service/src/main/resources/db/billing/V10__outbox_quarantine.sql": "25da3ac63f2776bc5ce2ed69242d4343eff31004ce838561ed29480b56d6a420",
+      "monitoring/prometheus/billing-rules.yml": "6d47fc48b885f05ae212acdbbb0af059eb95f0d49396bcd3add5bbb40a86fa0a",
+      "billing-service/src/main/java/com/invoicepayments/billing/BillingMetrics.java": "a800fe05e4551dad74d7d4c159f993c0f60b91ed82cbf2c74055f7d9db3e42db",
+      "billing-service/src/main/java/com/invoicepayments/billing/BillingWorkers.java": "efe1cb833b27ffcbc62c721ed9a9532a7b7b8721902af3b646551753e0b2e19c",
+      "billing-service/src/main/resources/db/billing/V9__ordered_outbox.sql": "9d025a34f051b685f9fba73e762f7ba1747bc1bb0a22015e78f0c0774335b81e",
+      "billing-service/src/main/java/com/invoicepayments/billing/BillingKafkaConfiguration.java": "f10c4a08516ba44156c06ed1da4c0c565bcc98d5e96d9482f7878b91eba3e216",
+      "scripts/verify-billing-stack.ps1": "3b30bdff1663724292fb2b209f43a3f3812011b0d01f2a8825f4a9697b5f38c3"
+    },
+    "startedUtc": "2026-10-17T16:29:33.6057235Z",
+    "finishedUtc": "2026-10-17T16:44:00.9607584Z",
+    "checks": [
+      {
+        "name": "Full stack, browser assets, identity, CSRF and customer API",
+        "status": "PASS",
+        "seconds": 9.924
+      },
+      {
+        "name": "Background payment recovery survives an abrupt application restart",
+        "status": "PASS",
+        "seconds": 68.25,
+        "evidence": {
+          "integrity": "Balanced journals, valid invoice balances, no duplicate ERP effect",
+          "topicReplicationFactor": 3,
+          "recoverySeconds": 40.189,
+          "duplicateKafkaDelivery": "Consumed with one ERP effect"
+        }
+      },
+      {
+        "name": "Kafka outage retains outbox, fires a real alert and drains after restart",
+        "status": "PASS",
+        "seconds": 349.368,
+        "evidence": {
+          "drainSeconds": 33.049,
+          "alertFiredAfterSeconds": 256.442,
+          "integrity": "Balanced journals, valid invoice balances, no duplicate ERP effect"
+        }
+      },
+      {
+        "name": "Application outage fires and resolves the scrape alert",
+        "status": "PASS",
+        "seconds": 203.322,
+        "evidence": {
+          "integrity": "Balanced journals, valid invoice balances, no duplicate ERP effect",
+          "alertFiredAfterSeconds": 150.776
+        }
+      },
+      {
+        "name": "Database outage rejects writes and recovery preserves committed money",
+        "status": "PASS",
+        "seconds": 73.27,
+        "evidence": {
+          "outageHttpStatus": 0,
+          "integrity": "Balanced journals, valid invoice balances, no duplicate ERP effect",
+          "recoverySeconds": 31.79
+        }
+      },
+      {
+        "name": "Logical backup restores every identity and billing table into a separate database",
+        "status": "PASS",
+        "seconds": 152.958,
+        "evidence": {
+          "restoredBootSeconds": 25.987,
+          "backupBytes": 75903,
+          "restoredCapturedPayments": 3,
+          "integrity": "Balanced journals, valid invoice balances, no duplicate ERP effect",
+          "tableCount": 25
+        }
+      },
+      {
+        "name": "Provisioned Grafana dashboard queries live Prometheus data",
+        "status": "PASS",
+        "seconds": 3.071,
+        "evidence": {
+          "datasource": "OK",
+          "outboxPending": 0,
+          "queryCount": 9
+        }
+      }
+    ]
+  },
+  "limits": [
+    "At-least-once transport; late duplicates and replay possible",
+    "Quarantine releases later events with an explicit delivery gap",
+    "No live Stripe sandbox transaction, bank or external ERP",
+    "No production RPO/RTO, multi-host failover or PITR measurement"
+  ]
+}
