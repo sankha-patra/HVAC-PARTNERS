@@ -55,7 +55,11 @@ function Wait-For([string]$Description,[scriptblock]$Predicate,[int]$Seconds=180
 function Check([string]$Name,[scriptblock]$Action){
     if($Quick -and $Name -notin @('Full stack, browser assets, identity, CSRF and customer API','Simulated capture reaches Kafka and ERP exactly once','Provisioned Grafana dashboard queries live Prometheus data')){return}
     Write-Host "Checking: $Name";$watch=[Diagnostics.Stopwatch]::StartNew()
-    try{$evidence=& $Action;$checks.Add([ordered]@{name=$Name;status='PASS';seconds=[math]::Round($watch.Elapsed.TotalSeconds,3);evidence=$evidence})}
+    try{
+        # Long outage/alert waits can outlive a 15-minute JWT. Renew only between
+        # checks, before any deliberate outage, so fault HTTP statuses stay honest.
+        if($Name -cne 'Full stack, browser assets, identity, CSRF and customer API'){Refresh-Session}
+        $evidence=& $Action;$checks.Add([ordered]@{name=$Name;status='PASS';seconds=[math]::Round($watch.Elapsed.TotalSeconds,3);evidence=$evidence})}
     catch{$checks.Add([ordered]@{name=$Name;status='FAIL';seconds=[math]::Round($watch.Elapsed.TotalSeconds,3);error=$_.Exception.Message});throw}
     finally{Save-Report}
 }
@@ -70,6 +74,10 @@ function Api([string]$Path,[string]$Method='GET',$Body=$null,[string]$Key=''){
     if($null -ne $Body){$args.ContentType='application/json';$args.Body=ConvertTo-Json -InputObject $Body -Depth 8 -Compress}
     $response=Invoke-WebRequest @args
     if($response.Content){return ConvertFrom-Json -InputObject $response.Content}
+}
+function Refresh-Session {
+    $script:webSession=New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $null=Api '/api/v1/auth/login' 'POST' @{username='demo';password='demo123'}
 }
 function New-Payment([string]$Name){
     $invoice=[guid]::NewGuid().ToString()
@@ -292,6 +300,9 @@ try{
                 & docker exec $restoreId curl -fsS --max-time 3 http://localhost:9090/actuator/health/readiness 2>$null | Out-Null
                 $LASTEXITCODE -eq 0
             } 180
+            # The table-by-table restore comparison may also be lengthy. Mint a
+            # fresh credential from the healthy live identity before this API check.
+            Refresh-Session
             $cookie=$script:webSession.Cookies.GetCookies($base)['IP_AUTH'].Value
             $history=& docker exec $restoreId curl -fsS --max-time 8 -H "Cookie: IP_AUTH=$cookie" http://localhost:8084/api/v1/billing/accounts/20000000-0000-0000-0000-000000000001/intents
             if($LASTEXITCODE -ne 0){throw 'Restored application could not serve the real authenticated customer history'}
