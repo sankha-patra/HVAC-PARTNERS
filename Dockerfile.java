@@ -14,6 +14,7 @@ FROM eclipse-temurin:17-jre AS runtime
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*     && mkdir -p /app/certs && curl --fail --silent --show-error --proto '=https' https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /app/certs/global-bundle.pem     && groupadd --gid 10001 app && useradd --uid 10001 --gid 10001 --no-create-home app     && chown 10001:10001 /tmp && chmod 1770 /tmp
 USER 10001:10001
+VOLUME ["/tmp"]
 ENTRYPOINT ["java","-jar","/app/app.jar"]
 FROM runtime AS identity
 COPY --from=build /source/identity-service/target/identity-service-1.0.0.jar /app/app.jar
