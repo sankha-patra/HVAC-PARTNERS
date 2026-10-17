@@ -47,3 +47,34 @@ tests:
             exp_annotations:
               summary: Billing events require audited recovery
               description: 'Inspect the cause before replay. Operations may replay validated original events; malformed source data requires correction at its owner.'
+  - name: stuck-payment-grace-fire-and-resolve
+    interval: 1m
+    input_series:
+      - series: billing_payments_stuck
+        values: '0 1 1 1 0 0'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: BillingPaymentStuck
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BillingPaymentStuck
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: BillingPaymentStuck
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: local}
+            exp_annotations:
+              summary: Unresolved billing payments exceeded their recovery deadline
+              description: 'Review provider lookup and the finance exception queue. Deadlines: uncertain/submitting 15 minutes, customer action 24 hours, processing 7 days. Do not create a replacement charge blindly.'
+      - eval_time: 4m
+        alertname: BillingPaymentStuck
+        exp_alerts: []
+  - name: short-stuck-payment-spike-does-not-page
+    interval: 1m
+    input_series:
+      - series: billing_payments_stuck
+        values: '0 1 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BillingPaymentStuck
+        exp_alerts: []

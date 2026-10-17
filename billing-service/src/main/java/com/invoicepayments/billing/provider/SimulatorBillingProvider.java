@@ -38,11 +38,14 @@ public final class SimulatorBillingProvider implements BillingProvider {
     @Override public ProviderResult submit(ProviderCommand command) {
         ProviderValidation.payment(command);
         return independent.execute(tx -> {
+            // Both idempotency_key and the deterministic provider_id are unique.
+            // Concurrent equal requests can race on either index; arbitrate both,
+            // then load by key and validate the complete request before returning.
             jdbc.update("""
                     INSERT INTO billing.provider_operations
                     (idempotency_key,provider_id,intent_id,amount_minor,currency,method,state,operation_kind,updated_at)
                     VALUES (?,?,?::uuid,?,?,?,'PROCESSING','PAYMENT',now())
-                    ON CONFLICT (idempotency_key) DO NOTHING
+                    ON CONFLICT DO NOTHING
                     """, command.idempotencyKey(), providerId("pay", command.idempotencyKey()),
                     command.intentId(), command.amountMinor(), command.currency(), command.method());
             Operation operation = byKey(command.idempotencyKey(), true);
@@ -85,7 +88,7 @@ public final class SimulatorBillingProvider implements BillingProvider {
                     (idempotency_key,provider_id,intent_id,amount_minor,currency,method,state,operation_kind,
                      reference_id,parent_provider_id,updated_at)
                     VALUES (?,?,?::uuid,?,?,?,'REFUNDED','REFUND',?,?,now())
-                    ON CONFLICT (idempotency_key) DO NOTHING
+                    ON CONFLICT DO NOTHING
                     """, command.idempotencyKey(), providerId("refund", command.idempotencyKey()),
                     command.intentId(), command.amountMinor(), command.currency(), original.method(),
                     command.refundId(), original.providerId());

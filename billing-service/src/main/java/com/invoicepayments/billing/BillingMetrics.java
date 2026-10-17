@@ -16,9 +16,17 @@ public class BillingMetrics {
         this.jdbc=jdbc;
         register(registry,"billing.payments.unresolved", "SELECT COUNT(*) FROM billing.intents WHERE status IN ('UNKNOWN','SUBMITTING','PROCESSING','REQUIRES_ACTION')");
         register(registry,"billing.payments.oldest.unresolved.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.intents WHERE status IN ('UNKNOWN','SUBMITTING','PROCESSING','REQUIRES_ACTION')");
+        // Local escalation policy; retries update updated_at, so measure from
+        // creation to avoid hiding a payment behind repeated recovery attempts.
+        register(registry,"billing.payments.stuck", """
+            SELECT COUNT(*) FROM billing.intents WHERE
+              (status IN ('UNKNOWN','SUBMITTING') AND created_at<NOW()-INTERVAL '15 minutes') OR
+              (status='REQUIRES_ACTION' AND created_at<NOW()-INTERVAL '24 hours') OR
+              (status='PROCESSING' AND created_at<NOW()-INTERVAL '7 days')
+            """);
         register(registry,"billing.webhooks.unmatched", "SELECT COUNT(*) FROM billing.webhook_inbox WHERE state='UNMATCHED'");
-        register(registry,"billing.outbox.pending", "SELECT COUNT(*) FROM billing.outbox WHERE state<>'PUBLISHED'");
-        register(registry,"billing.outbox.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.outbox WHERE state<>'PUBLISHED'");
+        register(registry,"billing.outbox.pending", "SELECT COUNT(*) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");
+        register(registry,"billing.outbox.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");
         register(registry,"billing.cases.open", "SELECT COUNT(*) FROM billing.cases WHERE status='OPEN'");
         register(registry,"billing.deadletters.open", "SELECT COUNT(*) FROM billing.dead_letters WHERE state<>'REPLAYED'");
     }

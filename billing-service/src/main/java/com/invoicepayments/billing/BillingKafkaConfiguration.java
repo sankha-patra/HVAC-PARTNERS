@@ -28,6 +28,9 @@ public class BillingKafkaConfiguration {
         config.put(ProducerConfig.ACKS_CONFIG,"all");config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG,true);
         config.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG,10000);config.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG,5000);
         config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG,3000);
+        // Apply safety settings in every billing profile, even if YAML disagrees.
+        config.put(ProducerConfig.RETRIES_CONFIG,Integer.MAX_VALUE);
+        config.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,5);
         return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(config));
     }
     private Map<String,Object> consumerProperties(KafkaProperties properties) {

@@ -114,6 +114,23 @@ try{
     $startup=@('up','-d','--wait','--wait-timeout','360')
     if(!$SkipBuild){$startup+='--build'}
     $null=Compose $startup
+    # Refresh mounted alert rules even when the existing monitoring container was reused.
+    $null=Compose @('restart','prometheus')
+    $report.gitCommit=(& git -C $root rev-parse HEAD).Trim()
+    if($LASTEXITCODE -ne 0){throw 'Could not record the source commit'}
+    $gitStatus=@(& git -C $root status --porcelain)
+    if($LASTEXITCODE -ne 0){throw 'Could not record source status'}
+    $report.gitWorkingTreeClean=($gitStatus.Count -eq 0)
+    $report.sourceHashes=@{}
+    foreach($file in @('billing-service/src/main/java/com/invoicepayments/billing/BillingWorkers.java',
+        'billing-service/src/main/java/com/invoicepayments/billing/BillingKafkaConfiguration.java',
+        'billing-service/src/main/java/com/invoicepayments/billing/BillingMetrics.java',
+        'billing-service/src/main/java/com/invoicepayments/billing/provider/SimulatorBillingProvider.java',
+        'billing-service/src/main/resources/db/billing/V9__ordered_outbox.sql',
+        'billing-service/src/main/resources/db/billing/V10__outbox_quarantine.sql',
+        'monitoring/prometheus/billing-rules.yml','scripts/verify-billing-stack.ps1')) {
+        $report.sourceHashes[$file]=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root $file)).Hash.ToLowerInvariant()
+    }
     Check 'Full stack, browser assets, identity, CSRF and customer API' {
         $script:webSession=New-Object Microsoft.PowerShell.Commands.WebRequestSession
         $html=Invoke-WebRequest -UseBasicParsing -Uri "$base/login" -TimeoutSec 15
@@ -131,10 +148,13 @@ try{
         $report.postgresql=Sql 'SELECT version()'
         # A healthy scrape can contain NaN business gauges. Require actual numeric
         # signals before waiting for business alerts, rather than hiding that defect.
-        foreach($metric in @('billing_outbox_pending','billing_outbox_oldest_seconds','billing_payments_unresolved')){
+        foreach($metric in @('billing_outbox_pending','billing_outbox_oldest_seconds','billing_payments_unresolved','billing_payments_stuck')){
             $result=Query $metric
             if(@($result.data.result).Count -ne 1 -or $result.data.result[0].value[1] -in @('NaN','+Inf','-Inf')){throw "Business metric unavailable: $metric"}
         }
+        $rules=Invoke-RestMethod -Uri "$prom/api/v1/rules" -TimeoutSec 8
+        $stuckRules=@($rules.data.groups | ForEach-Object {$_.rules} | Where-Object {$_.name -ceq 'BillingPaymentStuck'})
+        if($stuckRules.Count -ne 1 -or $stuckRules[0].health -cne 'ok'){throw 'Stuck-payment alert rule is missing or unhealthy'}
         'Angular bundle -> nginx -> gateway -> identity and billing; cookie session and private metrics targets healthy'
     }
     if($Quick){

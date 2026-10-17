@@ -59,4 +59,4 @@ Run `scripts/check-repository.ps1` to verify repository boundaries and migration
 | `infra/aws-billing` | AWS reference deployment and mocked Terraform contract tests |
 | `scripts` | Local startup, tests, backup and failure drills |
 
-See [repository separation](docs/repository-separation.md) for the extraction boundary and [verification](docs/verification.md) for evidence and limits. Do not describe simulated results as live bank, Stripe, ERP or production validation.
+See [payment publication order and alert policy](docs/payment-ordering-and-alerts.md), [repository separation](docs/repository-separation.md) for the extraction boundary and [verification](docs/verification.md) for evidence and limits. Do not describe simulated results as live bank, Stripe, ERP or production validation.

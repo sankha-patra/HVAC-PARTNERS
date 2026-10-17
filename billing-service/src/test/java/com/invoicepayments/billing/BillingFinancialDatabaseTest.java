@@ -708,6 +708,261 @@ class BillingFinancialDatabaseTest {
                 "BANK-" + external, List.of(new BillingReconciliation.Line(intent, gross)));
     }
 
+    BillingWorkers outboxWorker(KafkaTemplate<String,byte[]> kafka) {return outboxWorker(db,kafka);}
+    BillingWorkers outboxWorker(BillingStore store,KafkaTemplate<String,byte[]> kafka) {
+        var beans=new DefaultListableBeanFactory();
+        if(kafka!=null) beans.registerSingleton("testKafka",kafka);
+        // Mockito erases the generic sender type; select this fixture by raw type,
+        // as in the real-Kafka integration fixture, rather than resolving to null.
+        @SuppressWarnings({"unchecked","rawtypes"})
+        ObjectProvider<KafkaTemplate<String,byte[]>> provider=(ObjectProvider)beans.getBeanProvider(KafkaTemplate.class);
+        return new BillingWorkers(store,recovery,inbox,provider);
+    }
+    UUID enqueue(UUID payment) {
+        UUID event=UUID.randomUUID();
+        db.update("INSERT INTO billing.outbox(id,aggregate_id,type,payload,created_at) VALUES(?,?,'TEST','{}'::jsonb,'2026-01-01'::timestamptz)",event,payment);
+        return event;
+    }
+    void acknowledge(BillingWorkers worker,Map<String,Object> job) {
+        worker.markPublished(id(job.get("id")),id(job.get("leaseToken")));
+    }
+
+    @Test void samePaymentPublishesInInsertionOrderEvenWhenTimestampsTie() {
+        UUID payment=UUID.randomUUID(); UUID first=enqueue(payment),second=enqueue(payment),third=enqueue(payment);
+        var worker=outboxWorker(null);
+        try {
+            for(UUID expected:List.of(first,second,third)) {
+                var jobs=worker.claimOutbox(8);
+                assertThat(jobs).hasSize(1);
+                assertThat(id(jobs.get(0).get("id"))).isEqualTo(expected);
+                acknowledge(worker,jobs.get(0));
+            }
+            assertThat(worker.claimOutbox(8)).isEmpty();
+        } finally {worker.close();}
+    }
+
+    @Test void eightCompetingPublishersClaimOnlyOneHeadPerPayment() throws Exception {
+        UUID a=UUID.randomUUID(),b=UUID.randomUUID();
+        UUID firstA=enqueue(a),firstB=enqueue(b);enqueue(a);enqueue(b);
+        var worker=outboxWorker(null);
+        try {
+            var claimed=concurrently(8,()->worker.claimOutbox(8));
+            assertThat(claimed.stream().flatMap(List::stream).map(row->id(row.get("id"))).toList())
+                .containsExactlyInAnyOrder(firstA,firstB);
+        } finally {worker.close();}
+    }
+
+    @Test @SuppressWarnings("unchecked") void failedHeadBlocksSuccessorDuringBackoffButNotAnotherPayment() {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
+            .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("test broker unavailable")));
+        UUID a=UUID.randomUUID();UUID first=enqueue(a);enqueue(a);
+        var worker=outboxWorker(kafka);
+        try {
+            var claim=worker.claimOutbox(8);assertThat(claim).hasSize(1);worker.publishOne(claim.get(0));
+            assertThat(db.one("SELECT state,attempts FROM billing.outbox WHERE id=?",first))
+                .containsEntry("state","NEW").containsEntry("attempts",1);
+            UUID independent=enqueue(UUID.randomUUID());
+            var available=worker.claimOutbox(8);assertThat(available).hasSize(1);
+            assertThat(id(available.get(0).get("id"))).isEqualTo(independent);
+            acknowledge(worker,available.get(0));
+            assertThat(worker.claimOutbox(8)).isEmpty();
+            db.update("UPDATE billing.outbox SET next_attempt_at=NOW()-INTERVAL '1 second' WHERE id=?",first);
+            assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(first);
+        } finally {worker.close();}
+    }
+
+    @Test @SuppressWarnings("unchecked") void obsoleteLeaseOwnerCannotSendToKafka() {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        UUID first=enqueue(UUID.randomUUID());var worker=outboxWorker(kafka);
+        try {
+            var old=worker.claimOutbox(1).get(0);
+            db.update("UPDATE billing.outbox SET lease_until=NOW()-INTERVAL '1 second',next_attempt_at=NOW()-INTERVAL '1 second' WHERE id=?",first);
+            var current=worker.claimOutbox(1).get(0);worker.publishOne(old);
+            org.mockito.Mockito.verifyNoInteractions(kafka);
+            acknowledge(worker,current);
+        } finally {worker.close();}
+    }
+
+    @Test @SuppressWarnings("unchecked") void eightBrokerWaitsHoldNoPooledConnectionsOrRowLocks() throws Exception {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        var brokerAck=new CompletableFuture<org.springframework.kafka.support.SendResult<String,byte[]>>();
+        var started=new CountDownLatch(8);var sawTransaction=new AtomicBoolean();
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
+            .thenAnswer(call->{
+                if(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) sawTransaction.set(true);
+                started.countDown();return brokerAck;
+            });
+        try(var pool=new com.zaxxer.hikari.HikariDataSource()) {
+            pool.setJdbcUrl(System.getenv("BILLING_TEST_JDBC_URL"));pool.setUsername("billing_test");
+            pool.setPassword(System.getenv("BILLING_TEST_DB_PASSWORD"));pool.setMaximumPoolSize(1);
+            pool.setMinimumIdle(0);pool.setConnectionTimeout(1000);
+            var pooled=new BillingStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool));
+            for(int i=0;i<8;i++) enqueue(UUID.randomUUID());
+            var worker=outboxWorker(pooled,kafka);var threads=Executors.newFixedThreadPool(8);
+            try {
+                var claims=worker.claimOutbox(8);assertThat(claims).hasSize(8);
+                var pending=claims.stream().map(job->threads.submit(()->worker.publishOne(job))).toList();
+                assertThat(started.await(5,TimeUnit.SECONDS)).isTrue();
+                assertThat(sawTransaction.get()).isFalse();
+                assertThat(pool.getHikariPoolMXBean().getActiveConnections()).isZero();
+                // A single-connection pool is still available while all 8 sends wait.
+                try(var connection=pool.getConnection();var statement=connection.createStatement()) {
+                    connection.setAutoCommit(false);
+                    statement.executeQuery("SELECT id FROM billing.outbox FOR UPDATE NOWAIT").close();
+                    connection.rollback();
+                }
+                brokerAck.complete(null);for(var future:pending) future.get(5,TimeUnit.SECONDS);
+                assertThat(count("billing.outbox WHERE state='PUBLISHED'")).isEqualTo(8);
+            } finally {brokerAck.complete(null);threads.shutdownNow();worker.close();}
+        }
+    }
+
+    @ParameterizedTest @ValueSource(booleans={false,true}) @SuppressWarnings("unchecked")
+    void lateCompletionCannotAcknowledgeOrResetNewOwnersClaim(boolean fail) throws Exception {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        var ack=new CompletableFuture<org.springframework.kafka.support.SendResult<String,byte[]>>();
+        var started=new CountDownLatch(1);
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
+            .thenAnswer(call->{started.countDown();return ack;});
+        UUID payment=UUID.randomUUID();UUID first=enqueue(payment),second=enqueue(payment);
+        var worker=outboxWorker(kafka);var thread=Executors.newSingleThreadExecutor();
+        try {
+            var old=worker.claimOutbox(1).get(0);var sending=thread.submit(()->worker.publishOne(old));
+            assertThat(started.await(5,TimeUnit.SECONDS)).isTrue();
+            db.update("UPDATE billing.outbox SET lease_until=NOW()-INTERVAL '1 second',next_attempt_at=NOW()-INTERVAL '1 second' WHERE id=?",first);
+            var current=worker.claimOutbox(1).get(0);
+            if(fail) ack.completeExceptionally(new org.apache.kafka.common.errors.RecordTooLargeException("test only"));else ack.complete(null);
+            sending.get(5,TimeUnit.SECONDS);
+            assertThat(db.one("SELECT state,lease_token FROM billing.outbox WHERE id=?",first))
+                .containsEntry("state","IN_FLIGHT").containsEntry("leaseToken",text(current,"leaseToken"));
+            assertThat(worker.claimOutbox(8)).isEmpty();assertThat(count("billing.dead_letters")).isZero();
+            acknowledge(worker,current);
+            assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(second);
+        } finally {ack.complete(null);thread.shutdownNow();worker.close();}
+    }
+
+    @Test @SuppressWarnings("unchecked") void permanentFailureIsAuditedReleasesSuccessorAndSupportsReplay() {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
+            .thenReturn(CompletableFuture.failedFuture(new org.apache.kafka.common.errors.RecordTooLargeException("test only")));
+        UUID payment=captured("CARD");var original=db.one("SELECT id,payload::text AS payload FROM billing.outbox WHERE aggregate_id=?",payment);
+        UUID first=id(original.get("id")),second=enqueue(payment);var worker=outboxWorker(kafka);
+        try {
+            worker.publishOne(worker.claimOutbox(1).get(0));
+            assertThat(db.one("SELECT state,lease_token,lease_until FROM billing.outbox WHERE id=?",first))
+                .containsEntry("state","DEAD_LETTER").containsEntry("leaseToken",null).containsEntry("leaseUntil",null);
+            var audit=db.one("SELECT * FROM billing.dead_letters WHERE source_outbox_id=?",first);
+            assertThat(audit).containsEntry("state","OPEN").containsEntry("merchantId",MERCHANT.toString())
+                .containsEntry("failureReason","RecordTooLargeException");
+            assertThat((byte[])audit.get("rawPayload")).containsExactly(text(original,"payload").getBytes(StandardCharsets.UTF_8));
+            var next=worker.claimOutbox(8);assertThat(next).hasSize(1);assertThat(id(next.get(0).get("id"))).isEqualTo(second);
+            acknowledge(worker,next.get(0));
+            var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+            try {
+                new BillingMetrics(jdbc,registry);
+                assertThat(registry.get("billing.outbox.pending").gauge().value()).isZero();
+                assertThat(registry.get("billing.outbox.oldest.seconds").gauge().value()).isZero();
+                assertThat(registry.get("billing.deadletters.open").gauge().value()).isEqualTo(1);
+            } finally {registry.close();}
+            UUID auditId=id(audit.get("id"));events.replay("operator",auditId);
+            // If replay also fails, reopen the same audit record without multiplying cases.
+            worker.publishOne(worker.claimOutbox(8).get(0));
+            assertThat(count("billing.dead_letters")).isEqualTo(1);
+            assertThat(db.one("SELECT state FROM billing.dead_letters WHERE id=?",auditId).get("state")).isEqualTo("OPEN");
+            events.replay("operator",auditId);
+            org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+            var replay=worker.claimOutbox(8).get(0);
+            assertThat(text(replay,"payload")).isEqualTo(text(original,"payload"));worker.publishOne(replay);
+            assertThat(db.one("SELECT state FROM billing.dead_letters WHERE id=?",auditId).get("state")).isEqualTo("REPLAYED");
+            assertThat(count("billing.journals WHERE intent_id='"+payment+"'")).isEqualTo(1);
+        } finally {worker.close();}
+    }
+
+    @Test @SuppressWarnings("unchecked") void transientFailureIsQuarantinedAtAttemptLimit() {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
+            .thenReturn(CompletableFuture.failedFuture(new TimeoutException("test outage")));
+        UUID payment=created("CARD"),first=enqueue(payment),second=enqueue(payment);
+        db.update("UPDATE billing.outbox SET attempts=? WHERE id=?",BillingWorkers.MAX_OUTBOX_ATTEMPTS-1,first);
+        var worker=outboxWorker(kafka);
+        try {
+            var claim=worker.claimOutbox(1).get(0);worker.publishOne(claim);worker.publishOne(claim);
+            assertThat(db.one("SELECT state,attempts FROM billing.outbox WHERE id=?",first))
+                .containsEntry("state","DEAD_LETTER").containsEntry("attempts",BillingWorkers.MAX_OUTBOX_ATTEMPTS);
+            assertThat(count("billing.dead_letters")).isEqualTo(1);
+            assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(second);
+        } finally {worker.close();}
+    }
+
+    @Test @SuppressWarnings("unchecked") void expiredFinalClaimIsQuarantinedWithoutAnotherSend() {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        UUID payment=created("CARD"),first=enqueue(payment),second=enqueue(payment);
+        db.update("UPDATE billing.outbox SET attempts=?,state='IN_FLIGHT',lease_token=?,lease_until=NOW()-INTERVAL '1 second' WHERE id=?",BillingWorkers.MAX_OUTBOX_ATTEMPTS,UUID.randomUUID(),first);
+        var worker=outboxWorker(kafka);
+        try {
+            assertThat(worker.claimOutbox(8)).isEmpty();
+            assertThat(db.one("SELECT state FROM billing.outbox WHERE id=?",first).get("state")).isEqualTo("DEAD_LETTER");
+            assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(second);
+            org.mockito.Mockito.verifyNoInteractions(kafka);
+        } finally {worker.close();}
+    }
+
+    @Test @SuppressWarnings("unchecked") void failedAuditRollsBackQuarantineAndKeepsSuccessorBlocked() {
+        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
+        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
+            .thenReturn(CompletableFuture.failedFuture(new org.apache.kafka.common.errors.RecordTooLargeException("test only")));
+        UUID payment=created("CARD"),first=enqueue(payment);enqueue(payment);var worker=outboxWorker(kafka);
+        jdbc.execute("CREATE FUNCTION billing.test_reject_deadletter() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Injected deadletter audit failure'; END $$");
+        jdbc.execute("CREATE TRIGGER billing_test_reject_deadletter BEFORE INSERT ON billing.dead_letters FOR EACH ROW EXECUTE FUNCTION billing.test_reject_deadletter()");
+        try {
+            var claim=worker.claimOutbox(1).get(0);
+            assertThatThrownBy(()->worker.publishOne(claim)).isInstanceOf(RuntimeException.class);
+            assertThat(db.one("SELECT state FROM billing.outbox WHERE id=?",first).get("state")).isEqualTo("IN_FLIGHT");
+            assertThat(count("billing.dead_letters")).isZero();assertThat(worker.claimOutbox(8)).isEmpty();
+        } finally {
+            jdbc.execute("DROP TRIGGER billing_test_reject_deadletter ON billing.dead_letters");
+            jdbc.execute("DROP FUNCTION billing.test_reject_deadletter()");worker.close();
+        }
+    }
+
+    @Test void concurrentInsertCannotExposeLaterEventBeforeEarlierTransactionCommits() throws Exception {
+        UUID payment=UUID.randomUUID();var inserted=new CountDownLatch(1);var commit=new CountDownLatch(1);
+        var threads=Executors.newFixedThreadPool(2);var worker=outboxWorker(null);
+        try {
+            var first=threads.submit(()->db.tx(()->{
+                UUID event=enqueue(payment);inserted.countDown();
+                try {if(!commit.await(10,TimeUnit.SECONDS)) throw new IllegalStateException("test commit timed out");}
+                catch(InterruptedException failure){Thread.currentThread().interrupt();throw new IllegalStateException(failure);}
+                return event;
+            }));
+            assertThat(inserted.await(5,TimeUnit.SECONDS)).isTrue();
+            var second=threads.submit(()->enqueue(payment));
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(()->
+                jdbc.queryForObject("SELECT COUNT(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted",Long.class)>0);
+            assertThat(worker.claimOutbox(8)).isEmpty();assertThat(second.isDone()).isFalse();
+            commit.countDown();UUID firstId=first.get(5,TimeUnit.SECONDS),secondId=second.get(5,TimeUnit.SECONDS);
+            var head=worker.claimOutbox(8).get(0);assertThat(id(head.get("id"))).isEqualTo(firstId);
+            acknowledge(worker,head);
+            assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(secondId);
+        } finally {commit.countDown();threads.shutdownNow();worker.close();}
+    }
+
+    @ParameterizedTest @org.junit.jupiter.params.provider.CsvSource({
+        "UNKNOWN,16,true","UNKNOWN,14,false","SUBMITTING,16,true","SUBMITTING,14,false",
+        "REQUIRES_ACTION,1441,true","REQUIRES_ACTION,1439,false",
+        "PROCESSING,10081,true","PROCESSING,10079,false",
+        "CREATED,20000,false","CAPTURED,20000,false","FAILED,20000,false","RETURNED,20000,false","REFUNDED,20000,false"})
+    void stuckGaugeUsesStateSpecificDeadlines(String status,int ageMinutes,boolean overdue) {
+        UUID payment=created("CARD");
+        db.update("UPDATE billing.intents SET status=?,created_at=NOW()-(? * INTERVAL '1 minute'),updated_at=NOW() WHERE id=?",status,ageMinutes,payment);
+        var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry(); try {
+            new BillingMetrics(jdbc,registry);
+            assertThat(registry.get("billing.payments.stuck").gauge().value()).isEqualTo(overdue?1.0:0.0);
+        } finally {registry.close();}
+    }
+
     BillingService service(BillingProvider adapter, UUID merchant) {
         return new BillingService(db, adapter, new MockEnvironment(), true, "http://localhost:4200", merchant.toString());
     }
