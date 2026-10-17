@@ -78,6 +78,9 @@ function Api([string]$Path,[string]$Method='GET',$Body=$null,[string]$Key=''){
 function Refresh-Session {
     $script:webSession=New-Object Microsoft.PowerShell.Commands.WebRequestSession
     $null=Api '/api/v1/auth/login' 'POST' @{username='demo';password='demo123'}
+    # A protected GET materializes the gateway's CSRF cookie for later writes.
+    $null=Api '/api/v1/billing/accounts'
+    if(!$script:webSession.Cookies.GetCookies($base)['XSRF-TOKEN']){throw 'Renewed session has no CSRF cookie'}
 }
 function New-Payment([string]$Name){
     $invoice=[guid]::NewGuid().ToString()
