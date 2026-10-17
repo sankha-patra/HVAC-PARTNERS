@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$SkipBuild)
+param([switch]$SkipBuild,[switch]$Quick)
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $project='invoice-payments-drill'
@@ -16,7 +16,7 @@ $restoreDatabase='invoice_restore_'+[guid]::NewGuid().ToString('N').Substring(0,
 $directory=Join-Path $root ".tmp-notes/billing-stack/$stamp"
 New-Item -ItemType Directory -Force -Path $directory | Out-Null
 $checks=[System.Collections.Generic.List[object]]::new()
-$report=[ordered]@{startedUtc=[DateTime]::UtcNow.ToString('o');project=$project;provider='SIMULATOR';status='RUNNING';checks=$checks;scope='Local Docker stack; no real PSP, bank, ERP or cloud. Backup is a logical snapshot, not PITR or cross-host failover.'}
+$report=[ordered]@{startedUtc=[DateTime]::UtcNow.ToString('o');project=$project;provider='SIMULATOR';mode=$(if($Quick){'smoke'}else{'full-recovery'});status='RUNNING';checks=$checks;scope='Local Docker stack; no real PSP, bank, ERP or cloud. Backup is a logical snapshot, not PITR or cross-host failover.'}
 $base='http://localhost:4500'
 $prom='http://127.0.0.1:9390'
 $grafana='http://127.0.0.1:3300'
@@ -53,6 +53,7 @@ function Wait-For([string]$Description,[scriptblock]$Predicate,[int]$Seconds=180
     throw "Timed out: $Description after ${Seconds}s"
 }
 function Check([string]$Name,[scriptblock]$Action){
+    if($Quick -and $Name -notin @('Full stack, browser assets, identity, CSRF and customer API','Simulated capture reaches Kafka and ERP exactly once','Provisioned Grafana dashboard queries live Prometheus data')){return}
     Write-Host "Checking: $Name";$watch=[Diagnostics.Stopwatch]::StartNew()
     try{$evidence=& $Action;$checks.Add([ordered]@{name=$Name;status='PASS';seconds=[math]::Round($watch.Elapsed.TotalSeconds,3);evidence=$evidence})}
     catch{$checks.Add([ordered]@{name=$Name;status='FAIL';seconds=[math]::Round($watch.Elapsed.TotalSeconds,3);error=$_.Exception.Message});throw}
@@ -135,6 +136,17 @@ try{
             if(@($result.data.result).Count -ne 1 -or $result.data.result[0].value[1] -in @('NaN','+Inf','-Inf')){throw "Business metric unavailable: $metric"}
         }
         'Angular bundle -> nginx -> gateway -> identity and billing; cookie session and private metrics targets healthy'
+    }
+    if($Quick){
+        $report.scope='Source-extraction smoke: real local stack and Kafka, simulated payment/ERP, live dashboard queries. No restart, outage, alert-firing or backup-restoration drill in this mode.'
+        Check 'Simulated capture reaches Kafka and ERP exactly once' {
+            $intent=New-Payment 'extraction-smoke'
+            $null=Api "/api/v1/billing/intents/$intent/simulate" 'POST' @{outcome='CAPTURED'}
+            $elapsed=Wait-For 'capture and real Kafka ERP acknowledgement' {(Captured $intent) -and (Delivered $intent)} 120
+            if((Sql "SELECT count(*) FROM billing.journals WHERE intent_id='$intent'") -cne '1'){throw 'Expected one capture journal'}
+            if((Sql "SELECT count(*) FROM billing.erp_postings WHERE intent_id='$intent'") -cne '1'){throw 'Expected one ERP posting'}
+            @{intent=$intent;kafkaDeliverySeconds=$elapsed;journals=1;erpPostings=1;integrity=(Integrity)}
+        }
     }
     Check 'Background payment recovery survives an abrupt application restart' {
         $script:restartIntent=New-Payment 'restart'
@@ -305,5 +317,7 @@ try{
     foreach($entry in $savedEnvironment.GetEnumerator()){[Environment]::SetEnvironmentVariable($entry.Key,$entry.Value)}
     Write-Host "Drill status: $($report.status). Evidence: $directory/report.json"
 }
-Write-Host 'Full-stack drills passed. Isolated demo: http://localhost:4500; Grafana: http://localhost:3300; Prometheus: http://localhost:9390.'
+if($Quick){Write-Host 'Three source-extraction smoke checks passed. Outage/restart/restore/alert drills were not run.'}
+else{Write-Host 'Full-stack recovery drills passed.'}
+Write-Host 'Isolated demo: http://localhost:4500; Grafana: http://localhost:3300; Prometheus: http://localhost:9390.'
 Write-Host 'The backup contains local demo identity data. Keep .tmp-notes ignored; no live provider or production failover claim is made.'

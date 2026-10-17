@@ -21,6 +21,8 @@ For repeatable failure, restart, restoration and dashboard checks:
 ./scripts/verify-billing-stack.ps1
 ```
 
+For a faster integration smoke check, use `./scripts/verify-billing-stack.ps1 -Quick`; it checks login, a simulated capture delivered through real Kafka to the ERP double, and live Grafana queries. Quick mode explicitly skips outage, restart, alert-firing and backup-restoration drills.
+
 The drill uses its own Compose project and volumes: app http://localhost:4500, Grafana http://localhost:3300, Prometheus http://localhost:9390. It deliberately stops only its own labeled containers. Reports and logical backups stay in ignored `.tmp-notes/billing-stack/`. Never point these scripts at a production database.
 
 ## Build and test

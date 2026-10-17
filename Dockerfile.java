@@ -29,4 +29,4 @@ EXPOSE 8080
 # Disposable verification image: public dependencies and test source only.
 FROM build AS verification
 RUN --mount=type=cache,id=invoice-payments-maven,sharing=locked,target=/root/.m2 cp -a /root/.m2 /opt/maven-cache
-CMD ["mvn", "-B", "-o", "-Dmaven.repo.local=/opt/maven-cache", "test"]
+CMD ["mvn", "-B", "-ntp", "-Dmaven.repo.local=/opt/maven-cache/repository", "test"]

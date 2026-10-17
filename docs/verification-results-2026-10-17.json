@@ -1,0 +1,159 @@
+{
+  "date": "2026-10-17",
+  "scope": "Independent repository extraction; local simulated integrations only",
+  "java": {
+    "summary": {
+      "errors": 0,
+      "tests": 181,
+      "failures": 0,
+      "skipped": 0
+    },
+    "suites": [
+      {
+        "name": "com.invoicepayments.billing.BillingConfigurationTest",
+        "tests": "5",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.051"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingFinancialDatabaseTest",
+        "tests": "53",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "83.297"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingHttpSecurityDatabaseTest",
+        "tests": "11",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "7.513"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingKafkaIntegrationTest",
+        "tests": "4",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "40.195"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingMetricsDatabaseTest",
+        "tests": "1",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "25.336"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingMskIamConfigurationTest",
+        "tests": "2",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "1.657"
+      },
+      {
+        "name": "com.invoicepayments.billing.BillingSimulationLabTest",
+        "tests": "7",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "33.681"
+      },
+      {
+        "name": "com.invoicepayments.billing.provider.SimulatorBillingProviderDatabaseTest",
+        "tests": "10",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "1.624"
+      },
+      {
+        "name": "com.invoicepayments.billing.provider.StripeBillingProviderTest",
+        "tests": "30",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.307"
+      },
+      {
+        "name": "com.invoicepayments.billing.provider.StripeWebhookVerifierTest",
+        "tests": "27",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.364"
+      },
+      {
+        "name": "com.invoicepayments.monitoring.LocalMonitoringSecurityConfigTest",
+        "tests": "6",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.754"
+      },
+      {
+        "name": "com.invoicepayments.identity.config.DemoUserSeederTest",
+        "tests": "7",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "3.634"
+      },
+      {
+        "name": "com.invoicepayments.identity.config.LocalMonitoringSecurityConfigTest",
+        "tests": "6",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.124"
+      },
+      {
+        "name": "com.invoicepayments.identity.IdentityApplicationDatabaseTest",
+        "tests": "8",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "21.906"
+      },
+      {
+        "name": "com.invoicepayments.identity.IdentityConfigurationTest",
+        "tests": "4",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.029"
+      }
+    ],
+    "evidence": ".tmp-notes/container-tests/20261017T124338779Z"
+  },
+  "frontend": {
+    "tests": 39,
+    "failures": 0,
+    "optimizedBuild": "PASS"
+  },
+  "freshClone": {
+    "mavenReactorPackaging": "PASS",
+    "legacyJarBoundaryAudit": "PASS"
+  },
+  "aws": {
+    "terraformValidate": "PASS",
+    "mockPlanScenarios": 2,
+    "mockBackupBoundaryChecks": 4,
+    "spaRouteChecks": 5,
+    "deployed": false
+  },
+  "runtimeSmoke": {
+    "completedChecks": 0,
+    "status": "INCOMPLETE",
+    "dockerEngineAvailableAfterFailure": false,
+    "cause": "Not established",
+    "billingExitCode": 137,
+    "evidence": ".tmp-notes/billing-stack/20261017T124640005Z/report.json"
+  }
+}
