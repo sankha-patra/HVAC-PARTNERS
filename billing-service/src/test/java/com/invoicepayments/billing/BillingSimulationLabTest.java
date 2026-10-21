@@ -107,12 +107,19 @@ class BillingSimulationLabTest {
         Files.writeString(Path.of("target","billing-lab-report.json"),report.toString(2),StandardCharsets.UTF_8);
     }
 
-    @Test @Order(1) void acceptedPaymentWithLostResponseRecoversOnlyFromSignedEvidence() throws Exception {
+    @Test @Order(1) void acceptedPaymentWithLostResponseRecoversSameOperationAndDeduplicatesSignedEvidence() throws Exception {
         Fixture f=fixture();UUID intent=create(f,"CARD");lab.plan(intent,DISCONNECT_AFTER_ACCEPT);
         int before=lab.paymentPosts.get();assertThat(command("/intents/"+intent+"/submit",new JSONObject(),PAYER).getString("status")).isEqualTo("UNKNOWN");
         assertThat(lab.paymentCount(intent)).isEqualTo(1);assertMoney(f,0,12525);
-        recover(intent);assertThat(lab.paymentPosts.get()).isGreaterThanOrEqualTo(before+1);
-        int postsAfterRecovery=lab.paymentPosts.get();recover(intent);assertThat(lab.paymentPosts.get()).isEqualTo(postsAfterRecovery);
+        recover(intent);assertThat(lab.paymentPosts.get()).isEqualTo(before+2);
+        int postsAfterRecovery=lab.paymentPosts.get();recover(intent);assertThat(lab.paymentPosts.get()).isEqualTo(postsAfterRecovery+1);
+        assertThat(lab.paymentCount(intent)).isEqualTo(1);assertMoney(f,0,12525);
+        // Restore responses and restart the listener without erasing provider evidence.
+        lab.plan(intent,NORMAL);lab.restartHttp();recover(intent);
+        assertThat(lab.paymentCount(intent)).isEqualTo(1);assertMoney(f,12525,0);
+        int postsAfterConfirmation=lab.paymentPosts.get();
+        assertThat(command("/intents/"+intent+"/submit",new JSONObject(),PAYER).getString("status")).isEqualTo("CAPTURED");
+        assertThat(lab.paymentPosts.get()).isEqualTo(postsAfterConfirmation);
         String event="evt_"+UUID.randomUUID().toString().replace("-","");JSONObject evidence=lab.snapshot(intent);
         webhook(event,"checkout.session.completed",evidence,false,400);
         assertThat(count("SELECT count(*) FROM billing.webhook_inbox WHERE event_id=?",event)).isZero();
@@ -123,7 +130,7 @@ class BillingSimulationLabTest {
         webhook(stale,"checkout.session.completed",new JSONObject(evidence.toString()).put("payment_status","unpaid"),true,202);inbox.process("STRIPE",stale);
         assertThat(count("SELECT count(*) FROM billing.journals WHERE effect_key=?","capture:"+intent)).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM billing.webhook_inbox WHERE event_id=?",event)).isEqualTo(1);
-        assertMoney(f,12525,0);passed("Accepted then socket closed; no blind resubmit; invalid signature denied; duplicate/reordered signed delivery has one effect");
+        assertMoney(f,12525,0);passed("Accepted then socket closed; bounded saved-request replay after listener restart retains one provider payment; invalid signature denied; duplicate/reordered signed delivery has one effect");
     }
 
     @Test @Order(2) void timeoutRateLimitAndOutageRemainUncertainWithoutReleasingReservations() throws Exception {
@@ -132,7 +139,9 @@ class BillingSimulationLabTest {
             assertThat(command("/intents/"+intent+"/submit",new JSONObject(),PAYER).getString("status")).isEqualTo("UNKNOWN");
             assertMoney(f,0,12525);assertThat(count("SELECT count(*) FROM billing.journals WHERE intent_id=?",intent)).isZero();
             assertThat(lab.paymentCount(intent)).isEqualTo(fault==RATE_LIMIT||fault==UNAVAILABLE?0:1);
-            int posts=lab.paymentPosts.get();recover(intent);assertThat(lab.paymentPosts.get()).isEqualTo(posts);
+            int posts=lab.paymentPosts.get();recover(intent);assertThat(lab.paymentPosts.get()).isEqualTo(posts+1);
+            assertThat(lab.paymentCount(intent)).isEqualTo(fault==RATE_LIMIT||fault==UNAVAILABLE?0:1);
+            assertMoney(f,0,12525);assertThat(count("SELECT count(*) FROM billing.journals WHERE intent_id=?",intent)).isZero();
         }
         passed("Socket timeout after independent commit, HTTP 429/503 and corrupt amount keep unknown outcomes and reservations");
     }

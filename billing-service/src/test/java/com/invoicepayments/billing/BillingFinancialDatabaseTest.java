@@ -210,6 +210,163 @@ class BillingFinancialDatabaseTest {
         assertThat(count("billing.journals")).isEqualTo(1);
     }
 
+    @Test void crashAfterPreparationBeforeNetworkRecoversTheSameSavedPayment() {
+        BillingProvider crashing=new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new AssertionError("Process stopped before network"); }
+        };
+        BillingService service=service(crashing,MERCHANT);
+        String clientKey=key();
+        UUID intent=id(service.create(PAYER,ACCOUNT,clientKey,List.of(INVOICE),"CARD").get("id"));
+        assertThatThrownBy(()->service.submit(PAYER,intent)).isInstanceOf(AssertionError.class);
+        assertThat(service.raw(intent).get("status")).isEqualTo("SUBMITTING");
+        assertThat(count("billing.provider_operations")).isZero();
+        assertThat(count("billing.attempts")).isEqualTo(1);
+        assertInvoice(INVOICE,0,10000);
+        due(intent);
+        recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        assertThat(payments.raw(intent).get("status")).isEqualTo("PROCESSING");
+        assertThat(payments.raw(intent).get("providerId")).isNotNull();
+        assertThat(payments.create(PAYER,ACCOUNT,clientKey,List.of(INVOICE),"CARD").get("id")).isEqualTo(intent.toString());
+        payments.submit(PAYER,intent);
+        assertThat(count("billing.provider_operations")).isEqualTo(1);
+        assertThat(count("billing.attempts")).isEqualTo(1);
+        assertThat(count("billing.journals")).isZero();
+        provider.simulateResult(intent.toString(),"CAPTURED");
+        due(intent);
+        recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        assertInvoice(INVOICE,10000,0);
+        assertThat(count("billing.journals")).isEqualTo(1);
+    }
+
+    @Test void restartUsesPersistedParametersEvenWhenReturnUrlConfigurationChanges() {
+        BillingProvider crashing=new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new AssertionError("Process stopped"); }
+        };
+        UUID intent=created("CARD");
+        assertThatThrownBy(()->service(crashing,MERCHANT).submit(PAYER,intent)).isInstanceOf(AssertionError.class);
+        AtomicInteger recoveries=new AtomicInteger();
+        BillingProvider restarted=new DelegateProvider(provider) {
+            @Override public ProviderResult recoverPayment(ProviderCommand original,String version,java.time.Instant preparedAt,String providerId) {
+                recoveries.incrementAndGet();
+                assertThat(original.returnUrl()).isEqualTo("http://localhost:4200/invoices?intentId="+intent);
+                assertThat(original.idempotencyKey()).isEqualTo(BillingService.operationKey(intent));
+                assertThat(original.amountMinor()).isEqualTo(10000);
+                assertThat(version).isEqualTo(delegate.paymentRequestVersion());
+                assertThat(preparedAt).isNotNull();
+                return delegate.recoverPayment(original,version,preparedAt,providerId);
+            }
+        };
+        var changed=new BillingService(db,restarted,new MockEnvironment(),true,"https://new.example",MERCHANT.toString());
+        var worker=new BillingRecovery(db,changed,new BillingRefundService(db,changed,restarted),restarted);
+        due(intent);worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(recoveries).hasValue(1);
+        assertThat(count("billing.provider_operations")).isEqualTo(1);
+    }
+
+    @Test void unsafeReplayKeepsReservationAndImmediatelyCreatesOneInvestigation() {
+        BillingProvider unsafe=new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Response missing"); }
+            @Override public ProviderResult recoverPayment(ProviderCommand command,String version,java.time.Instant preparedAt,String providerId) {
+                throw new ProviderReplayUnsafeException();
+            }
+        };
+        BillingService service=service(unsafe,MERCHANT);
+        UUID intent=created("CARD");service.submit(PAYER,intent);
+        var worker=new BillingRecovery(db,service,new BillingRefundService(db,service,unsafe),unsafe);
+        for(int i=0;i<2;i++) {due(intent);worker.recoverPayment(worker.claimPayments(1).get(0));}
+        assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
+        assertInvoice(INVOICE,0,10000);
+        assertThat(count("billing.provider_operations")).isZero();
+        assertThat(count("billing.journals")).isZero();
+        assertThat(db.rows("SELECT id FROM billing.cases WHERE intent_id=? AND reason='PAYMENT_REPLAY_UNSAFE'",intent)).hasSize(1);
+    }
+
+    @Test void legacyAttemptWithoutSnapshotRemainsLookupOnly() {
+        UUID intent=created("CARD");
+        db.update("UPDATE billing.intents SET status='SUBMITTING' WHERE id=?",intent);
+        db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status) VALUES(?,?,'SIMULATOR',?,'SUBMITTING')",
+                UUID.randomUUID(),intent,BillingService.operationKey(intent));
+        due(intent);recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        assertThat(count("billing.provider_operations")).isZero();
+        assertInvoice(INVOICE,0,10000);
+        assertThat(payments.raw(intent).get("status")).isEqualTo("UNKNOWN");
+    }
+
+    @Test void savedSubmissionCannotBeChangedToExtendReplayOrAlterRequest() {
+        UUID intent=submitted("CARD");
+        for(String assignment:List.of("original_request='{}'::jsonb","request_version='other'","operation_key='different'","created_at=created_at+INTERVAL '1 hour'")) {
+            assertThatThrownBy(()->db.update("UPDATE billing.attempts SET "+assignment+" WHERE intent_id=?",intent))
+                    .isInstanceOf(org.springframework.dao.DataAccessException.class);
+        }
+    }
+
+    @Test void staleRecoveryClaimCannotIssueAnyProviderRequest() {
+        UUID intent=submitted("CARD");due(intent);
+        var old=recovery.claimPayments(1).get(0);
+        due(intent);var current=recovery.claimPayments(1).get(0);
+        AtomicInteger calls=new AtomicInteger();
+        BillingProvider observed=new DelegateProvider(provider) {
+            @Override public ProviderResult lookup(String key,String id) {calls.incrementAndGet();return super.lookup(key,id);}
+        };
+        var service=service(observed,MERCHANT);
+        var worker=new BillingRecovery(db,service,new BillingRefundService(db,service,observed),observed);
+        worker.recoverPayment(old);assertThat(calls).hasValue(0);
+        worker.recoverPayment(current);assertThat(calls).hasValue(1);
+    }
+
+    @Test void transactionalCallersAreRejectedBeforeSubmissionApprovalOrRecovery() {
+        UUID created=created("CARD");
+        assertOutsideTransaction(()->payments.submit(PAYER,created));
+        assertThat(payments.raw(created).get("status")).isEqualTo("CREATED");
+        assertThat(count("billing.attempts")).isZero();
+        payments.submit(PAYER,created);
+        assertOutsideTransaction(()->payments.simulate(PAYER,created,"CAPTURED"));
+        due(created);var claim=recovery.claimPayments(1).get(0);
+        assertOutsideTransaction(()->recovery.recoverPayment(claim));
+        payments.simulate(PAYER,created,"CAPTURED");
+        UUID refund=requestedRefund(created,1000);
+        assertOutsideTransaction(()->refunds.approve(APPROVER,refund));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REQUESTED");
+        assertOutsideTransaction(()->refunds.submitApproved(refund));
+        assertOutsideTransaction(()->recovery.recoverRefund(Map.of("id",refund)));
+        assertThat(count("billing.provider_operations")).isEqualTo(1);
+    }
+
+    void assertOutsideTransaction(Runnable action) {
+        db.tx(()->{
+            assertThatThrownBy(action::run).isInstanceOf(org.springframework.transaction.IllegalTransactionStateException.class);
+            return null;
+        });
+    }
+
+    @Test void providerCallHasNoBorrowedHikariConnectionAndSeesCommittedPreparation() {
+        UUID intent=created("CARD");
+        var config=new com.zaxxer.hikari.HikariConfig();
+        config.setJdbcUrl(System.getenv("BILLING_TEST_JDBC_URL"));
+        config.setUsername(System.getenv("BILLING_TEST_DB_USER"));
+        config.setPassword(System.getenv("BILLING_TEST_DB_PASSWORD"));
+        config.setMaximumPoolSize(1);config.setMinimumIdle(0);
+        try(var pool=new com.zaxxer.hikari.HikariDataSource(config)) {
+            var pooledStore=new BillingStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool));
+            AtomicInteger calls=new AtomicInteger();
+            BillingProvider observed=new DelegateProvider(provider) {
+                @Override public ProviderResult submit(ProviderCommand command) {
+                    calls.incrementAndGet();
+                    assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                    assertThat(pool.getHikariPoolMXBean().getActiveConnections()).isZero();
+                    // The separate datasource can see TX1, proving it committed before IO.
+                    assertThat(db.one("SELECT status FROM billing.attempts WHERE intent_id=?",intent).get("status")).isEqualTo("SUBMITTING");
+                    assertThat(pooledStore.one("SELECT status FROM billing.intents WHERE id=?",intent).get("status")).isEqualTo("SUBMITTING");
+                    return super.submit(command);
+                }
+            };
+            var service=new BillingService(pooledStore,observed,new MockEnvironment(),true,"http://localhost:4200",MERCHANT.toString());
+            service.submit(PAYER,intent);
+            assertThat(calls).hasValue(1);
+            assertThat(pool.getHikariPoolMXBean().getActiveConnections()).isZero();
+        }
+    }
+
     @Test void unknownWithoutCanonicalEvidenceKeepsReservationsAndRaisesCase() {
         AtomicInteger submitted = new AtomicInteger();
         BillingProvider absent = new DelegateProvider(provider) {
@@ -1003,6 +1160,7 @@ class BillingFinancialDatabaseTest {
         final SimulatorBillingProvider delegate;
         DelegateProvider(SimulatorBillingProvider delegate) { this.delegate = delegate; }
         @Override public String name() { return delegate.name(); }
+        @Override public String paymentRequestVersion() { return delegate.paymentRequestVersion(); }
         @Override public ProviderResult submit(ProviderCommand command) { return delegate.submit(command); }
         @Override public ProviderResult lookup(String key, String id) { return delegate.lookup(key, id); }
         @Override public ProviderResult refund(RefundCommand command) { return delegate.refund(command); }

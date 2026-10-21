@@ -7,6 +7,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
 import org.springframework.stereotype.Service;
 import java.util.*;
+import java.time.Instant;
 import static com.invoicepayments.billing.BillingStore.*;
 
 /** Financial effects occur only inside database transactions; provider IO occurs outside them. */
@@ -107,6 +108,7 @@ public class BillingService {
         });
     }
     public Map<String,Object> submit(String user,UUID intent) {
+        requireNoTransaction();
         authorizePayer(user,id(raw(intent).get("accountId")));
         UUID token=UUID.randomUUID();
         var work=db.tx(() -> {
@@ -114,19 +116,24 @@ public class BillingService {
             requireProvider(row);
             if(!"CREATED".equals(row.get("status"))) return null;
             db.update("UPDATE billing.intents SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',next_recovery_at=NOW()+INTERVAL '45 seconds',updated_at=NOW() WHERE id=?",token,intent);
-            db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status) VALUES(?,?,?,?,'SUBMITTING')",UUID.randomUUID(),intent,provider.name(),operationKey(intent));
-            db.event(intent,"SUBMITTING","Original payment operation submitted; retries will reuse this operation");
-            return row;
+            ProviderCommand command=new ProviderCommand(intent.toString(),operationKey(intent),amount(row,"amountMinor"),
+                text(row,"currency"),text(row,"method"),publicUrl+"/invoices?intentId="+intent);
+            db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status,original_request,request_version) VALUES(?,?,?,?,'SUBMITTING',?::jsonb,?)",
+                UUID.randomUUID(),intent,provider.name(),operationKey(intent),command.toJson(),provider.paymentRequestVersion());
+            db.event(intent,"SUBMITTING","Payment submission prepared; provider acceptance is not yet known");
+            return db.one("SELECT original_request,request_version,created_at FROM billing.attempts WHERE intent_id=?",intent);
         });
         if(work==null) return get(user,intent);
         ProviderResult result;
         try {
-            result=provider.submit(new ProviderCommand(intent.toString(),operationKey(intent),amount(work,"amountMinor"),"USD",text(work,"method"),publicUrl+"/invoices?intentId="+intent));
+            result=provider.submitSaved(ProviderCommand.fromJson(text(work,"originalRequest")),
+                text(work,"requestVersion"),Instant.parse(text(work,"createdAt")));
         } catch(RuntimeException failure) { result=new ProviderResult(null,"UNKNOWN",null,"Provider outcome is uncertain; recovery will query the original operation"); }
         recordResult(intent,token,result);
         return get(user,intent);
     }
     public Map<String,Object> simulate(String user,UUID intent,String outcome) {
+        requireNoTransaction();
         authorizePayer(user,id(raw(intent).get("accountId")));
         if(!simulator || !(provider instanceof SimulatorBillingProvider simulated))
             throw new BillingProblem(403,"SIMULATOR_DISABLED","Simulation is disabled in this environment");

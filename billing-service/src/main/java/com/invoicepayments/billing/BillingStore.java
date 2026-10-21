@@ -6,6 +6,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.IllegalTransactionStateException;
 import java.sql.Timestamp;
 import java.util.*;
 import java.util.function.Supplier;
@@ -19,6 +21,14 @@ public class BillingStore {
         this.jdbc=jdbc; this.transaction=new TransactionTemplate(manager);
     }
     public <T> T tx(Supplier<T> action) { return transaction.execute(s -> action.get()); }
+    public static void requireNoTransaction() {
+        // REQUIRED blocks below must commit before provider IO. Suspending an outer
+        // transaction would still leave its connection borrowed while the provider waits.
+        if (TransactionSynchronizationManager.isActualTransactionActive()
+                || TransactionSynchronizationManager.isSynchronizationActive()) {
+            throw new IllegalTransactionStateException("Payment orchestration must run outside an existing transaction");
+        }
+    }
     public int update(String sql,Object... args) { return jdbc.update(sql,args); }
     public List<Map<String,Object>> rows(String sql,Object... args) {
         return jdbc.query(sql,(rs,n) -> {

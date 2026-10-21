@@ -10,6 +10,10 @@ import java.net.URLDecoder;
 import java.net.http.HttpRequest;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -117,6 +121,102 @@ class StripeBillingProviderTest {
         assertThat(provider.lookup(KEY, null).state()).isEqualTo("UNKNOWN");
         assertThat(provider.lookup(KEY, "https://evil.example").state()).isEqualTo("UNKNOWN");
         assertThat(transport.requests).isEmpty();
+    }
+
+    @Test void recoveryReusesExactRequestThenFetchesCurrentStateInsteadOfCachedResponse() {
+        Instant now=Instant.parse("2026-10-21T08:00:00Z");
+        var adapter=new StripeBillingProvider("sk_test_exampleOnly",transport,Clock.fixed(now,ZoneOffset.UTC));
+        ProviderCommand saved=command("CARD",12345);
+        transport.failure=new IOException("Response lost after acceptance");
+        assertThatThrownBy(()->adapter.submitSaved(saved,adapter.paymentRequestVersion(),now.minusSeconds(60)))
+                .isInstanceOf(ProviderUncertainException.class);
+        transport.failure=null;
+        // Stripe replays the original open Checkout response, but it has since been paid.
+        transport.reply(session(null,"unpaid","open"));
+        transport.reply(session(PI,"paid","complete"));
+        transport.reply(paymentIntent("succeeded",12345));
+        ProviderResult recovered=adapter.recoverPayment(saved,adapter.paymentRequestVersion(),now.minusSeconds(60),null);
+        assertThat(recovered.state()).isEqualTo("CAPTURED");
+        assertThat(recovered.providerId()).isEqualTo(SESSION);
+        assertThat(transport.requests).hasSize(4);
+        assertThat(form(transport.requests.get(1))).isEqualTo(form(transport.requests.get(0)));
+        assertThat(transport.requests.get(1).headers()).isEqualTo(transport.requests.get(0).headers());
+        assertThat(transport.requests.subList(2,4)).allMatch(r->r.method().equals("GET"));
+    }
+
+    @Test void crashBeforeInitialNetworkCallCanRecoverSavedCheckout() {
+        Instant now=Instant.parse("2026-10-21T08:00:00Z");
+        var adapter=new StripeBillingProvider("sk_test_exampleOnly",transport,Clock.fixed(now,ZoneOffset.UTC));
+        transport.reply(session(null,"unpaid","open"));
+        transport.reply(session(null,"unpaid","open"));
+        assertThat(adapter.recoverPayment(command("CARD",12345),adapter.paymentRequestVersion(),now.minusSeconds(60),null).state())
+                .isEqualTo("REQUIRES_ACTION");
+        assertThat(transport.requests).extracting(HttpRequest::method).containsExactly("POST","GET");
+    }
+
+    @ParameterizedTest @ValueSource(longs={0,1,60})
+    void replayAtOrAfterTwentyThreeHoursNeverPosts(long secondsPastDeadline) {
+        Instant now=Instant.parse("2026-10-21T08:00:00Z");
+        var adapter=new StripeBillingProvider("sk_test_exampleOnly",transport,Clock.fixed(now,ZoneOffset.UTC));
+        Instant prepared=now.minus(Duration.ofHours(23)).minusSeconds(secondsPastDeadline);
+        assertThatThrownBy(()->adapter.recoverPayment(command("CARD",12345),adapter.paymentRequestVersion(),prepared,null))
+                .isInstanceOf(ProviderReplayUnsafeException.class);
+        assertThatThrownBy(()->adapter.submitSaved(command("CARD",12345),adapter.paymentRequestVersion(),prepared))
+                .isInstanceOf(ProviderReplayUnsafeException.class);
+        assertThat(transport.requests).isEmpty();
+    }
+
+    @Test void replayJustBeforeDeadlineIsAllowedAndReadsExpiredCheckout() {
+        Instant now=Instant.parse("2026-10-21T08:00:00Z");
+        var adapter=new StripeBillingProvider("sk_test_exampleOnly",transport,Clock.fixed(now,ZoneOffset.UTC));
+        transport.reply(session(null,"unpaid","open"));
+        transport.reply(session(null,"unpaid","expired").put("url",JSONObject.NULL));
+        assertThat(adapter.recoverPayment(command("CARD",12345),adapter.paymentRequestVersion(),
+                now.minus(Duration.ofHours(23)).plusSeconds(1),null).state()).isEqualTo("FAILED");
+    }
+
+    @Test void missingVersionChangedCredentialsOrFutureTimestampCannotReplay() {
+        Instant now=Instant.parse("2026-10-21T08:00:00Z");
+        var adapter=new StripeBillingProvider("sk_test_exampleOnly",transport,Clock.fixed(now,ZoneOffset.UTC));
+        var rotated=new StripeBillingProvider("sk_test_differentAccount",transport,Clock.fixed(now,ZoneOffset.UTC));
+        for(String version: new String[]{null,"previous-format",rotated.paymentRequestVersion()}) {
+            assertThatThrownBy(()->adapter.recoverPayment(command("CARD",12345),version,now,null))
+                    .isInstanceOf(ProviderReplayUnsafeException.class);
+        }
+        assertThatThrownBy(()->adapter.recoverPayment(command("CARD",12345),adapter.paymentRequestVersion(),now.plusSeconds(1),null))
+                .isInstanceOf(ProviderReplayUnsafeException.class);
+        assertThatThrownBy(()->adapter.recoverPayment(command("CARD",12345),adapter.paymentRequestVersion(),null,null))
+                .isInstanceOf(ProviderReplayUnsafeException.class);
+        assertThat(transport.requests).isEmpty();
+    }
+
+    @Test void knownIdStillAllowsReadOnlyRecoveryAfterReplayWindow() {
+        transport.reply(session(PI,"paid","complete"));
+        transport.reply(paymentIntent("succeeded",12345));
+        assertThat(provider.recoverPayment(command("CARD",12345),null,Instant.EPOCH,SESSION).state()).isEqualTo("CAPTURED");
+        assertThat(transport.requests).hasSize(2).allMatch(r->r.method().equals("GET"));
+    }
+
+    @Test void savedCommandRoundTripsWithoutChangingReturnUrlOrAmount() {
+        ProviderCommand saved=command("ACH",12345);
+        assertThat(ProviderCommand.fromJson(saved.toJson())).isEqualTo(saved);
+    }
+
+    @Test void failedReadAfterReplayPreservesVerifiedProviderIdForLaterLookup() {
+        transport.reply(session(null,"unpaid","open"));
+        transport.responses.add(new StripeBillingProvider.Response(503,"{}"));
+        ProviderResult result=provider.recoverPayment(command("CARD",12345),provider.paymentRequestVersion(),Instant.now().minusSeconds(60),null);
+        assertThat(result.state()).isEqualTo("UNKNOWN");
+        assertThat(result.providerId()).isEqualTo(SESSION);
+        assertThat(transport.requests).extracting(HttpRequest::method).containsExactly("POST","GET");
+    }
+
+    @Test void failedPaymentStateReadAfterSubmissionPreservesVerifiedSessionId() {
+        transport.reply(session(PI,"paid","complete"));
+        transport.responses.add(new StripeBillingProvider.Response(503,"{}"));
+        ProviderResult result=provider.submit(command("CARD",12345));
+        assertThat(result.state()).isEqualTo("UNKNOWN");
+        assertThat(result.providerId()).isEqualTo(SESSION);
     }
 
     @Test void wrongLookupCorrelationStopsBeforeFetchingPaymentIntent() {

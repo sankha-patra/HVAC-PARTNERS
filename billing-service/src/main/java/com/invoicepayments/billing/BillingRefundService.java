@@ -44,6 +44,7 @@ public class BillingRefundService {
         });
     }
     public Map<String,Object> approve(String user,UUID refund) {
+        requireNoTransaction();
         UUID intent=id(raw(refund).get("intentId"));
         db.tx(() -> {
             var payment=payments.locked(intent); payments.staff(user,merchant(payment),"REFUND_APPROVER");
@@ -56,6 +57,7 @@ public class BillingRefundService {
         submitApproved(refund); return raw(refund);
     }
     public void submitApproved(UUID refund) {
+        requireNoTransaction();
         UUID token=UUID.randomUUID(); UUID intent=id(raw(refund).get("intentId"));
         var work=db.tx(() -> {
             var payment=payments.locked(intent);

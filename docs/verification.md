@@ -1,6 +1,32 @@
 # Verification of the extracted repository
 
-## Current outbox and alert fixes — 17 October 2026
+## Payment submission recovery — 21 October 2026
+
+The full rebuilt disposable Docker suite passed **229 tests, with zero failures,
+errors or skips**. This includes 86 financial database tests, 41 Stripe adapter
+tests and seven synthetic network/load scenarios. PostgreSQL 17 and embedded
+Kafka ran locally; Stripe, bank and ERP responses were simulated.
+
+The new checks cover a crash after preparation but before provider contact,
+saved-request replay, immutable parameters, stale worker ownership, the 23-hour
+Stripe replay cutoff, retaining a verified reference after a failed status read,
+and rejecting outer transactions. A one-connection Hikari pool had zero borrowed
+connections at the provider-call boundary, with TX1 visible from another connection.
+The HTTP lab recovers an accepted payment after a lost response and listener
+restart, and checks that retries and duplicate webhooks retain one financial effect.
+
+See the [walkthrough](payment-recovery-walkthrough.md) and the
+[verification manifest with source hashes](payment-recovery-verification-2026-10-21.json).
+Raw evidence is in ignored `.tmp-notes/container-tests/20261021T104211006Z`.
+Run `./scripts/verify-container-tests.ps1` to reproduce. The repository boundary
+check and preserved migration hashes also passed; V11 is an additive migration.
+
+This validates the working-tree source identified by the manifest, not a new
+deployed application. No live Stripe transaction, frontend acceptance check,
+full-stack outage drill or production load test was performed for this repair.
+Refund recovery and the employee investigation/resolution workflow remain open.
+
+## Outbox and alert fixes — 17 October 2026
 
 Verified code commit: [`bdbb284ed080`](https://github.com/sankha-patra/HVAC-PARTNERS/commit/bdbb284ed080756acbb1c3fd0309ea123c9c05e6).
 The full drill ran against a clean working tree at that commit and recorded hashes

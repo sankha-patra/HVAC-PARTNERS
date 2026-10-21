@@ -1,0 +1,188 @@
+{
+  "date": "2026-10-21",
+  "scope": "Payment submission recovery and orchestration transaction boundaries",
+  "workingTreeBase": "4776ab34f5568b98a6efc4b07e84719effe6f584",
+  "verification": "Full rebuilt disposable Docker suite; PostgreSQL 17, embedded Kafka and synthetic HTTP provider; no live Stripe",
+  "command": "./scripts/verify-container-tests.ps1",
+  "evidenceDirectory": ".tmp-notes/container-tests/20261021T104211006Z",
+  "totals": {
+    "errors": 0,
+    "skipped": 0,
+    "tests": 229,
+    "failures": 0
+  },
+  "suites": [
+    {
+      "name": "com.invoicepayments.billing.BillingConfigurationTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingFinancialDatabaseTest",
+      "tests": 86,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingHttpSecurityDatabaseTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingKafkaIntegrationTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingMetricsDatabaseTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingMskIamConfigurationTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingProducerSafetyTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingSimulationLabTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.provider.SimulatorBillingProviderDatabaseTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.provider.StripeBillingProviderTest",
+      "tests": 41,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.provider.StripeWebhookVerifierTest",
+      "tests": 27,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.monitoring.LocalMonitoringSecurityConfigTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.config.DemoUserSeederTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.config.LocalMonitoringSecurityConfigTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.IdentityApplicationDatabaseTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.IdentityConfigurationTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "sourceHashes": [
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingRecovery.java",
+      "sha256": "7f6526bc1c373451160aabccd66d41f2fe607bda15c159741b6fbd2aa525282f"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingRefundService.java",
+      "sha256": "9bf9520f0c86074f1626086c2b504bbe8be0fe5c8af3ea0c840838e11128fda1"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingService.java",
+      "sha256": "25e37eae0a9e092c57a10a6be0a005a2567589d5b36371d7d40237e7869758dd"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingStore.java",
+      "sha256": "40a79951287fa495e19130280330d2b5065b52590355f540ab1c9b54838eccbf"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/BillingProvider.java",
+      "sha256": "11ee0c3b52a46b35aacc3b7f318c724619fc50e4a0fc9403ea2b8d0976362111"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderCommand.java",
+      "sha256": "a5c1d1063f2940a8c1478eb908fa3a84cc6815e9987dde917438d01b67589e01"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderReplayUnsafeException.java",
+      "sha256": "0fad30778fecff952ce5683098696b9e1e885a761d6515aabe5db7e0c8c676e6"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/SimulatorBillingProvider.java",
+      "sha256": "991844571ddb53b153c76d446c829612da6d44a4d3a09ae23e510133a34f3058"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/StripeBillingProvider.java",
+      "sha256": "fd8fd28b9c528aa045aea58bda3b2f4d927b96353916d8adda4c9a5dcffc2dad"
+    },
+    {
+      "path": "billing-service/src/main/resources/db/billing/V11__saved_payment_submission.sql",
+      "sha256": "382665b86641e7c4b80657725af0836e66c0d0bdbe9cd2821f78f4004c9fd11d"
+    },
+    {
+      "path": "billing-service/src/test/java/com/invoicepayments/billing/BillingFinancialDatabaseTest.java",
+      "sha256": "34c59ef4aff400ebb3ee0691ecce5d36f5fa767ba2d7be6aae14a95dfbf03e43"
+    },
+    {
+      "path": "billing-service/src/test/java/com/invoicepayments/billing/BillingSimulationLabTest.java",
+      "sha256": "b385c4b5d7a9dcfabfa02648471eb8c77e232446134f3e871cc39450f30c3863"
+    },
+    {
+      "path": "billing-service/src/test/java/com/invoicepayments/billing/provider/StripeBillingProviderTest.java",
+      "sha256": "670d03b8dee7c04ec41721639c3b5b38e9d286699d1c7a7d0dd92eac0e0a73b1"
+    }
+  ],
+  "limits": [
+    "Stripe responses and external provider/bank/ERP behavior are simulated",
+    "No production latency or throughput claim",
+    "Refund recovery and manual resolution workflow remain separate work",
+    "No application deployment or frontend changes"
+  ]
+}

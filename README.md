@@ -60,3 +60,6 @@ Run `scripts/check-repository.ps1` to verify repository boundaries and migration
 | `scripts` | Local startup, tests, backup and failure drills |
 
 See [payment publication order and alert policy](docs/payment-ordering-and-alerts.md), [repository separation](docs/repository-separation.md) for the extraction boundary and [verification](docs/verification.md) for evidence and limits. Do not describe simulated results as live bank, Stripe, ERP or production validation.
+
+For a step-by-step explanation of payment submission, crash recovery and transaction
+propagation, read the [payment recovery walkthrough](docs/payment-recovery-walkthrough.md).

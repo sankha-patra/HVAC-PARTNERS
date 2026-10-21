@@ -12,6 +12,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
@@ -34,20 +36,59 @@ public final class StripeBillingProvider implements BillingProvider {
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
     private final String secretKey;
     private final Transport transport;
+    private final Clock clock;
 
     public StripeBillingProvider(String secretKey) {
         this(secretKey, new JdkTransport());
     }
 
     StripeBillingProvider(String secretKey, Transport transport) {
+        this(secretKey, transport, Clock.systemUTC());
+    }
+
+    StripeBillingProvider(String secretKey, Transport transport, Clock clock) {
         this.secretKey = secretKey == null ? "" : secretKey.trim();
         if (!this.secretKey.isEmpty() && !this.secretKey.matches("sk_test_[A-Za-z0-9]+")) {
             throw new IllegalArgumentException("Only a Stripe test secret key is supported");
         }
         this.transport = Objects.requireNonNull(transport);
+        this.clock = Objects.requireNonNull(clock);
     }
 
     @Override public String name() { return "STRIPE"; }
+
+    @Override public String paymentRequestVersion() {
+        // A credential change may select a different Stripe account. Fail closed on replay
+        // even for same-account key rotation; never persist the secret itself.
+        try {
+            String fingerprint = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(secretKey.getBytes(StandardCharsets.UTF_8)));
+            return API_VERSION + ":checkout-v1:" + fingerprint;
+        } catch (java.security.NoSuchAlgorithmException ex) { throw new IllegalStateException(ex); }
+    }
+
+    @Override public ProviderResult submitSaved(ProviderCommand command, String version, Instant preparedAt) {
+        Instant now = clock.instant();
+        // Stripe v1 may prune keys after 24 hours. Keep an hour of safety margin.
+        if (!paymentRequestVersion().equals(version) || preparedAt == null || preparedAt.isAfter(now)
+                || !now.isBefore(preparedAt.plus(Duration.ofHours(23)))) {
+            throw new ProviderReplayUnsafeException();
+        }
+        return submit(command);
+    }
+
+    @Override public ProviderResult recoverPayment(ProviderCommand command, String version, Instant preparedAt, String providerId) {
+        if (providerId != null) return lookup(command.idempotencyKey(), providerId);
+        ProviderResult replay = submitSaved(command, version, preparedAt);
+        // A replay returns the original response. Read current Checkout state before
+        // applying evidence: the customer may have paid or the session may have expired.
+        try { return lookup(command.idempotencyKey(), replay.providerId()); }
+        catch (ProviderUncertainException ex) {
+            // Persist the verified identity even if this read fails, so later recovery
+            // can use GET after the safe POST window has elapsed.
+            return unknown(replay.providerId());
+        }
+    }
 
     @Override public ProviderResult submit(ProviderCommand command) {
         ProviderValidation.payment(command);
@@ -75,7 +116,8 @@ public final class StripeBillingProvider implements BillingProvider {
             }
             return sessionResult(session, command.idempotencyKey());
         } catch (ProviderUncertainException ex) {
-            throw ex;
+            // Session identity and amount were verified before fetching payment state.
+            return unknown(session.getString("id"));
         } catch (RuntimeException ex) {
             throw new ProviderUncertainException("Stripe returned an uncorrelated payment; reconcile before retrying");
         }

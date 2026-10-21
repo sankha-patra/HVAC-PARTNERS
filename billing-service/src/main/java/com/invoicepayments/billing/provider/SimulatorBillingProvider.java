@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.time.Instant;
 
 /**
  * Deterministic provider emulator. Its independent commits emulate an external provider:
@@ -34,6 +35,15 @@ public final class SimulatorBillingProvider implements BillingProvider {
     }
 
     @Override public String name() { return "SIMULATOR"; }
+
+    @Override public String paymentRequestVersion() { return "simulator:payment-v1"; }
+
+    @Override public ProviderResult recoverPayment(ProviderCommand command, String version, Instant preparedAt, String providerId) {
+        if (providerId != null) return lookup(command.idempotencyKey(), providerId);
+        if (!paymentRequestVersion().equals(version)) throw new ProviderReplayUnsafeException();
+        // The emulator retains operation keys indefinitely; Stripe has a bounded window.
+        return submit(command);
+    }
 
     @Override public ProviderResult submit(ProviderCommand command) {
         ProviderValidation.payment(command);
