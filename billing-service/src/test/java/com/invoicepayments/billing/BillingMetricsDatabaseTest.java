@@ -56,7 +56,8 @@ class BillingMetricsDatabaseTest {
             jdbc.update("INSERT INTO billing.outbox(id,aggregate_id,type,payload,created_at) VALUES(?,?,'METRICS_TEST','{}'::jsonb,NOW()-INTERVAL '2 minutes')",event,UUID.randomUUID());
             for(String metric:new String[]{"billing.payments.unresolved","billing.payments.oldest.unresolved.seconds",
                 "billing.webhooks.unmatched","billing.outbox.pending","billing.outbox.oldest.seconds",
-                "billing.cases.open","billing.deadletters.open"}) {
+                "billing.cases.open","billing.deadletters.open","billing.refunds.unresolved","billing.refunds.stuck",
+                "billing.cases.awaiting.approval"}) {
                 assertThat(Double.isFinite(registry.get(metric).gauge().value())).as(metric).isTrue();
             }
             assertThat(registry.get("billing.outbox.pending").gauge().value()).isGreaterThanOrEqualTo(1);

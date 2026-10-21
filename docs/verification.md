@@ -1,5 +1,39 @@
 # Verification of the extracted repository
 
+## Refund recovery, case resolution and expiry — 21 October 2026
+
+The complete Java suite passed **268 tests, with zero failures, errors or skips**
+(229 before this change, plus 39 new): 117 financial database tests, 48 Stripe adapter
+tests and 12 HTTP security tests. Vitest passed 44 frontend tests, and promtool 3.13.4
+passed the rule check and the rule tests, including the two new alerts. PostgreSQL 17.10
+and embedded Kafka ran locally; Stripe, bank and ERP responses were simulated.
+
+The new checks cover:
+
+- A refund that crashes before the network call, or that loses its response, is replayed
+  from its saved request, and exactly one provider refund results.
+- Past the 23-hour window, a refund escalates and its amount stays committed.
+- A stale recovery claim cannot call the provider.
+- Unresolved refunds back off, then escalate.
+- The stuck-refund gauge.
+- An unverified provider reference changes nothing.
+- A release needs a different approver.
+- Unresolved cases cannot be closed.
+- The audit history cannot be changed.
+- Provider evidence resolves a case automatically.
+- An abandoned unsubmitted payment expires.
+- Expiry and submit race safely (checked five times).
+
+Mutation checks confirmed that the new tests fail when the guards they protect are removed.
+The nine preserved migration hashes and the V11 hash are unchanged; V12 is additive.
+
+See [what changed](payment-lifecycle-completion.md) and the
+[verification manifest with source hashes](payment-lifecycle-verification-2026-10-21.json).
+
+This run used Maven outside the Docker harness. `./scripts/verify-container-tests.ps1`,
+the full-stack drill and a live Stripe test-mode payment were not run for this change.
+The [Stripe test-mode runbook](stripe-test-mode-runbook.md) is the next piece of evidence.
+
 ## Payment submission recovery — 21 October 2026
 
 The full rebuilt disposable Docker suite passed **229 tests, with zero failures,
@@ -24,7 +58,8 @@ check and preserved migration hashes also passed; V11 is an additive migration.
 This validates the working-tree source identified by the manifest, not a new
 deployed application. No live Stripe transaction, frontend acceptance check,
 full-stack outage drill or production load test was performed for this repair.
-Refund recovery and the employee investigation/resolution workflow remain open.
+Refund recovery and the employee investigation/resolution workflow remained open
+at that point; the entry above covers them.
 
 ## Outbox and alert fixes — 17 October 2026
 

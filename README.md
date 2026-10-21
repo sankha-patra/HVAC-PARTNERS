@@ -4,6 +4,15 @@ A standalone reference application for a fictional US B2B supplier: customers pa
 
 Java 17 / Spring Boot, Angular, PostgreSQL, Kafka, Prometheus and Grafana. AWS infrastructure is described with Terraform. Local PSP, bank and ERP behavior is simulated; no real money moves.
 
+## What the payment lifecycle guarantees
+
+- **No connection held during provider calls.** The request is saved and committed before any call to the provider; the result is recorded in a later transaction. Payment orchestration refuses to run inside a caller's transaction.
+- **A timeout is UNKNOWN, never FAILED.** The invoice stays reserved and recovery reuses the original idempotency key: it reads by provider ID, or replays the saved request inside the provider's 23-hour window.
+- **Retries cannot pay twice.** The browser's key returns the same payment; a second key cannot reserve the same invoice; a second submit makes no second provider call.
+- **Refunds recover the same way,** with backoff, escalation and a stuck-refund alert. A different employee must approve every refund.
+- **Stuck cases are resolved, not overwritten.** Staff attach a provider reference that the provider verifies, or two different employees approve a release. Nothing can mark a payment paid. Every action is audited.
+- **Abandoned unsubmitted payments expire** after 30 minutes and release their invoices.
+
 ## Run locally
 
 Install Docker Desktop with Compose and PowerShell. From this repository:
@@ -63,3 +72,6 @@ See [payment publication order and alert policy](docs/payment-ordering-and-alert
 
 For a step-by-step explanation of payment submission, crash recovery and transaction
 propagation, read the [payment recovery walkthrough](docs/payment-recovery-walkthrough.md).
+Refund recovery, case resolution and expiry are explained in
+[the second repair](docs/payment-lifecycle-completion.md). To prove one real Stripe test-mode
+payment end to end, follow the [Stripe test-mode runbook](docs/stripe-test-mode-runbook.md).

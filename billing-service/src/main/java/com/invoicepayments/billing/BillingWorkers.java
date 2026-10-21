@@ -41,6 +41,10 @@ public class BillingWorkers {
         if(available>0 && !refundFirst) for(var job:recovery.claimRefunds(available)) execute(io,()->recovery.recoverRefund(job));
     }
     @Scheduled(fixedDelayString="${billing.inbox-interval-ms:1000}") public void receive() { inbox.drain(25); }
+    // Unsubmitted intents hold invoice reservations; release them after this age (minutes).
+    @org.springframework.beans.factory.annotation.Value("${billing.unsubmitted-ttl-minutes:30}") int unsubmittedTtlMinutes=30;
+    @Scheduled(fixedDelayString="${billing.expiry-interval-ms:60000}")
+    public void expireUnsubmitted() { recovery.expireUnsubmitted(unsubmittedTtlMinutes,20); }
     @Scheduled(fixedDelayString="${billing.outbox-interval-ms:100}")
     public void publish() {
         int available=publishers.getMaximumPoolSize()-publishers.getActiveCount()-publishers.getQueue().size();

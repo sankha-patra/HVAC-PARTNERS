@@ -301,6 +301,65 @@ class StripeBillingProviderTest {
         assertThat(transport.requests).hasSize(3).filteredOn(r -> r.method().equals("POST")).hasSize(1);
     }
 
+    @Test void refundRecoveryReplaysTheExactRefundThenReadsCurrentState() {
+        Instant now = Instant.parse("2026-10-21T08:00:00Z");
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, Clock.fixed(now, ZoneOffset.UTC));
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(paymentIntent("succeeded", 12345));
+        transport.failOnRequest = 3; // the refund POST is accepted, but its response is lost
+        assertThatThrownBy(() -> adapter.refund(refundCommand())).isInstanceOf(ProviderUncertainException.class);
+        transport.failOnRequest = -1;
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(paymentIntent("succeeded", 12345));
+        transport.reply(refund("pending"));   // Stripe replays the original response for the same key
+        transport.reply(refund("succeeded")); // the refund's current state
+        ProviderResult recovered = adapter.recoverRefund(refundCommand(), adapter.refundRequestVersion(), now.minusSeconds(60), null);
+        assertThat(recovered.state()).isEqualTo("REFUNDED");
+        assertThat(recovered.providerId()).isEqualTo(REF);
+        List<HttpRequest> posts = transport.requests.stream().filter(r -> r.method().equals("POST")).toList();
+        assertThat(posts).hasSize(2);
+        assertThat(form(posts.get(1))).isEqualTo(form(posts.get(0)));
+        assertThat(posts.get(1).headers().firstValue("Idempotency-Key")).contains(REFUND_KEY);
+        assertThat(posts.get(0).headers().firstValue("Idempotency-Key")).contains(REFUND_KEY);
+        assertThat(transport.requests.get(transport.requests.size() - 1).method()).isEqualTo("GET");
+    }
+
+    @ParameterizedTest @ValueSource(longs = {0, 1, 60})
+    void refundReplayAtOrAfterTwentyThreeHoursNeverPosts(long secondsPastDeadline) {
+        Instant now = Instant.parse("2026-10-21T08:00:00Z");
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, Clock.fixed(now, ZoneOffset.UTC));
+        Instant prepared = now.minus(Duration.ofHours(23)).minusSeconds(secondsPastDeadline);
+        assertThatThrownBy(() -> adapter.recoverRefund(refundCommand(), adapter.refundRequestVersion(), prepared, null))
+                .isInstanceOf(ProviderReplayUnsafeException.class);
+        assertThat(transport.requests).isEmpty();
+    }
+
+    @Test void refundReplayRejectsPaymentFormatChangedCredentialsOrUntrustedTimes() {
+        Instant now = Instant.parse("2026-10-21T08:00:00Z");
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, Clock.fixed(now, ZoneOffset.UTC));
+        var rotated = new StripeBillingProvider("sk_test_differentAccount", transport, Clock.fixed(now, ZoneOffset.UTC));
+        assertThat(adapter.refundRequestVersion()).isNotEqualTo(adapter.paymentRequestVersion()).isNotEqualTo(rotated.refundRequestVersion());
+        for (String version : new String[]{null, "previous-format", adapter.paymentRequestVersion(), rotated.refundRequestVersion()}) {
+            assertThatThrownBy(() -> adapter.recoverRefund(refundCommand(), version, now.minusSeconds(60), null))
+                    .isInstanceOf(ProviderReplayUnsafeException.class);
+        }
+        assertThatThrownBy(() -> adapter.recoverRefund(refundCommand(), adapter.refundRequestVersion(), now.plusSeconds(1), null))
+                .isInstanceOf(ProviderReplayUnsafeException.class);
+        assertThatThrownBy(() -> adapter.recoverRefund(refundCommand(), adapter.refundRequestVersion(), null, null))
+                .isInstanceOf(ProviderReplayUnsafeException.class);
+        assertThat(transport.requests).isEmpty();
+    }
+
+    @Test void knownRefundIdOnlyReadsEvenAfterTheReplayWindow() {
+        transport.reply(refund("succeeded"));
+        assertThat(provider.recoverRefund(refundCommand(), null, Instant.EPOCH, REF).state()).isEqualTo("REFUNDED");
+        assertThat(transport.requests).hasSize(1).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @Test void savedRefundCommandRoundTripsExactly() {
+        assertThat(RefundCommand.fromJson(refundCommand().toJson())).isEqualTo(refundCommand());
+    }
+
     static ProviderCommand command(String method, long amount) {
         return new ProviderCommand(INTENT, KEY, amount, "USD", method, "http://localhost:4200/billing");
     }
@@ -340,10 +399,12 @@ class StripeBillingProviderTest {
         final List<HttpRequest> requests = new ArrayList<>();
         final Deque<StripeBillingProvider.Response> responses = new ArrayDeque<>();
         IOException failure;
+        int failOnRequest = -1; // 1-based: the request reaches the provider, its response is lost
         void reply(JSONObject json) { responses.add(new StripeBillingProvider.Response(200, json.toString())); }
         @Override public StripeBillingProvider.Response send(HttpRequest request) throws IOException {
             requests.add(request);
             if (failure != null) throw failure;
+            if (requests.size() == failOnRequest) throw new IOException("Response lost after acceptance");
             return responses.removeFirst();
         }
     }

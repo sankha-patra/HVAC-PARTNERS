@@ -29,3 +29,17 @@ groups:
         annotations:
           summary: Unresolved billing payments exceeded their recovery deadline
           description: 'Review provider lookup and the finance exception queue. Deadlines: uncertain/submitting 15 minutes, customer action 24 hours, processing 7 days. Do not create a replacement charge blindly.'
+      - alert: BillingRefundStuck
+        expr: billing_refunds_stuck > 0
+        for: 2m
+        labels: {severity: warning, environment: local}
+        annotations:
+          summary: Approved refunds exceeded their recovery deadline
+          description: 'Open the refund case in the finance workspace. Deadlines: approved or uncertain 15 minutes, provider pending 7 days. Do not issue a replacement refund until the original is resolved.'
+      - alert: BillingReleaseAwaitingApproval
+        expr: billing_cases_awaiting_approval > 0
+        for: 30m
+        labels: {severity: warning, environment: local}
+        annotations:
+          summary: A stuck-payment release is waiting for a second approver
+          description: 'A different authorized approver must review the request. The invoice stays reserved until then; do not approve your own request.'

@@ -1,0 +1,250 @@
+{
+  "date": "2026-10-21",
+  "scope": "Refund recovery, audited case resolution and expiry of unsubmitted payments",
+  "workingTreeBase": "Commit 1 on branch payment-lifecycle-hardening (the payment submission recovery repair, parent 4776ab34f5568b98a6efc4b07e84719effe6f584)",
+  "verification": "Maven offline test run outside Docker: PostgreSQL 17.10, embedded Kafka, simulated provider and Stripe HTTP fake; JDK 21 compiling with release 17; no live Stripe",
+  "command": "mvn -o -B -ntp test (with BILLING_TEST_* and BILLING_LAB_* pointing at a disposable PostgreSQL 17)",
+  "totals": {
+    "tests": 268,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": [
+    {
+      "name": "com.invoicepayments.billing.BillingConfigurationTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingFinancialDatabaseTest",
+      "tests": 117,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingHttpSecurityDatabaseTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingKafkaIntegrationTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingMetricsDatabaseTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingMskIamConfigurationTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingProducerSafetyTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.BillingSimulationLabTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.provider.SimulatorBillingProviderDatabaseTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.provider.StripeBillingProviderTest",
+      "tests": 48,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.billing.provider.StripeWebhookVerifierTest",
+      "tests": 27,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.monitoring.LocalMonitoringSecurityConfigTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.IdentityApplicationDatabaseTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.IdentityConfigurationTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.config.DemoUserSeederTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "com.invoicepayments.identity.config.LocalMonitoringSecurityConfigTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "frontend": {
+    "runner": "Vitest 4.1.10 via ng test, Node 24.22.0",
+    "testFiles": 5,
+    "tests": 44,
+    "failures": 0,
+    "devBuild": "PASS",
+    "productionBuild": "Not run: font inlining needs network access"
+  },
+  "prometheusRules": {
+    "tool": "promtool 3.13.4",
+    "check": "SUCCESS",
+    "test": "SUCCESS"
+  },
+  "preservedMigrations": "All nine hashes in migration-checksums.json and the V11 hash unchanged; V12 is additive",
+  "uiCheck": "Finance cases panel rendered in Chromium against a mocked API: list, attach-reference form, resolved state",
+  "sourceHashes": [
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingCaseService.java",
+      "sha256": "a5b71e47587b95405abbb1ce97ee58fa76a8b6e7fcc22fc0da546466b7d05848"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingController.java",
+      "sha256": "d47ff365be7eac0bff08aa8526274b115565b5360f283e4734e6204fd22d6429"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingMetrics.java",
+      "sha256": "94eef18bebdba6ad6639f22c59f4ee9bec78340dd6fe3f0b7ea61deb38855a17"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingRecovery.java",
+      "sha256": "d966ab32ee02b344410089fae60216048520248d4dc3c3426d679c07715f579d"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingRefundService.java",
+      "sha256": "2dc4c5d8e552aab1fe49e09da9be72d9d7a33e32215f093121e5de1cf124ea5f"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingService.java",
+      "sha256": "543bb1ce833ffff64bc3ac09e4b87af31e0e7da5398044e795ce6c695a3306b3"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingStore.java",
+      "sha256": "8d61be3332eee410ac3dd6557f3a51ba41cf858c76c7db5eb1ff4b04fb466e27"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/BillingWorkers.java",
+      "sha256": "85eb29d40ff7f169c305a8822df3969af3b326a602c0ede622d22773e69b734b"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/BillingProvider.java",
+      "sha256": "dfe42bbb91038d049e5bda80877d29ad659be803cf0096b09ee5dcf6d3245101"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/ProviderReplayUnsafeException.java",
+      "sha256": "7f2ed5e58c2dcc38eb6660870da6a6de64771fe0ed2eb1752a986671af9a6197"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/RefundCommand.java",
+      "sha256": "df7bcb75c922d8183d3c774bed19c72cce720f01344ca3fe97d0e55b3af5e8f1"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/SimulatorBillingProvider.java",
+      "sha256": "cf17015fe6a8d8062ac880b87417c5d678f2eb3797f5fbb4756499359ef3631c"
+    },
+    {
+      "path": "billing-service/src/main/java/com/invoicepayments/billing/provider/StripeBillingProvider.java",
+      "sha256": "4e9d8030d16b1d8e4e11c41049330282b9a1991184bcfba2add32ddfc12445a0"
+    },
+    {
+      "path": "billing-service/src/main/resources/application-billing.yml",
+      "sha256": "a6582cb85742a95a7856968a8763a6b7916ac02dd881ae471f64f80e0c4ad498"
+    },
+    {
+      "path": "billing-service/src/main/resources/db/billing/V12__refund_recovery_case_resolution_expiry.sql",
+      "sha256": "db46555c63668954d1de12930a6c77875a77d54220f838a5b13ba0060b4859fd"
+    },
+    {
+      "path": "billing-service/src/test/java/com/invoicepayments/billing/BillingFinancialDatabaseTest.java",
+      "sha256": "0fe375fa9a81a66f359043032dd1a34d2d20c1a39c80cb18450e6cdcb2e8257c"
+    },
+    {
+      "path": "billing-service/src/test/java/com/invoicepayments/billing/BillingHttpSecurityDatabaseTest.java",
+      "sha256": "d222d92de5902b74241d645330530713958261f06885ba0d3f7b60f1400bbf26"
+    },
+    {
+      "path": "billing-service/src/test/java/com/invoicepayments/billing/BillingMetricsDatabaseTest.java",
+      "sha256": "ea9d53fa92382c521082c46d9af78ef5e6bb669f9fe6c648ffb11b3c26247ff5"
+    },
+    {
+      "path": "billing-service/src/test/java/com/invoicepayments/billing/provider/StripeBillingProviderTest.java",
+      "sha256": "08c846e6949e7069adc737777b4aadda6e7d2d54d9a6a31d2eef945973c7cc2e"
+    },
+    {
+      "path": "frontend/src/app/billing/billing-api.ts",
+      "sha256": "f0ca50dc4802fafcb8c1cce56e1125e5833c995b4e63aff0f5aa475a7c9ea81f"
+    },
+    {
+      "path": "frontend/src/app/billing/finance.ts",
+      "sha256": "5dbcfc9b7269a3d07ec4babf2007c380dbb9fdabd79c4a38faf87430ba2ee43a"
+    },
+    {
+      "path": "frontend/src/app/billing/finance.spec.ts",
+      "sha256": "4744f6e9b1ae9cc25cc83805847b1b1bc482447a654e3f359d058a4b1b8fe4bd"
+    },
+    {
+      "path": "frontend/src/app/billing/billing.scss",
+      "sha256": "ca92e534effe8c83b591da36a087bbac01f34dcfd73ea95d0c605c8d87556038"
+    },
+    {
+      "path": "monitoring/prometheus/billing-rules.yml",
+      "sha256": "5006423009935c37fbabba5e4d22680852d613065955bf247afba7e1501455af"
+    },
+    {
+      "path": "monitoring/prometheus/billing-rules.test.yml",
+      "sha256": "e7c515e4e04bd102b82315bcae79889d0bee53f3121e1459041f3a9247ea5ff3"
+    }
+  ],
+  "limits": [
+    "Stripe, bank and ERP responses are simulated; no live Stripe test-mode transaction yet (see docs/stripe-test-mode-runbook.md)",
+    "Run outside the Docker harness; ./scripts/verify-container-tests.ps1 was not rerun",
+    "No full-stack outage drill, deployment or production load test for this change",
+    "No production latency or throughput claim"
+  ]
+}

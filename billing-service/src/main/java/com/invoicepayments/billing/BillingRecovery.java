@@ -52,7 +52,7 @@ public class BillingRecovery {
             }
         }
         catch(ProviderReplayUnsafeException failure) {
-            db.tx(() -> {db.caseFor(intent,"PAYMENT_REPLAY_UNSAFE",intent.toString());return null;});
+            db.tx(() -> {db.escalate(intent,null,"PAYMENT_REPLAY_UNSAFE",intent.toString(),"Saved payment request can no longer be replayed safely");return null;});
             result=new ProviderResult(null,"UNKNOWN",null,"Saved payment requires investigation before further submission");
         }
         catch(RuntimeException failure) {result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Original provider operation is not yet confirmed");}
@@ -60,13 +60,12 @@ public class BillingRecovery {
         catch(RuntimeException failure) {db.tx(() -> {db.caseFor(intent,"RECOVERY_EVIDENCE_MISMATCH",intent.toString());return null;});}
         db.tx(() -> {
             // Backoff is per operation; stuck oldest records do not monopolize each batch.
-            long seconds=Math.min(1800,10L << Math.min(amount(work,"recoveryCount")-1,7));
-            seconds+=java.util.concurrent.ThreadLocalRandom.current().nextLong(1,6);
+            long seconds=backoffSeconds(amount(work,"recoveryCount"));
             db.update("UPDATE billing.intents SET next_recovery_at=NOW()+(? * INTERVAL '1 second') WHERE id=? AND lease_token IS NULL AND status IN ('SUBMITTING','PROCESSING','UNKNOWN','REQUIRES_ACTION')",seconds,intent);
             // A legitimately processing ACH payment may take days. Escalate uncertainty,
             // rather than treating every asynchronous provider response as a failure.
             if(amount(work,"recoveryCount")>=5 && db.exists("SELECT 1 FROM billing.intents WHERE id=? AND status IN ('UNKNOWN','SUBMITTING')",intent))
-                db.caseFor(intent,"PAYMENT_UNRESOLVED",intent.toString());
+                db.escalate(intent,null,"PAYMENT_UNRESOLVED",intent.toString(),"Payment outcome still unconfirmed after repeated recovery");
             return null;
         });
     }
@@ -74,19 +73,57 @@ public class BillingRecovery {
         return db.tx(() -> {
             var due=db.rows("SELECT * FROM billing.refunds WHERE status IN ('APPROVED','SUBMITTING','PROCESSING','UNKNOWN') AND next_recovery_at<=NOW() AND (lease_until IS NULL OR lease_until<NOW()) ORDER BY next_recovery_at,id FOR UPDATE SKIP LOCKED LIMIT ?",Math.min(limit,20));
             for(var row:due) {UUID token=UUID.randomUUID();row.put("recoveryToken",token);
-                db.update("UPDATE billing.refunds SET lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',next_recovery_at=NOW()+INTERVAL '45 seconds' WHERE id=?",token,id(row.get("id")));}
+                db.update("UPDATE billing.refunds SET lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',next_recovery_at=NOW()+INTERVAL '45 seconds',recovery_count=recovery_count+1 WHERE id=?",token,id(row.get("id")));}
             return due;
         });
     }
-    public void recoverRefund(Map<String,Object> work) {
+    /** Same rules as payment recovery: owned claim, saved request, bounded replay, backoff, escalation. */
+    public void recoverRefund(Map<String,Object> claimed) {
         requireNoTransaction();
-        UUID refund=id(work.get("id")); ProviderResult result;
-        var payment=payments.raw(id(work.get("intentId")));
-        if(!provider.name().equals(payment.get("provider"))) {db.tx(()->{db.caseFor(id(work.get("intentId")),"ORIGINAL_PROVIDER_UNAVAILABLE",refund.toString());return null;});return;}
+        UUID refund=id(claimed.get("id")); UUID token=id(claimed.get("recoveryToken"));
+        // Refresh ownership and evidence before provider I/O: a stale claim must not call the provider.
+        var owned=db.rows("""
+            SELECT r.*,i.provider AS payment_provider,i.provider_id AS payment_provider_id
+            FROM billing.refunds r JOIN billing.intents i ON i.id=r.intent_id
+            WHERE r.id=? AND r.lease_token=? AND r.lease_until>NOW() AND r.status IN ('APPROVED','SUBMITTING','PROCESSING','UNKNOWN')
+            """,refund,token);
+        if(owned.isEmpty()) return;
+        var work=owned.get(0); UUID intent=id(work.get("intentId"));
+        if(!provider.name().equals(work.get("paymentProvider"))) {db.tx(()->{db.caseFor(intent,refund,"ORIGINAL_PROVIDER_UNAVAILABLE",refund.toString());return null;});return;}
         if("APPROVED".equals(work.get("status"))) {refunds.submitApproved(refund);return;}
-        try {result=provider.lookupRefund("refund_"+refund,text(work,"providerId"));}
+        String key=BillingRefundService.operationKey(refund); ProviderResult result;
+        try {
+            if(work.get("originalRequest")==null || work.get("providerId")!=null) {
+                result=provider.lookupRefund(key,text(work,"providerId"));
+            } else {
+                RefundCommand command=RefundCommand.fromJson(text(work,"originalRequest"));
+                if(!refund.toString().equals(command.refundId()) || !intent.toString().equals(command.intentId()) || !key.equals(command.idempotencyKey())
+                    || amount(work,"amountMinor")!=command.amountMinor() || !"USD".equals(command.currency())
+                    || !Objects.equals(text(work,"paymentProviderId"),command.providerPaymentId()))
+                    throw new ProviderReplayUnsafeException("Saved refund does not match the approved refund; reconciliation required");
+                result=provider.recoverRefund(command,text(work,"requestVersion"),Instant.parse(text(work,"submittedAt")),null);
+            }
+        }
+        catch(ProviderReplayUnsafeException failure) {
+            db.tx(() -> {db.escalate(intent,refund,"REFUND_REPLAY_UNSAFE",refund.toString(),"Saved refund request can no longer be replayed safely");return null;});
+            result=new ProviderResult(null,"UNKNOWN",null,"Saved refund requires investigation before further submission");
+        }
         catch(RuntimeException failure) {result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Refund remains uncertain");}
-        try {refunds.record(refund,id(work.get("recoveryToken")),result);}
-        catch(RuntimeException failure) {db.tx(() -> {db.caseFor(id(work.get("intentId")),"REFUND_UNRESOLVED",refund.toString());return null;});}
+        try {refunds.record(refund,token,result);}
+        catch(RuntimeException failure) {db.tx(() -> {db.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund evidence could not be recorded");return null;});}
+        long attempts=amount(work,"recoveryCount");
+        db.tx(() -> {
+            db.update("UPDATE billing.refunds SET next_recovery_at=NOW()+(? * INTERVAL '1 second') WHERE id=? AND lease_token IS NULL AND status IN ('SUBMITTING','PROCESSING','UNKNOWN')",backoffSeconds(attempts),refund);
+            // Pending refunds can legitimately take days; only an unknown outcome escalates by attempts.
+            if(attempts>=5 && db.exists("SELECT 1 FROM billing.refunds WHERE id=? AND status IN ('UNKNOWN','SUBMITTING')",refund))
+                db.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund outcome still unconfirmed after repeated recovery");
+            return null;
+        });
+    }
+    /** Releases reservations held by intents that were created but never submitted. */
+    public int expireUnsubmitted(int ttlMinutes,int limit) { return payments.expireUnsubmitted(ttlMinutes,limit); }
+    static long backoffSeconds(long attempts) {
+        long seconds=Math.min(1800,10L << Math.min(Math.max(attempts,1)-1,7));
+        return seconds+java.util.concurrent.ThreadLocalRandom.current().nextLong(1,6);
     }
 }

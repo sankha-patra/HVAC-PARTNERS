@@ -88,6 +88,15 @@ thresholds, not a measured Stripe SLA. Review provider evidence and the finance
 queue; do not create an unverified replacement charge. Prometheus firing alone
 is not evidence of an external notification receiver.
 
+## Stuck refund and release alerts
+
+`billing_refunds_stuck` counts approved refunds not submitted within 15 minutes, uncertain
+or submitting refunds older than 15 minutes from submission, and provider-pending refunds
+older than seven days. Ages come from immutable approval and submission times, so retries
+cannot hide a refund. `BillingRefundStuck` fires after two minutes.
+`BillingReleaseAwaitingApproval` fires when a requested release has waited 30 minutes for a
+second approver. Both are local demonstration thresholds, not provider SLAs.
+
 ## Verification
 
 Verification results and the full seven-check recovery drill are recorded in

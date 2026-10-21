@@ -5,4 +5,7 @@ public final class ProviderReplayUnsafeException extends ProviderUncertainExcept
     public ProviderReplayUnsafeException() {
         super("Saved payment cannot be safely replayed; reconciliation required");
     }
+    public ProviderReplayUnsafeException(String message) {
+        super(message);
+    }
 }

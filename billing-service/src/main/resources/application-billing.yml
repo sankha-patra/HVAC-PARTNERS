@@ -39,6 +39,8 @@ billing:
   public-url: ${BILLING_PUBLIC_URL:http://localhost:4200}
   workers-enabled: ${BILLING_WORKERS_ENABLED:true}
   outbox-interval-ms: ${BILLING_OUTBOX_INTERVAL_MS:100}
+  # Unsubmitted intents hold invoice reservations; the expiry worker releases them after this age.
+  unsubmitted-ttl-minutes: ${BILLING_UNSUBMITTED_TTL_MINUTES:30}
   events-topic: billing.events.v1
   kafka-enabled: ${BILLING_KAFKA_ENABLED:true}
   stripe:

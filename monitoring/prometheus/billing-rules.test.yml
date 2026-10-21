@@ -78,3 +78,38 @@ tests:
       - eval_time: 3m
         alertname: BillingPaymentStuck
         exp_alerts: []
+  - name: stuck-refund-grace-fire-and-resolve
+    interval: 1m
+    input_series:
+      - series: billing_refunds_stuck
+        values: '0 1 1 1 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BillingRefundStuck
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: BillingRefundStuck
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: local}
+            exp_annotations:
+              summary: Approved refunds exceeded their recovery deadline
+              description: 'Open the refund case in the finance workspace. Deadlines: approved or uncertain 15 minutes, provider pending 7 days. Do not issue a replacement refund until the original is resolved.'
+      - eval_time: 4m
+        alertname: BillingRefundStuck
+        exp_alerts: []
+  - name: release-request-waits-thirty-minutes-before-alerting
+    interval: 1m
+    input_series:
+      - series: billing_cases_awaiting_approval
+        values: '1+0x40'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: BillingReleaseAwaitingApproval
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: BillingReleaseAwaitingApproval
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: local}
+            exp_annotations:
+              summary: A stuck-payment release is waiting for a second approver
+              description: 'A different authorized approver must review the request. The invoice stays reserved until then; do not approve your own request.'

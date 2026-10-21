@@ -1120,6 +1120,384 @@ class BillingFinancialDatabaseTest {
         } finally {registry.close();}
     }
 
+    // ----- Refund recovery: saved request, bounded replay, backoff and escalation -----
+
+    @Test void refundCrashBeforeProviderCallReplaysTheSavedRequestOnce() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        BillingProvider stopped = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { throw new AssertionError("Process stopped before network"); }
+        };
+        var crashing = new BillingRefundService(db, service(stopped, MERCHANT), stopped);
+        assertThatThrownBy(() -> crashing.approve(APPROVER, refund)).isInstanceOf(AssertionError.class);
+        var saved = refunds.raw(refund);
+        assertThat(saved.get("status")).isEqualTo("SUBMITTING");
+        assertThat(saved.get("originalRequest")).isNotNull(); assertThat(saved.get("submittedAt")).isNotNull();
+        assertThat(refundOperations()).isZero();
+        dueRefund(refund);
+        recovery.recoverRefund(recovery.claimRefunds(1).get(0));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(refundOperations()).isEqualTo(1);
+        assertThat(count("billing.journals")).isEqualTo(2); assertInvoice(INVOICE, 9500, 0);
+    }
+
+    @Test void lostRefundResponseRecoversTheOriginalRefundWithoutASecondOne() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        BillingProvider lossy = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { delegate.refund(command); throw new ProviderUncertainException("Response lost after acceptance"); }
+        };
+        new BillingRefundService(db, service(lossy, MERCHANT), lossy).approve(APPROVER, refund);
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
+        assertThat(refunds.raw(refund).get("providerId")).isNull();
+        assertThat(count("billing.journals")).isEqualTo(1);
+        dueRefund(refund);
+        recovery.recoverRefund(recovery.claimRefunds(1).get(0));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(refunds.raw(refund).get("providerId")).isNotNull();
+        assertThat(refundOperations()).isEqualTo(1);
+        assertThat(count("billing.journals")).isEqualTo(2); assertInvoice(INVOICE, 9500, 0);
+    }
+
+    @Test void refundPastTheSafeReplayWindowEscalatesAndKeepsItsAmountCommitted() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 6000);
+        BillingProvider unsafe = refundNeverSent(true);
+        var service = service(unsafe, MERCHANT); var refundService = new BillingRefundService(db, service, unsafe);
+        refundService.approve(APPROVER, refund);
+        var worker = new BillingRecovery(db, service, refundService, unsafe);
+        for (int i = 0; i < 2; i++) { dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0)); }
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
+        assertThat(db.rows("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund)).hasSize(1);
+        assertThat(refundOperations()).isZero(); assertThat(count("billing.journals")).isEqualTo(1);
+        assertProblem(409, () -> requestedRefund(intent, 5000));
+    }
+
+    @Test void unresolvedRefundBacksOffEscalatesOnceAndProviderEvidenceClosesTheCase() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        AtomicInteger recoveries = new AtomicInteger();
+        BillingProvider silent = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { throw new ProviderUncertainException("No response"); }
+            @Override public ProviderResult recoverRefund(RefundCommand command, String version, java.time.Instant preparedAt, String id) {
+                recoveries.incrementAndGet(); return new ProviderResult(null, "UNKNOWN", null, "Still unknown");
+            }
+        };
+        var service = service(silent, MERCHANT); var refundService = new BillingRefundService(db, service, silent);
+        refundService.approve(APPROVER, refund);
+        var worker = new BillingRecovery(db, service, refundService, silent);
+        for (int attempt = 1; attempt <= 6; attempt++) {
+            dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
+            assertThat(db.exists("SELECT 1 FROM billing.refunds WHERE id=? AND next_recovery_at>NOW()+INTERVAL '5 seconds'", refund)).isTrue();
+            assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='REFUND_UNRESOLVED' AND refund_id=?", refund)).isEqualTo(attempt >= 5);
+        }
+        assertThat(recoveries).hasValue(6);
+        assertThat(db.rows("SELECT id FROM billing.cases WHERE reason='REFUND_UNRESOLVED'")).hasSize(1);
+        UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_UNRESOLVED'").get("id"));
+        refundService.record(refund, null, new ProviderResult("sim_refund_from_webhook", "REFUNDED", null, "Signed refund webhook"));
+        assertThat(db.one("SELECT status,resolved_by,resolution FROM billing.cases WHERE id=?", caseId))
+                .containsEntry("status", "RESOLVED").containsEntry("resolvedBy", "system").containsEntry("resolution", "PROVIDER_EVIDENCE");
+        assertThat(db.one("SELECT action FROM billing.case_actions WHERE case_id=?", caseId)).containsEntry("action", "AUTO_RESOLVED");
+        assertInvoice(INVOICE, 9500, 0);
+    }
+
+    @Test void staleRefundClaimCannotIssueAnyProviderRequest() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        BillingProvider silent = refundNeverSent(false);
+        new BillingRefundService(db, service(silent, MERCHANT), silent).approve(APPROVER, refund);
+        dueRefund(refund); var old = recovery.claimRefunds(1).get(0);
+        dueRefund(refund); var current = recovery.claimRefunds(1).get(0);
+        AtomicInteger calls = new AtomicInteger();
+        BillingProvider observed = new DelegateProvider(provider) {
+            @Override public ProviderResult recoverRefund(RefundCommand c, String v, java.time.Instant p, String id) { calls.incrementAndGet(); return super.recoverRefund(c, v, p, id); }
+            @Override public ProviderResult lookupRefund(String key, String id) { calls.incrementAndGet(); return super.lookupRefund(key, id); }
+        };
+        var worker = worker(observed);
+        worker.recoverRefund(old); assertThat(calls).hasValue(0);
+        worker.recoverRefund(current); assertThat(calls).hasValue(1);
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(refundOperations()).isEqualTo(1);
+    }
+
+    @Test void savedRefundRequestCannotBeChangedOrRetimed() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        refunds.approve(APPROVER, refund);
+        for (String assignment : List.of("original_request='{}'::jsonb", "request_version='other'",
+                "submitted_at=submitted_at+INTERVAL '1 hour'", "approved_at=approved_at+INTERVAL '1 day'")) {
+            assertThatThrownBy(() -> db.update("UPDATE billing.refunds SET " + assignment + " WHERE id=?", refund))
+                    .isInstanceOf(org.springframework.dao.DataAccessException.class);
+        }
+    }
+
+    @ParameterizedTest @org.junit.jupiter.params.provider.CsvSource({
+        "APPROVED,approved_at,16,true", "APPROVED,approved_at,14,false",
+        "SUBMITTING,submitted_at,16,true", "UNKNOWN,submitted_at,16,true", "UNKNOWN,submitted_at,14,false",
+        "PROCESSING,submitted_at,10081,true", "PROCESSING,submitted_at,10079,false",
+        "REQUESTED,approved_at,20000,false", "REFUNDED,submitted_at,20000,false", "FAILED,submitted_at,20000,false"})
+    void refundStuckGaugeUsesStateSpecificDeadlines(String status, String column, int ageMinutes, boolean overdue) {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        db.update("UPDATE billing.refunds SET status=?," + column + "=NOW()-(? * INTERVAL '1 minute') WHERE id=?", status, ageMinutes, refund);
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry(); try {
+            new BillingMetrics(jdbc, registry);
+            assertThat(registry.get("billing.refunds.stuck").gauge().value()).isEqualTo(overdue ? 1.0 : 0.0);
+        } finally { registry.close(); }
+    }
+
+    // ----- Case resolution: verified evidence or maker-checker release, always audited -----
+
+    @Test void verifiedProviderReferenceResolvesAStuckPaymentAndCapturesOnce() {
+        var stuck = stuckPayment(true);
+        provider.simulateResult(stuck.intent().toString(), "CAPTURED"); // the customer paid; we never saw the answer
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        String reference = text(db.one("SELECT provider_id FROM billing.provider_operations WHERE intent_id=?::uuid", stuck.intent().toString()), "providerId");
+        String note = "Found the payment in the provider dashboard by intent metadata";
+        assertThatThrownBy(() -> stuck.cases().verifyProviderReference("operator", caseId, "sim_pay_wrong_reference", note))
+                .isInstanceOfSatisfying(BillingProblem.class, ex -> assertThat(ex.code()).isEqualTo("PROVIDER_REFERENCE_NOT_VERIFIED"));
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("UNKNOWN");
+        assertThat(count("billing.case_actions")).isZero();
+        assertProblem(403, () -> stuck.cases().verifyProviderReference(APPROVER, caseId, reference, note));
+        assertProblem(404, () -> stuck.cases().verifyProviderReference("other-finance", caseId, reference, note));
+        assertProblem(404, () -> stuck.cases().verifyProviderReference(PAYER, caseId, reference, note));
+        var resolved = stuck.cases().verifyProviderReference("operator", caseId, reference, note);
+        assertThat(resolved).containsEntry("status", "RESOLVED").containsEntry("resolvedBy", "operator")
+                .containsEntry("resolution", "STAFF_VERIFIED_PROVIDER_REFERENCE");
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("CAPTURED");
+        assertInvoice(INVOICE, 10000, 0); assertThat(count("billing.journals")).isEqualTo(1);
+        assertThat(db.one("SELECT action,actor FROM billing.case_actions WHERE case_id=?", caseId))
+                .containsEntry("action", "VERIFIED_PROVIDER_REFERENCE").containsEntry("actor", "operator");
+        assertProblem(409, () -> stuck.cases().verifyProviderReference("operator", caseId, reference, note));
+        assertThat(count("billing.journals")).isEqualTo(1);
+    }
+
+    @Test void releaseNeedsADifferentApproverAndLateEvidenceCannotTakeTheReleasedInvoice() {
+        var stuck = stuckPayment(false);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        String note = "Provider dashboard has no payment for this intent";
+        assertProblem(400, () -> stuck.cases().requestRelease(FINANCE, caseId, "too short"));
+        assertProblem(409, () -> stuck.cases().approveRelease(APPROVER, caseId));
+        stuck.cases().requestRelease(FINANCE, caseId, note);
+        assertProblem(409, () -> stuck.cases().requestRelease("operator", caseId, note));
+        assertProblem(403, () -> stuck.cases().approveRelease(FINANCE, caseId));
+        assertProblem(403, () -> stuck.cases().approveRelease("operator", caseId));
+        assertInvoice(INVOICE, 0, 10000);
+        var released = stuck.cases().approveRelease(APPROVER, caseId);
+        assertThat(released).containsEntry("status", "RESOLVED").containsEntry("resolution", "RELEASED_NO_PROVIDER_OPERATION");
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("FAILED");
+        assertInvoice(INVOICE, 0, 0);
+        assertThat(db.rows("SELECT action FROM billing.case_actions WHERE case_id=?", caseId)).extracting(row -> row.get("action"))
+                .containsExactlyInAnyOrder("REQUESTED_RELEASE", "APPROVED_RELEASE");
+        assertThat(db.exists("SELECT 1 FROM billing.outbox WHERE aggregate_id=? AND type='PAYMENT_FAILED'", stuck.intent())).isTrue();
+        UUID replacement = created("CARD");
+        stuck.service().recordResult(stuck.intent(), null, new ProviderResult("sim_pay_late", "CAPTURED", null, "Late signed webhook"));
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("CAPTURED");
+        assertInvoice(INVOICE, 0, 10000);
+        assertThat(payments.raw(replacement).get("status")).isEqualTo("CREATED");
+        assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='LATE_CAPTURE_UNAPPLIED' AND intent_id=?", stuck.intent())).isTrue();
+        assertThat(db.exists("SELECT 1 FROM billing.ledger_entries WHERE account='UNAPPLIED_CASH'")).isTrue();
+    }
+
+    @Test void rejectedReleaseLeavesTheReservationAndCanBeRequestedAgain() {
+        var stuck = stuckPayment(false);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().requestRelease(FINANCE, caseId, "Provider dashboard has no payment for this intent");
+        assertProblem(403, () -> stuck.cases().rejectRelease(FINANCE, caseId, "Requester cannot review their own request"));
+        stuck.cases().rejectRelease(APPROVER, caseId, "Check the provider's ACH report before releasing");
+        assertThat(db.one("SELECT status,release_requested_by FROM billing.cases WHERE id=?", caseId))
+                .containsEntry("status", "OPEN").containsEntry("releaseRequestedBy", null);
+        assertInvoice(INVOICE, 0, 10000);
+        stuck.cases().requestRelease("operator", caseId, "ACH report checked; no payment exists");
+        assertThat(stuck.cases().history(FINANCE, caseId)).extracting(row -> row.get("action"))
+                .containsExactlyInAnyOrder("REQUESTED_RELEASE", "REJECTED_RELEASE", "REQUESTED_RELEASE");
+    }
+
+    @Test void unresolvedCasesCannotBeClosedButReviewedCasesCloseWithAnAuditNote() {
+        var stuck = stuckPayment(false);
+        UUID stuckCase = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        assertProblem(409, () -> stuck.cases().close("operator", stuckCase, "Looked at it and it seems fine"));
+        UUID paid = capturedInvoice(INVOICE_TWO);
+        db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
+        UUID review = caseId("DISPUTE_REQUIRES_REVIEW", paid);
+        var cases = new BillingCaseService(db, payments, refunds, provider);
+        assertProblem(400, () -> cases.close("operator", review, "  "));
+        assertProblem(404, () -> cases.close(PAYER, review, "Customer dispute reviewed with the bank"));
+        var closed = cases.close("operator", review, "Dispute evidence submitted through the provider dashboard");
+        assertThat(closed).containsEntry("status", "RESOLVED").containsEntry("resolution", "CLOSED_AFTER_REVIEW");
+        assertProblem(409, () -> cases.close("operator", review, "Dispute evidence submitted through the provider dashboard"));
+        assertThat(cases.history("operator", review)).hasSize(1).first()
+                .satisfies(row -> assertThat(row).containsEntry("action", "CLOSED_AFTER_REVIEW").containsEntry("actor", "operator"));
+        var listed = cases.list("operator");
+        assertThat(listed).filteredOn(row -> stuckCase.toString().equals(row.get("id"))).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("canVerifyReference", true).containsEntry("canRequestRelease", true)
+                        .containsEntry("canClose", false).containsEntry("canApproveRelease", false));
+        assertThat(cases.list(APPROVER)).filteredOn(row -> stuckCase.toString().equals(row.get("id"))).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("canVerifyReference", false).containsEntry("canApproveRelease", false));
+    }
+
+    @Test void providerEvidenceAutoResolvesAStuckCaseAndARecurrenceReopensIt() {
+        BillingProvider absent = new DelegateProvider(provider) {
+            @Override public String name() { return "STRIPE"; }
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Unknown"); }
+            @Override public ProviderResult lookup(String key, String id) { return new ProviderResult(id, "UNKNOWN", null, "Reconcile"); }
+        };
+        BillingService service = service(absent, MERCHANT);
+        UUID intent = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        service.submit(PAYER, intent);
+        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, absent), absent);
+        for (int i = 0; i < 5; i++) { due(intent); worker.recoverPayment(worker.claimPayments(1).get(0)); }
+        UUID caseId = caseId("PAYMENT_UNRESOLVED", intent);
+        service.recordResult(intent, null, new ProviderResult("cs_test_late", "PROCESSING", null, "Signed webhook"));
+        assertThat(db.one("SELECT status,resolved_by,resolution FROM billing.cases WHERE id=?", caseId))
+                .containsEntry("status", "RESOLVED").containsEntry("resolvedBy", "system").containsEntry("resolution", "PROVIDER_EVIDENCE");
+        service.recordResult(intent, null, new ProviderResult("cs_test_late", "UNKNOWN", null, "Provider read failed"));
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(db.one("SELECT status FROM billing.cases WHERE id=?", caseId)).containsEntry("status", "OPEN");
+        assertThat(db.rows("SELECT action FROM billing.case_actions WHERE case_id=?", caseId)).extracting(row -> row.get("action"))
+                .containsExactlyInAnyOrder("AUTO_RESOLVED", "REOPENED");
+        assertThat(db.rows("SELECT id FROM billing.cases WHERE reason='PAYMENT_UNRESOLVED'")).hasSize(1);
+    }
+
+    @Test void caseAuditHistoryAndResolutionRulesAreEnforcedByTheDatabase() {
+        UUID paid = capturedInvoice(INVOICE);
+        db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
+        db.caseFor(paid, "ACH_RETURN", paid.toString());
+        new BillingCaseService(db, payments, refunds, provider).close("operator", caseId("DISPUTE_REQUIRES_REVIEW", paid), "Dispute evidence submitted to the provider");
+        assertThatThrownBy(() -> db.update("UPDATE billing.case_actions SET actor='someone-else'")).isInstanceOf(org.springframework.dao.DataAccessException.class);
+        assertThatThrownBy(() -> db.update("DELETE FROM billing.case_actions")).isInstanceOf(org.springframework.dao.DataAccessException.class);
+        assertThatThrownBy(() -> db.update("UPDATE billing.cases SET status='RESOLVED' WHERE id=?", caseId("ACH_RETURN", paid)))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class);
+        assertThat(count("billing.case_actions")).isEqualTo(1);
+    }
+
+    @Test void approvedRefundReleaseFreesCapacityForAReplacementRefund() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 6000);
+        BillingProvider unsafe = refundNeverSent(true);
+        var service = service(unsafe, MERCHANT); var refundService = new BillingRefundService(db, service, unsafe);
+        refundService.approve(APPROVER, refund);
+        var worker = new BillingRecovery(db, service, refundService, unsafe);
+        dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
+        UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
+        var cases = new BillingCaseService(db, service, refundService, unsafe);
+        assertProblem(409, () -> requestedRefund(intent, 6000));
+        cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request");
+        cases.approveRelease(APPROVER, caseId);
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("FAILED");
+        UUID replacement = requestedRefund(intent, 6000);
+        assertThat(refunds.raw(replacement).get("status")).isEqualTo("REQUESTED");
+        assertThat(count("billing.journals")).isEqualTo(1); assertInvoice(INVOICE, 10000, 0);
+        assertThat(db.one("SELECT resolution FROM billing.cases WHERE id=?", caseId)).containsEntry("resolution", "RELEASED_NO_PROVIDER_OPERATION");
+    }
+
+    @Test void verifiedRefundReferencePostsTheRefundOnce() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        BillingProvider lossy = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { delegate.refund(command); throw new ProviderUncertainException("Response lost"); }
+            @Override public ProviderResult lookupRefund(String key, String id) {
+                return id == null ? new ProviderResult(null, "UNKNOWN", null, "No reference") : delegate.lookupRefund(key, id);
+            }
+            @Override public ProviderResult recoverRefund(RefundCommand c, String v, java.time.Instant p, String id) {
+                if (id != null) return lookupRefund(c.idempotencyKey(), id);
+                throw new ProviderReplayUnsafeException("Replay window elapsed");
+            }
+        };
+        var service = service(lossy, MERCHANT); var refundService = new BillingRefundService(db, service, lossy);
+        refundService.approve(APPROVER, refund);
+        var worker = new BillingRecovery(db, service, refundService, lossy);
+        dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
+        UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
+        String reference = text(db.one("SELECT provider_id FROM billing.provider_operations WHERE operation_kind='REFUND'"), "providerId");
+        new BillingCaseService(db, service, refundService, lossy)
+                .verifyProviderReference("operator", caseId, reference, "Found the refund in the provider dashboard");
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(count("billing.journals")).isEqualTo(2); assertInvoice(INVOICE, 9500, 0);
+        assertThat(refundOperations()).isEqualTo(1);
+    }
+
+    // ----- Expiry of unsubmitted intents -----
+
+    @Test void abandonedUnsubmittedIntentExpiresAndReleasesItsInvoices() {
+        String clientKey = key();
+        UUID intent = id(payments.create(PAYER, ACCOUNT, clientKey, List.of(INVOICE, INVOICE_TWO), "CARD").get("id"));
+        db.update("UPDATE billing.intents SET created_at=NOW()-INTERVAL '31 minutes' WHERE id=?", intent);
+        UUID fresh = id(payments.create(SECOND_PAYER, SECOND_ACCOUNT, key(), List.of(SECOND_INVOICE), "CARD").get("id"));
+        assertThat(recovery.expireUnsubmitted(30, 20)).isEqualTo(1);
+        assertThat(payments.raw(intent).get("status")).isEqualTo("CANCELLED");
+        assertInvoice(INVOICE, 0, 0); assertInvoice(INVOICE_TWO, 0, 0);
+        assertThat(db.rows("SELECT state FROM billing.allocations WHERE intent_id=?", intent)).allSatisfy(row -> assertThat(row).containsEntry("state", "RELEASED"));
+        assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='EXPIRED'", intent)).isTrue();
+        assertThat(payments.raw(fresh).get("status")).isEqualTo("CREATED"); assertInvoice(SECOND_INVOICE, 0, 7500);
+        assertThat(payments.create(PAYER, ACCOUNT, clientKey, List.of(INVOICE, INVOICE_TWO), "CARD").get("status")).isEqualTo("CANCELLED");
+        try { payments.submit(PAYER, intent); } catch (BillingProblem conflict) { assertThat(conflict.status()).isEqualTo(409); }
+        assertThat(count("billing.provider_operations")).isZero(); assertThat(count("billing.attempts")).isZero();
+        assertThat(recovery.expireUnsubmitted(30, 20)).isZero();
+        assertThatThrownBy(() -> recovery.expireUnsubmitted(4, 20)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test void expiryNeverTouchesSubmittedOrRecentIntents() {
+        UUID submitted = submitted("CARD");
+        db.update("UPDATE billing.intents SET created_at=NOW()-INTERVAL '2 hours' WHERE id=?", submitted);
+        UUID recent = id(payments.create(SECOND_PAYER, SECOND_ACCOUNT, key(), List.of(SECOND_INVOICE), "CARD").get("id"));
+        db.update("UPDATE billing.intents SET created_at=NOW()-INTERVAL '29 minutes' WHERE id=?", recent);
+        assertThat(recovery.expireUnsubmitted(30, 20)).isZero();
+        assertThat(payments.raw(submitted).get("status")).isEqualTo("PROCESSING");
+        assertThat(payments.raw(recent).get("status")).isEqualTo("CREATED");
+        assertInvoice(INVOICE, 0, 10000); assertInvoice(SECOND_INVOICE, 0, 7500);
+    }
+
+    @RepeatedTest(5) void expiryAndSubmitRaceHasOneWinnerWithoutAnUnreservedProviderPayment() throws Exception {
+        UUID intent = created("CARD");
+        db.update("UPDATE billing.intents SET created_at=NOW()-INTERVAL '31 minutes' WHERE id=?", intent);
+        concurrentlyIndexed(2, index -> index == 0 ? (Object) recovery.expireUnsubmitted(30, 20) : payments.submit(PAYER, intent).get("status"));
+        String state = text(payments.raw(intent), "status");
+        assertThat(state).isIn("CANCELLED", "PROCESSING");
+        if ("CANCELLED".equals(state)) {
+            assertInvoice(INVOICE, 0, 0); assertThat(count("billing.provider_operations")).isZero(); assertThat(count("billing.attempts")).isZero();
+        } else {
+            assertInvoice(INVOICE, 0, 10000); assertThat(count("billing.provider_operations")).isEqualTo(1); assertThat(count("billing.attempts")).isEqualTo(1);
+        }
+    }
+
+    record Stuck(UUID intent, BillingService service, BillingCaseService cases) {}
+    /** Response lost and the replay window gone: like Stripe, the provider cannot be searched by key. */
+    Stuck stuckPayment(boolean providerAccepted) {
+        BillingProvider blind = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) {
+                if (providerAccepted) delegate.submit(command);
+                throw new ProviderUncertainException("Response lost");
+            }
+            @Override public ProviderResult lookup(String key, String id) {
+                return id == null ? new ProviderResult(null, "UNKNOWN", null, "No reference") : delegate.lookup(key, id);
+            }
+            @Override public ProviderResult recoverPayment(ProviderCommand c, String v, java.time.Instant p, String id) {
+                if (id != null) return lookup(c.idempotencyKey(), id);
+                throw new ProviderReplayUnsafeException();
+            }
+        };
+        var service = service(blind, MERCHANT); var refundService = new BillingRefundService(db, service, blind);
+        UUID intent = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        service.submit(PAYER, intent);
+        var worker = new BillingRecovery(db, service, refundService, blind);
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
+        return new Stuck(intent, service, new BillingCaseService(db, service, refundService, blind));
+    }
+    /** Refund POST never reaches the provider; replay is either refused (unsafe) or keeps returning nothing. */
+    BillingProvider refundNeverSent(boolean replayUnsafe) {
+        return new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { throw new ProviderUncertainException("No response"); }
+            @Override public ProviderResult recoverRefund(RefundCommand c, String v, java.time.Instant p, String id) {
+                if (replayUnsafe) throw new ProviderReplayUnsafeException("Replay window elapsed");
+                return super.recoverRefund(c, v, p, id);
+            }
+        };
+    }
+    UUID capturedInvoice(UUID invoice) {
+        UUID intent = id(payments.create(PAYER, ACCOUNT, key(), List.of(invoice), "CARD").get("id"));
+        payments.submit(PAYER, intent); payments.simulate(PAYER, intent, "CAPTURED"); return intent;
+    }
+    UUID caseId(String reason, UUID intent) { return id(db.one("SELECT id FROM billing.cases WHERE reason=? AND intent_id=?", reason, intent).get("id")); }
+    void dueRefund(UUID refund) { db.update("UPDATE billing.refunds SET lease_until=NOW()-INTERVAL '1 second',next_recovery_at=NOW()-INTERVAL '1 second' WHERE id=?", refund); }
+    long refundOperations() { return count("billing.provider_operations WHERE operation_kind='REFUND'"); }
+    BillingRecovery worker(BillingProvider adapter) {
+        var service = service(adapter, MERCHANT);
+        return new BillingRecovery(db, service, new BillingRefundService(db, service, adapter), adapter);
+    }
+
     BillingService service(BillingProvider adapter, UUID merchant) {
         return new BillingService(db, adapter, new MockEnvironment(), true, "http://localhost:4200", merchant.toString());
     }
@@ -1165,5 +1543,9 @@ class BillingFinancialDatabaseTest {
         @Override public ProviderResult lookup(String key, String id) { return delegate.lookup(key, id); }
         @Override public ProviderResult refund(RefundCommand command) { return delegate.refund(command); }
         @Override public ProviderResult lookupRefund(String key, String id) { return delegate.lookupRefund(key, id); }
+        @Override public String refundRequestVersion() { return delegate.refundRequestVersion(); }
+        @Override public ProviderResult recoverRefund(RefundCommand command, String version, java.time.Instant preparedAt, String id) {
+            return delegate.recoverRefund(command, version, preparedAt, id);
+        }
     }
 }

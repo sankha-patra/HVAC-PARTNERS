@@ -156,7 +156,7 @@ public class BillingService {
             }
             switch(result.state()) {
                 case "CAPTURED" -> capture(row);
-                case "FAILED" -> fail(row);
+                case "FAILED" -> fail(row,"Provider confirmed failure; invoice reservations released");
                 case "RETURNED" -> returned(row);
                 case "UNKNOWN","PROCESSING","REQUIRES_ACTION" -> {
                     if(!hasCapture(intent) && !Set.of("FAILED","RETURNED","REFUNDED").contains(text(row,"status"))) {
@@ -168,7 +168,51 @@ public class BillingService {
             }
             db.update("UPDATE billing.intents SET lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",intent);
             db.update("UPDATE billing.attempts SET status=(SELECT status FROM billing.intents WHERE id=?),updated_at=NOW() WHERE intent_id=?",intent,intent);
+            // Evidence that ends the uncertainty also closes the stuck-payment cases it explains.
+            String current=text(db.one("SELECT status FROM billing.intents WHERE id=?",intent),"status");
+            if(!Set.of("UNKNOWN","SUBMITTING").contains(current))
+                db.resolveCases(intent.toString(),"PAYMENT_UNRESOLVED","PAYMENT_REPLAY_UNSAFE","system","PROVIDER_EVIDENCE","AUTO_RESOLVED",
+                    "Provider evidence recorded payment status "+current);
             return null;
+        });
+    }
+    /**
+     * Approved case release: two employees confirmed the provider has no payment. Fences out any
+     * in-flight recovery, then releases reservations. Late provider evidence is still recorded:
+     * a later capture becomes unapplied cash with its own case, never another invoice's money.
+     */
+    void releaseUnresolved(UUID intent,String message) {
+        db.tx(() -> {
+            var row=locked(intent);
+            if(!Set.of("UNKNOWN","SUBMITTING").contains(text(row,"status")) || hasCapture(intent))
+                throw BillingProblem.conflict("This payment is no longer unresolved; refresh the case");
+            db.update("UPDATE billing.intents SET lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",intent);
+            fail(row,message);
+            db.update("UPDATE billing.attempts SET status='FAILED',updated_at=NOW() WHERE intent_id=?",intent);
+            return null;
+        });
+    }
+    /**
+     * Releases invoices held by intents the customer created but never submitted. Row locks make
+     * this race-safe with submit and cancel: whichever locks the intent first decides, and the
+     * other sees the new status. No provider operation exists for a CREATED intent.
+     */
+    public int expireUnsubmitted(int ttlMinutes,int limit) {
+        if(ttlMinutes<5) throw new IllegalArgumentException("Unsubmitted intents must stay payable for at least five minutes");
+        return db.tx(() -> {
+            var due=db.rows("""
+                SELECT id FROM billing.intents WHERE status='CREATED' AND created_at<NOW()-(? * INTERVAL '1 minute')
+                ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT ?
+                """,ttlMinutes,Math.max(1,Math.min(limit,50)));
+            for(var item:due) {
+                UUID intent=id(item.get("id"));
+                for(var allocation:lockInvoices(intent)) if("RESERVED".equals(allocation.get("state")))
+                    db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor-?,version=version+1 WHERE id=?",amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
+                db.update("UPDATE billing.allocations SET state='RELEASED' WHERE intent_id=? AND state='RESERVED'",intent);
+                db.update("UPDATE billing.intents SET status='CANCELLED',updated_at=NOW() WHERE id=?",intent);
+                db.event(intent,"EXPIRED","Unsubmitted payment expired after "+ttlMinutes+" minutes; invoice reservations released; no provider operation was issued");
+            }
+            return due.size();
         });
     }
     private void capture(Map<String,Object> intent) {
@@ -191,13 +235,13 @@ public class BillingService {
         db.event(id,"CAPTURED",reserved?"Capture confirmed and receipt allocated; bank settlement is separate":"Late capture recorded as unapplied cash for finance review");
         db.publish(intent,"PAYMENT_CAPTURED");
     }
-    private void fail(Map<String,Object> intent) {
+    private void fail(Map<String,Object> intent,String message) {
         UUID id=id(intent.get("id")); if(hasCapture(id) || "FAILED".equals(intent.get("status"))) return;
         for(var allocation:lockInvoices(id)) if("RESERVED".equals(allocation.get("state")))
             db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor-?,version=version+1 WHERE id=?",amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
         db.update("UPDATE billing.allocations SET state='RELEASED' WHERE intent_id=? AND state='RESERVED'",id);
         db.update("UPDATE billing.intents SET status='FAILED' WHERE id=?",id);
-        db.event(id,"FAILED","Provider confirmed failure; invoice reservations released"); db.publish(intent,"PAYMENT_FAILED");
+        db.event(id,"FAILED",message); db.publish(intent,"PAYMENT_FAILED");
     }
     private void returned(Map<String,Object> intent) {
         UUID id=id(intent.get("id"));

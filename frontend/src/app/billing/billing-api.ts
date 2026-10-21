@@ -17,7 +17,15 @@ export interface BillingIntent {
   allocations?: { invoiceId: string; amountMinor: number; state: string }[];
   timeline?: { type: string; at: string; message: string }[];
 }
-export interface FinanceCase { id: string; intentId: string; reason: string; status: string; createdAt: string; }
+export interface FinanceCase {
+  id: string; intentId: string; reason: string; status: string; createdAt: string;
+  refundId?: string | null; paymentStatus?: string | null; refundStatus?: string | null;
+  resolution?: string | null; resolvedBy?: string | null; resolvedAt?: string | null;
+  releaseRequestedBy?: string | null; releaseNote?: string | null; releaseRequestedAt?: string | null;
+  canVerifyReference?: boolean; canRequestRelease?: boolean; canApproveRelease?: boolean; canClose?: boolean;
+}
+export interface CaseAction { action: string; actor: string; note?: string | null; evidence?: string | null; createdAt: string; }
+export type CaseCommand = 'verify' | 'request-release' | 'approve-release' | 'reject-release' | 'close';
 export interface FinancePayment {
   id: string; accountId: string; merchantId: string; accountName: string; amountMinor: number; refundedMinor: number;
   availableRefundMinor: number; currency: string; status: string; method: PaymentMethod; createdAt: string;
@@ -67,6 +75,22 @@ export class BillingApi {
     return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}/simulate`, { outcome });
   }
   cases() { return this.http.get<FinanceCase[]>(`${this.base}/finance/cases`); }
+  caseHistory(caseId: string) { return this.http.get<CaseAction[]>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/actions`); }
+  verifyCaseReference(caseId: string, body: { reference: string; note: string }) {
+    return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/provider-reference`, body);
+  }
+  requestCaseRelease(caseId: string, body: { note: string }) {
+    return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/release-request`, body);
+  }
+  approveCaseRelease(caseId: string) {
+    return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/release-approval`, {});
+  }
+  rejectCaseRelease(caseId: string, body: { note: string }) {
+    return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/release-rejection`, body);
+  }
+  closeCase(caseId: string, body: { note: string }) {
+    return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/close`, body);
+  }
   financePayments() { return this.http.get<FinancePayment[]>(`${this.base}/finance/payments`); }
   refunds() { return this.http.get<FinanceRefund[]>(`${this.base}/finance/refunds`); }
   requestRefund(intentId: string, body: { amountMinor: number; reason: string }, key: string) {

@@ -180,6 +180,20 @@ class BillingHttpSecurityDatabaseTest {
     }
 
     @Test
+    void caseActionsAreAuthenticatedMerchantScopedAndCsrfProtected() throws Exception {
+        String path = "/api/v1/billing/finance/cases/" + UUID.randomUUID() + "/close";
+        String body = new JSONObject().put("note", "Reviewed the provider dashboard").toString();
+        assertThat(send("POST", path, body).statusCode()).isEqualTo(401);
+        // Unknown and out-of-scope cases are indistinguishable: both are 404, for staff and customers.
+        assertThat(send("POST", path, body, "Authorization", "Bearer " + financeBearer).statusCode()).isEqualTo(404);
+        assertThat(send("POST", path, body, "Authorization", "Bearer " + bearer).statusCode()).isEqualTo(404);
+        assertThat(send("GET", "/api/v1/billing/finance/cases", null, "Authorization", "Bearer " + bearer).statusCode()).isEqualTo(403);
+        var read = send("GET", "/api/v1/billing/finance/cases", null, "Cookie", "IP_AUTH=" + financeBearer);
+        assertThat(read.statusCode()).isEqualTo(200);
+        assertThat(send("POST", path, body, "Cookie", "IP_AUTH=" + financeBearer).statusCode()).isEqualTo(403);
+    }
+
+    @Test
     void hostileBrowserOriginIsRejectedDespiteAValidUserToken() throws Exception {
         assertThat(send("GET", "/api/v1/billing/accounts", null, "Authorization", "Bearer " + bearer,
             "Origin", "https://evil.example").statusCode()).isEqualTo(403);

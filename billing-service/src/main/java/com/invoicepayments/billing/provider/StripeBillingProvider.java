@@ -60,21 +60,46 @@ public final class StripeBillingProvider implements BillingProvider {
     @Override public String paymentRequestVersion() {
         // A credential change may select a different Stripe account. Fail closed on replay
         // even for same-account key rotation; never persist the secret itself.
-        try {
-            String fingerprint = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
-                    .digest(secretKey.getBytes(StandardCharsets.UTF_8)));
-            return API_VERSION + ":checkout-v1:" + fingerprint;
-        } catch (java.security.NoSuchAlgorithmException ex) { throw new IllegalStateException(ex); }
+        return API_VERSION + ":checkout-v1:" + credentialFingerprint();
+    }
+
+    @Override public String refundRequestVersion() {
+        return API_VERSION + ":refund-v1:" + credentialFingerprint();
     }
 
     @Override public ProviderResult submitSaved(ProviderCommand command, String version, Instant preparedAt) {
+        requireReplayWindow(paymentRequestVersion(), version, preparedAt,
+                "Saved payment cannot be safely replayed; reconciliation required");
+        return submit(command);
+    }
+
+    @Override public ProviderResult recoverRefund(RefundCommand command, String version, Instant preparedAt, String providerId) {
+        if (providerId != null) return lookupRefund(command.idempotencyKey(), providerId);
+        requireReplayWindow(refundRequestVersion(), version, preparedAt,
+                "Saved refund cannot be safely replayed; reconciliation required");
+        // Same key and same parameters: Stripe returns the original refund if it was created,
+        // or performs the refund the lost request never delivered. It never creates a second one.
+        ProviderResult replay = refund(command);
+        // A replay returns the original response. Read the refund's current state before
+        // applying evidence; keep the verified identity even if that read fails.
+        try { return lookupRefund(command.idempotencyKey(), replay.providerId()); }
+        catch (ProviderUncertainException ex) { return unknown(replay.providerId()); }
+    }
+
+    private void requireReplayWindow(String expectedVersion, String version, Instant preparedAt, String message) {
         Instant now = clock.instant();
         // Stripe v1 may prune keys after 24 hours. Keep an hour of safety margin.
-        if (!paymentRequestVersion().equals(version) || preparedAt == null || preparedAt.isAfter(now)
+        if (!expectedVersion.equals(version) || preparedAt == null || preparedAt.isAfter(now)
                 || !now.isBefore(preparedAt.plus(Duration.ofHours(23)))) {
-            throw new ProviderReplayUnsafeException();
+            throw new ProviderReplayUnsafeException(message);
         }
-        return submit(command);
+    }
+
+    private String credentialFingerprint() {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(secretKey.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException ex) { throw new IllegalStateException(ex); }
     }
 
     @Override public ProviderResult recoverPayment(ProviderCommand command, String version, Instant preparedAt, String providerId) {

@@ -112,6 +112,17 @@ public final class SimulatorBillingProvider implements BillingProvider {
         return lookupOperation(idempotencyKey, providerId, "REFUND");
     }
 
+    @Override public String refundRequestVersion() { return "simulator:refund-v1"; }
+
+    @Override public ProviderResult recoverRefund(RefundCommand command, String version, Instant preparedAt, String providerId) {
+        if (providerId != null) return lookupRefund(command.idempotencyKey(), providerId);
+        if (!refundRequestVersion().equals(version)) {
+            throw new ProviderReplayUnsafeException("Saved refund cannot be safely replayed; reconciliation required");
+        }
+        // The emulator retains operation keys indefinitely; Stripe has a bounded window.
+        return refund(command);
+    }
+
     /**
      * Authenticated, explicitly enabled nonproduction fault control. The application owns that gate.
      * TIMEOUT_AFTER_ACCEPT commits the provider success before throwing, so reconciliation can recover it.

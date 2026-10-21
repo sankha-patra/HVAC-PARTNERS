@@ -24,6 +24,15 @@ public class BillingMetrics {
               (status='REQUIRES_ACTION' AND created_at<NOW()-INTERVAL '24 hours') OR
               (status='PROCESSING' AND created_at<NOW()-INTERVAL '7 days')
             """);
+        register(registry,"billing.refunds.unresolved", "SELECT COUNT(*) FROM billing.refunds WHERE status IN ('APPROVED','SUBMITTING','PROCESSING','UNKNOWN')");
+        // Measured from approval or submission (immutable), never from updated_at, which retries move.
+        register(registry,"billing.refunds.stuck", """
+            SELECT COUNT(*) FROM billing.refunds WHERE
+              (status='APPROVED' AND COALESCE(approved_at,created_at)<NOW()-INTERVAL '15 minutes') OR
+              (status IN ('SUBMITTING','UNKNOWN') AND COALESCE(submitted_at,created_at)<NOW()-INTERVAL '15 minutes') OR
+              (status='PROCESSING' AND COALESCE(submitted_at,created_at)<NOW()-INTERVAL '7 days')
+            """);
+        register(registry,"billing.cases.awaiting.approval", "SELECT COUNT(*) FROM billing.cases WHERE status='OPEN' AND release_requested_by IS NOT NULL");
         register(registry,"billing.webhooks.unmatched", "SELECT COUNT(*) FROM billing.webhook_inbox WHERE state='UNMATCHED'");
         register(registry,"billing.outbox.pending", "SELECT COUNT(*) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");
         register(registry,"billing.outbox.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");

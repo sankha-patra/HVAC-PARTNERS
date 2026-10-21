@@ -72,12 +72,38 @@ public class BillingStore {
         if(refund!=null) payload.put("refundId",refund.toString());
         update("INSERT INTO billing.outbox(id,aggregate_id,type,payload) VALUES(?,?,?,?::jsonb)",event,intentId,type,payload.toString());
     }
-    public void caseFor(UUID intent,String reason,String reference) {
+    public void caseFor(UUID intent,String reason,String reference) { caseFor(intent,null,reason,reference); }
+    /** Informational case: recorded once per reason and reference. */
+    public void caseFor(UUID intent,UUID refund,String reason,String reference) {
         update("""
-            INSERT INTO billing.cases(id,merchant_id,intent_id,reason,reference)
-            SELECT ?,a.merchant_id,i.id,?,? FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id
+            INSERT INTO billing.cases(id,merchant_id,intent_id,refund_id,reason,reference)
+            SELECT ?,a.merchant_id,i.id,?,?,? FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id
             WHERE i.id=? ON CONFLICT(reason,reference) DO NOTHING
-            """,UUID.randomUUID(),reason,reference,intent);
+            """,UUID.randomUUID(),refund,reason,reference,intent);
+    }
+    /** Stuck-operation case: opened once, and reopened with an audit entry if the problem recurs after resolution. */
+    public void escalate(UUID intent,UUID refund,String reason,String reference,String note) {
+        var changed=rows("""
+            INSERT INTO billing.cases(id,merchant_id,intent_id,refund_id,reason,reference)
+            SELECT ?,a.merchant_id,i.id,?,?,? FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id WHERE i.id=?
+            ON CONFLICT(reason,reference) DO UPDATE SET status='OPEN',resolved_at=NULL,resolved_by=NULL,resolution=NULL,
+              release_requested_by=NULL,release_note=NULL,release_requested_at=NULL
+            WHERE billing.cases.status='RESOLVED'
+            RETURNING id,(xmax<>0) AS reopened
+            """,UUID.randomUUID(),refund,reason,reference,intent);
+        for(var row:changed) if(Boolean.TRUE.equals(row.get("reopened"))) caseAction(id(row.get("id")),"REOPENED","system",note,null);
+    }
+    /** Resolves the open cases of one operation for the given reasons; every resolution is audited. */
+    public void resolveCases(String reference,String reasonA,String reasonB,String actor,String resolution,String action,String note) {
+        for(var row:rows("""
+            UPDATE billing.cases SET status='RESOLVED',resolved_at=NOW(),resolved_by=?,resolution=?,
+              release_requested_by=NULL,release_note=NULL,release_requested_at=NULL
+            WHERE status='OPEN' AND reference=? AND reason IN (?,?) RETURNING id
+            """,actor,resolution,reference,reasonA,reasonB)) caseAction(id(row.get("id")),action,actor,note,null);
+    }
+    public void caseAction(UUID caseId,String action,String actor,String note,String evidenceJson) {
+        update("INSERT INTO billing.case_actions(id,case_id,action,actor,note,evidence) VALUES(?,?,?,?,?,?::jsonb)",
+            UUID.randomUUID(),caseId,action,actor,note,evidenceJson);
     }
     public void journal(Map<String,Object> intent,String effect,String debit,String credit,long minor) {
         UUID journal=UUID.randomUUID();

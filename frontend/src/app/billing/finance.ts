@@ -8,7 +8,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { Subject, takeUntil } from 'rxjs';
 import { AuthService } from '../shared/auth.service';
-import { BillingApi, FinanceCase, FinancePayment, FinanceRefund } from './billing-api';
+import { BillingApi, CaseAction, CaseCommand, FinanceCase, FinancePayment, FinanceRefund } from './billing-api';
 
 interface SavedRefundRequest {
   intentId: string; key: string; amountMinor: number; reason: string;
@@ -97,14 +97,54 @@ interface SavedRefundRequest {
       </mat-card-content></mat-card>
       @if (error()) { <p class="notice error" role="alert">{{ error() }}</p> }
       <mat-card class="panel"><mat-card-content>
-        <div class="section-heading"><h2>Cases requiring review</h2><button mat-stroked-button (click)="load()" [disabled]="loading()">Refresh cases</button></div>
-        <p class="muted">This queue is read-only. A case is evidence to investigate, not permission to overwrite payment history.</p>
+        <div class="section-heading"><h2>Cases requiring review</h2><button mat-stroked-button (click)="load()" [disabled]="loading() || actionBusy()">Refresh cases</button></div>
+        <p class="muted">Resolving a case never marks a payment paid. Attach a provider reference that the server verifies with the provider, or request a release that a different approver confirms. Every action is recorded.</p>
+        @if (caseError()) { <p class="notice error" role="alert">{{ caseError() }}</p> }
+        @if (caseMessage()) { <p class="notice" role="status">{{ caseMessage() }}</p> }
+        @if (activeCase(); as item) {
+          <div class="case-panel">
+            <h3>{{ caseTitle() }}</h3>
+            <p class="reference">Case {{ item.id }} · {{ item.reason }} · payment {{ item.intentId }}@if (item.refundId) { · refund {{ item.refundId }} }</p>
+            @if (item.releaseNote) { <p>Release requested by {{ item.releaseRequestedBy }}: {{ item.releaseNote }}</p> }
+            @if (caseCommand() === 'verify') {
+              <mat-form-field appearance="outline"><mat-label>Provider reference</mat-label>
+                <input matInput [(ngModel)]="caseReference" maxlength="255" autocomplete="off" [disabled]="actionBusy()">
+              </mat-form-field>
+            }
+            @if (caseCommand() !== 'approve-release') {
+              <mat-form-field appearance="outline" class="refund-reason"><mat-label>What did you check?</mat-label>
+                <textarea matInput [(ngModel)]="caseNote" maxlength="1000" rows="3" [disabled]="actionBusy()"></textarea>
+              </mat-form-field>
+            }
+            <div class="actions"><button mat-flat-button (click)="submitCaseAction()" [disabled]="actionBusy()">{{ caseCommandLabel() }}</button>
+              <button mat-button (click)="cancelCaseAction()" [disabled]="actionBusy()">Cancel</button></div>
+          </div>
+        }
         @if (loaded()) {
           @if (!cases().length) { <p>No cases were returned for your authorized scope.</p> }
           @else {
-            <div class="table-scroll"><table><thead><tr><th scope="col">Case</th><th scope="col">Payment reference</th><th scope="col">Reason</th><th scope="col">Status</th><th scope="col">Opened</th></tr></thead>
+            <div class="table-scroll"><table><thead><tr><th scope="col">Case</th><th scope="col">Payment reference</th><th scope="col">Reason</th><th scope="col">Status</th><th scope="col">Opened</th><th scope="col">Action</th></tr></thead>
               <tbody>@for (item of cases(); track item.id) {
-                <tr><th scope="row" class="reference">{{ item.id }}</th><td class="reference">{{ item.intentId }}</td><td>{{ item.reason }}</td><td>{{ item.status }}</td><td>{{ item.createdAt | date:'medium' }}</td></tr>
+                <tr><th scope="row" class="reference">{{ item.id }}</th><td class="reference">{{ item.intentId }}@if (item.refundId) { <p>Refund {{ item.refundId }}</p> }</td>
+                  <td>{{ item.reason }}</td>
+                  <td class="reason-cell">{{ item.status }}@if (item.resolution) { <p class="muted">{{ item.resolution }} · {{ item.resolvedBy }}</p> }@if (item.releaseRequestedBy && item.status === 'OPEN') { <p class="muted">Release awaiting approval</p> }</td>
+                  <td>{{ item.createdAt | date:'medium' }}</td>
+                  <td><div class="case-actions">
+                    @if (item.canVerifyReference) { <button mat-button (click)="beginCaseAction(item, 'verify')" [disabled]="actionBusy()">Attach provider reference</button> }
+                    @if (item.canRequestRelease) { <button mat-button (click)="beginCaseAction(item, 'request-release')" [disabled]="actionBusy()">Request release</button> }
+                    @if (item.canApproveRelease) {
+                      <button mat-stroked-button (click)="beginCaseAction(item, 'approve-release')" [disabled]="actionBusy()">Approve release</button>
+                      <button mat-button (click)="beginCaseAction(item, 'reject-release')" [disabled]="actionBusy()">Reject</button>
+                    }
+                    @if (item.canClose) { <button mat-button (click)="beginCaseAction(item, 'close')" [disabled]="actionBusy()">Close after review</button> }
+                    @if (item.reason !== 'UNMATCHED_WEBHOOK') { <button mat-button (click)="showHistory(item)" [disabled]="actionBusy()">History</button> }
+                  </div></td></tr>
+                @if (historyFor() === item.id) {
+                  <tr><td colspan="6">
+                    @if (!history().length) { <p class="muted">No recorded actions yet.</p> }
+                    @for (entry of history(); track $index) { <p class="reference">{{ entry.createdAt | date:'medium' }} · {{ entry.action }} · {{ entry.actor }}@if (entry.note) { · {{ entry.note }} }</p> }
+                  </td></tr>
+                }
               }</tbody></table></div>
           }
         }
@@ -135,9 +175,107 @@ export class FinanceComponent implements OnInit, OnDestroy {
   readonly draftPayment = signal<FinancePayment | null>(null);
   readonly refundRequest = signal<SavedRefundRequest | null>(null);
   readonly uncertainApprovals = signal<string[]>([]);
+  readonly activeCase = signal<FinanceCase | null>(null);
+  readonly caseCommand = signal<CaseCommand | null>(null);
+  readonly caseError = signal('');
+  readonly caseMessage = signal('');
+  readonly historyFor = signal<string | null>(null);
+  readonly history = signal<CaseAction[]>([]);
   private recoveryBlocked = false;
   refundAmount = '';
   refundReason = '';
+  caseNote = '';
+  caseReference = '';
+
+  beginCaseAction(item: FinanceCase, command: CaseCommand) {
+    if (this.actionBusy()) return;
+    const allowed = command === 'verify' ? item.canVerifyReference
+      : command === 'request-release' ? item.canRequestRelease
+      : command === 'close' ? item.canClose : item.canApproveRelease;
+    if (allowed !== true) return;
+    this.activeCase.set(item); this.caseCommand.set(command);
+    this.caseNote = ''; this.caseReference = ''; this.caseError.set(''); this.caseMessage.set('');
+  }
+
+  cancelCaseAction() {
+    if (this.actionBusy()) return;
+    this.activeCase.set(null); this.caseCommand.set(null); this.caseError.set('');
+  }
+
+  submitCaseAction() {
+    const item = this.activeCase(); const command = this.caseCommand();
+    if (!item || !command || this.actionBusy()) return;
+    const note = this.caseNote.trim(); const reference = this.caseReference.trim();
+    if (command !== 'approve-release' && (note.length < 10 || note.length > 1000)) {
+      this.caseError.set('Record what you checked, in 10 to 1000 characters.'); return;
+    }
+    if (command === 'verify' && !/^[A-Za-z0-9_-]{3,255}$/.test(reference)) {
+      this.caseError.set('Enter the provider reference exactly as the provider shows it.'); return;
+    }
+    const request = command === 'verify' ? this.api.verifyCaseReference(item.id, { reference, note })
+      : command === 'request-release' ? this.api.requestCaseRelease(item.id, { note })
+      : command === 'approve-release' ? this.api.approveCaseRelease(item.id)
+      : command === 'reject-release' ? this.api.rejectCaseRelease(item.id, { note })
+      : this.api.closeCase(item.id, { note });
+    this.actionBusy.set(true); this.caseError.set(''); this.caseMessage.set('');
+    request.pipe(takeUntil(this.destroyed)).subscribe({
+      next: result => {
+        this.actionBusy.set(false);
+        if (result.id !== item.id) { this.caseError.set('The response could not be matched to this case. Refresh cases before acting again.'); return; }
+        this.activeCase.set(null); this.caseCommand.set(null);
+        this.caseMessage.set(this.caseOutcome(command));
+        this.load(); this.loadPayments(); this.loadRefunds();
+      },
+      error: failure => {
+        this.actionBusy.set(false);
+        this.caseError.set(failure.error?.code === 'PROVIDER_REFERENCE_NOT_VERIFIED'
+          ? 'The provider did not confirm this reference for this operation. Nothing was changed.'
+          : failure.status === 403 ? 'This action needs a different authorized employee or role.'
+          : failure.status === 409 ? 'The case changed since it was loaded. Refresh cases before acting again.'
+          : failure.status === 400 ? 'The server rejected the input. Check the reference and the note.'
+          : 'The outcome of this action is unconfirmed. Refresh cases before trying again.');
+      }
+    });
+  }
+
+  showHistory(item: FinanceCase) {
+    if (item.reason === 'UNMATCHED_WEBHOOK') return;
+    this.historyFor.set(item.id); this.history.set([]);
+    this.api.caseHistory(item.id).pipe(takeUntil(this.destroyed)).subscribe({
+      next: rows => { if (this.historyFor() === item.id) this.history.set(rows); },
+      error: () => this.caseError.set('Case history could not be loaded. Refresh cases and try again.')
+    });
+  }
+
+  caseTitle() {
+    switch (this.caseCommand()) {
+      case 'verify': return 'Attach a provider reference';
+      case 'request-release': return 'Request a release (a different approver must confirm)';
+      case 'approve-release': return 'Approve the release';
+      case 'reject-release': return 'Reject the release request';
+      default: return 'Close after review';
+    }
+  }
+
+  caseCommandLabel() {
+    switch (this.caseCommand()) {
+      case 'verify': return 'Verify with provider';
+      case 'request-release': return 'Request release';
+      case 'approve-release': return 'Approve release';
+      case 'reject-release': return 'Reject request';
+      default: return 'Close case';
+    }
+  }
+
+  private caseOutcome(command: CaseCommand) {
+    switch (command) {
+      case 'verify': return 'The provider confirmed the reference. Its recorded status now drives the operation, and the case is resolved.';
+      case 'request-release': return 'Release requested. A different authorized approver must confirm it; the reservation stays until then.';
+      case 'approve-release': return 'Release approved and recorded. If the provider reports money later, it is still recorded for finance review.';
+      case 'reject-release': return 'Release request rejected. The case stays open.';
+      default: return 'Case closed after review.';
+    }
+  }
 
   ngOnInit() { this.restore(); this.load(); this.loadPayments(); this.loadRefunds(); }
   ngOnDestroy() { this.destroyed.next(); this.destroyed.complete(); }

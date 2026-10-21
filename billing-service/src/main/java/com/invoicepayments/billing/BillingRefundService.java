@@ -51,7 +51,7 @@ public class BillingRefundService {
             var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
             if(user.equals(row.get("requestedBy"))) throw new BillingProblem(403,"SEPARATION_OF_DUTIES","The requester cannot approve their own refund");
             if(!"REQUESTED".equals(row.get("status"))) return null;
-            db.update("UPDATE billing.refunds SET status='APPROVED',approved_by=?,updated_at=NOW() WHERE id=?",user,refund);
+            db.update("UPDATE billing.refunds SET status='APPROVED',approved_by=?,approved_at=NOW(),updated_at=NOW() WHERE id=?",user,refund);
             db.event(intent,"REFUND_APPROVED","A different authorized employee approved the refund"); return null;
         });
         submitApproved(refund); return raw(refund);
@@ -64,14 +64,40 @@ public class BillingRefundService {
             payments.requireProvider(payment);
             var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
             if(!"APPROVED".equals(row.get("status"))) return null;
-            db.update("UPDATE billing.refunds SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',next_recovery_at=NOW()+INTERVAL '45 seconds',updated_at=NOW() WHERE id=?",token,refund);
-            row.put("providerPaymentId",payment.get("providerId")); return row;
+            if(text(payment,"providerId")==null) throw BillingProblem.conflict("The original provider payment reference is missing; reconcile it before refunding");
+            RefundCommand command=new RefundCommand(refund.toString(),intent.toString(),text(payment,"providerId"),operationKey(refund),amount(row,"amountMinor"),"USD");
+            // Save the exact request, its provider format and its age before provider I/O.
+            // A crash or lost response can then replay this request, never a different one.
+            db.update("""
+                UPDATE billing.refunds SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',
+                  next_recovery_at=NOW()+INTERVAL '45 seconds',original_request=?::jsonb,request_version=?,submitted_at=NOW(),updated_at=NOW()
+                WHERE id=?
+                """,token,command.toJson(),provider.refundRequestVersion(),refund);
+            db.event(intent,"REFUND_SUBMITTING","Refund submission prepared; provider acceptance is not yet known");
+            return db.one("SELECT original_request FROM billing.refunds WHERE id=?",refund);
         });
         if(work==null) return;
         ProviderResult result;
-        try { result=provider.refund(new RefundCommand(refund.toString(),intent.toString(),text(work,"providerPaymentId"),"refund_"+refund,amount(work,"amountMinor"),"USD")); }
-        catch(RuntimeException failure) { result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain"); }
+        try { result=provider.refund(RefundCommand.fromJson(text(work,"originalRequest"))); }
+        catch(RuntimeException failure) { result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request"); }
         record(refund,token,result);
+    }
+    static String operationKey(UUID refund) { return "refund_"+refund; }
+    /**
+     * Approved case release: two employees confirmed the provider never created this refund.
+     * Fences out in-flight recovery and frees the refund capacity. If the provider later
+     * reports the refund, record() still posts it, or raises a case if capacity was reused.
+     */
+    void releaseUnconfirmed(UUID refund,String message) {
+        UUID intent=id(raw(refund).get("intentId"));
+        db.tx(() -> {
+            payments.locked(intent);
+            var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
+            if(!Set.of("SUBMITTING","UNKNOWN").contains(text(row,"status"))) throw BillingProblem.conflict("This refund is no longer unresolved; refresh the case");
+            db.update("UPDATE billing.refunds SET status='FAILED',lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",refund);
+            db.event(intent,"REFUND_RELEASED",message);
+            return null;
+        });
     }
     public void record(UUID refund,UUID fence,ProviderResult result) {
         UUID intent=id(raw(refund).get("intentId"));
@@ -80,7 +106,7 @@ public class BillingRefundService {
             if(fence!=null && !fence.toString().equals(text(row,"leaseToken"))) return null;
             if(result.providerId()!=null && row.get("providerId")!=null && !result.providerId().equals(row.get("providerId"))) throw BillingProblem.conflict("Refund identity mismatch");
             if("REFUNDED".equals(row.get("status"))) {
-                if("FAILED".equals(result.state())) db.caseFor(intent,"REFUND_LATER_FAILED",refund.toString());
+                if("FAILED".equals(result.state())) db.caseFor(intent,refund,"REFUND_LATER_FAILED",refund.toString());
                 return null;
             }
             if("FAILED".equals(row.get("status")) && Set.of("PROCESSING","UNKNOWN","REQUIRES_ACTION").contains(result.state())) return null;
@@ -108,6 +134,10 @@ public class BillingRefundService {
             }
             String state=switch(result.state()) {case "REFUNDED","FAILED","PROCESSING","UNKNOWN"->result.state(); default->"UNKNOWN";};
             db.update("UPDATE billing.refunds SET status=?,provider_id=COALESCE(provider_id,?),lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",state,result.providerId(),refund);
+            // Provider evidence that ends the uncertainty also closes the stuck-refund cases it explains.
+            if(!"UNKNOWN".equals(state))
+                db.resolveCases(refund.toString(),"REFUND_UNRESOLVED","REFUND_REPLAY_UNSAFE","system","PROVIDER_EVIDENCE","AUTO_RESOLVED",
+                    "Provider evidence recorded refund status "+state);
             return null;
         });
     }

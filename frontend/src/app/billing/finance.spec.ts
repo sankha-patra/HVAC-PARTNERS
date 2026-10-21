@@ -5,7 +5,7 @@ import { environment } from '../../environments/environment';
 import { FinanceComponent } from './finance';
 import { AuthService } from '../shared/auth.service';
 import { signal } from '@angular/core';
-import { FinancePayment, FinanceRefund } from './billing-api';
+import { FinanceCase, FinancePayment, FinanceRefund } from './billing-api';
 
 describe('Finance cases', () => {
   let component: FinanceComponent;
@@ -172,6 +172,72 @@ describe('Finance cases', () => {
     const retry = http.expectOne(`${base}/intents/intent-a/refunds`);
     expect(retry.request.headers.get('Idempotency-Key')).toBe(key);
     retry.flush(refund); refreshLists();
+  });
+
+  const stuckCase: FinanceCase = { id: 'case-a', intentId: payment.id, reason: 'PAYMENT_REPLAY_UNSAFE', status: 'OPEN',
+    createdAt: '2026-10-21T00:00:00Z', canVerifyReference: true, canRequestRelease: true, canApproveRelease: false, canClose: false };
+  function refreshAfterCaseAction() {
+    http.expectOne(url).flush([]);
+    http.expectOne(`${base}/payments`).flush([payment]);
+    http.expectOne(`${base}/refunds`).flush([refund]);
+  }
+
+  it('offers a case action only when the server grants it to this user', () => {
+    initialize();
+    component.beginCaseAction(stuckCase, 'approve-release');
+    expect(component.activeCase()).toBeNull();
+    component.beginCaseAction(stuckCase, 'close');
+    expect(component.activeCase()).toBeNull();
+    component.beginCaseAction(stuckCase, 'verify');
+    expect(component.caseCommand()).toBe('verify');
+  });
+
+  it('sends a provider reference with the reviewer note, then refreshes every list', () => {
+    initialize();
+    component.beginCaseAction(stuckCase, 'verify');
+    component.caseReference = 'cs_test_found123';
+    component.caseNote = 'Found the session by intent metadata in the dashboard';
+    component.submitCaseAction();
+    const request = http.expectOne(`${base}/cases/case-a/provider-reference`);
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toEqual({ reference: 'cs_test_found123', note: 'Found the session by intent metadata in the dashboard' });
+    request.flush({ ...stuckCase, status: 'RESOLVED', resolution: 'STAFF_VERIFIED_PROVIDER_REFERENCE' });
+    refreshAfterCaseAction();
+    expect(component.activeCase()).toBeNull();
+    expect(component.caseMessage()).toContain('provider confirmed');
+  });
+
+  it('keeps the case open and says nothing changed when the provider does not verify the reference', () => {
+    initialize();
+    component.beginCaseAction(stuckCase, 'verify');
+    component.caseReference = 'cs_test_wrong';
+    component.caseNote = 'Copied from the dashboard search results';
+    component.submitCaseAction();
+    http.expectOne(`${base}/cases/case-a/provider-reference`)
+      .flush({ code: 'PROVIDER_REFERENCE_NOT_VERIFIED' }, { status: 409, statusText: 'Conflict' });
+    expect(component.activeCase()?.id).toBe('case-a');
+    expect(component.caseError()).toContain('Nothing was changed');
+  });
+
+  it('requires a meaningful note before any request leaves the browser', () => {
+    initialize();
+    component.beginCaseAction(stuckCase, 'request-release');
+    component.caseNote = 'too short';
+    component.submitCaseAction();
+    http.expectNone(`${base}/cases/case-a/release-request`);
+    expect(component.caseError()).toContain('10 to 1000');
+  });
+
+  it('approves a release without a note and explains a separation-of-duties refusal', () => {
+    initialize();
+    const pending = { ...stuckCase, canVerifyReference: false, canRequestRelease: false, canApproveRelease: true,
+      releaseRequestedBy: 'finance-maker', releaseNote: 'Provider has no payment for this intent' };
+    component.beginCaseAction(pending, 'approve-release');
+    component.submitCaseAction();
+    const request = http.expectOne(`${base}/cases/case-a/release-approval`);
+    expect(request.request.body).toEqual({});
+    request.flush({ code: 'SEPARATION_OF_DUTIES' }, { status: 403, statusText: 'Forbidden' });
+    expect(component.caseError()).toContain('different authorized employee');
   });
 
   it('fails closed on a corrupt stored refund record', () => {

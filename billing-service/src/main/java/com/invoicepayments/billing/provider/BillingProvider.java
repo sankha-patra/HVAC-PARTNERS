@@ -18,4 +18,10 @@ public interface BillingProvider {
     ProviderResult lookup(String idempotencyKey, String providerId);
     ProviderResult refund(RefundCommand command);
     ProviderResult lookupRefund(String idempotencyKey, String providerId);
+    /** Identifies the refund request format and provider configuration safe for a saved retry. */
+    default String refundRequestVersion() { return null; }
+    /** Providers opt in to bounded refund replay; the default remains a read-only lookup. */
+    default ProviderResult recoverRefund(RefundCommand command, String version, Instant preparedAt, String providerId) {
+        return lookupRefund(command.idempotencyKey(), providerId);
+    }
 }

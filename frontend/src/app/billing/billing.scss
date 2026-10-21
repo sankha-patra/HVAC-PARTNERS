@@ -32,3 +32,5 @@ summary { cursor: pointer; font-weight: 600; padding: .5rem 0; }
 .refund-reason { display: block; width: min(100%, 600px); }
 .reason-cell { white-space: normal; min-width: 180px; overflow-wrap: anywhere; }
 @media (max-width: 650px) { .panel mat-card-content { padding: 1rem; } .payment-choice { align-items: flex-start; flex-direction: column; } }
+.case-panel { border-left: 3px solid currentColor; padding: .25rem 0 .5rem 1rem; margin: 1rem 0; }
+.case-actions { display: flex; flex-wrap: wrap; gap: .25rem; min-width: 200px; }

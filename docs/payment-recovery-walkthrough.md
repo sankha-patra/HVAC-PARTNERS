@@ -1,7 +1,8 @@
 # First repair: recovering a payment after a crash
 
-This change covers payment submission and transaction boundaries. Refund recovery
-and an employee investigation/resolution workflow still need further work. The app
+This change covers payment submission and transaction boundaries. Refund recovery,
+employee case resolution and expiry of abandoned payments were added afterwards; see
+[the second repair](payment-lifecycle-completion.md). The app
 remains a reference implementation with simulated integrations and a Stripe test
 adapter; this repair is not evidence of production readiness.
 

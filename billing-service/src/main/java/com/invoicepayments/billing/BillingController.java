@@ -15,15 +15,18 @@ public class BillingController {
     private final BillingService payments; private final BillingRefundService refunds;
     private final BillingInbox inbox; private final StripeWebhookVerifier verifier; private final BillingStore db;
     private final BillingReconciliation reconciliation;
+    private final BillingCaseService cases;
     private final org.springframework.beans.factory.ObjectProvider<BillingEvents> events;
     public BillingController(BillingService payments,BillingRefundService refunds,BillingInbox inbox,StripeWebhookVerifier verifier,BillingStore db,
-        BillingReconciliation reconciliation,org.springframework.beans.factory.ObjectProvider<BillingEvents> events) {
+        BillingReconciliation reconciliation,BillingCaseService cases,org.springframework.beans.factory.ObjectProvider<BillingEvents> events) {
         this.payments=payments;this.refunds=refunds;this.inbox=inbox;this.verifier=verifier;this.db=db;
-        this.reconciliation=reconciliation;this.events=events;
+        this.reconciliation=reconciliation;this.cases=cases;this.events=events;
     }
     public record CreateIntent(List<UUID> invoiceIds,String method) {}
     public record Simulation(String outcome) {}
     public record RefundRequest(long amountMinor,String reason) {}
+    public record CaseNote(String note) {}
+    public record ProviderReference(String reference,String note) {}
     @GetMapping("/accounts") public Object accounts(Authentication auth) { return payments.accounts(user(auth)); }
     @GetMapping("/accounts/{account}/invoices") public Object invoices(Authentication auth,@PathVariable UUID account) {return payments.invoices(user(auth),account);}
     @PostMapping("/accounts/{account}/intents") public Object create(Authentication auth,@PathVariable UUID account,
@@ -49,17 +52,22 @@ public class BillingController {
         event.ifPresent(value -> inbox.receive("STRIPE",value));
         return ResponseEntity.accepted().body(Map.of("outcome",event.isPresent()?"DURABLY_RECEIVED":"IGNORED"));
     }
-    @GetMapping("/finance/cases") public Object cases(Authentication auth) {
-        String user=user(auth); refunds.requireAnyStaff(user);
-        return db.rows("""
-            SELECT c.id::text,c.intent_id::text,c.reason,c.status,c.created_at FROM billing.cases c
-            WHERE EXISTS(SELECT 1 FROM billing.staff s WHERE s.user_id=? AND s.merchant_id=c.merchant_id)
-            UNION ALL
-            SELECT w.provider||':'||w.event_id,w.payload->>'intentId','UNMATCHED_WEBHOOK','OPEN',w.received_at
-            FROM billing.webhook_inbox w WHERE w.state='UNMATCHED'
-            AND EXISTS(SELECT 1 FROM billing.staff s WHERE s.user_id=? AND s.merchant_id=w.merchant_id)
-            ORDER BY created_at DESC LIMIT 200
-            """,user,user);
+    @GetMapping("/finance/cases") public Object cases(Authentication auth) { return cases.list(user(auth)); }
+    @GetMapping("/finance/cases/{caseId}/actions") public Object caseActions(Authentication auth,@PathVariable UUID caseId) {return cases.history(user(auth),caseId);}
+    @PostMapping("/finance/cases/{caseId}/provider-reference") public Object verifyCaseReference(Authentication auth,@PathVariable UUID caseId,@RequestBody ProviderReference request) {
+        return cases.verifyProviderReference(user(auth),caseId,request.reference(),request.note());
+    }
+    @PostMapping("/finance/cases/{caseId}/release-request") public Object requestCaseRelease(Authentication auth,@PathVariable UUID caseId,@RequestBody CaseNote request) {
+        return cases.requestRelease(user(auth),caseId,request.note());
+    }
+    @PostMapping("/finance/cases/{caseId}/release-approval") public Object approveCaseRelease(Authentication auth,@PathVariable UUID caseId) {
+        return cases.approveRelease(user(auth),caseId);
+    }
+    @PostMapping("/finance/cases/{caseId}/release-rejection") public Object rejectCaseRelease(Authentication auth,@PathVariable UUID caseId,@RequestBody CaseNote request) {
+        return cases.rejectRelease(user(auth),caseId,request.note());
+    }
+    @PostMapping("/finance/cases/{caseId}/close") public Object closeCase(Authentication auth,@PathVariable UUID caseId,@RequestBody CaseNote request) {
+        return cases.close(user(auth),caseId,request.note());
     }
     @GetMapping("/finance/payments") public Object financePayments(Authentication auth) {
         String user=user(auth); refunds.requireAnyStaff(user);
