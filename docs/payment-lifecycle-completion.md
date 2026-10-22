@@ -15,16 +15,37 @@ move money alone.
 
 ## How a case is resolved
 
-Nothing in the workflow can mark a payment paid. There are three ways out, and each writes
+Staff cannot declare a payment paid without verified provider evidence. There are three ways out, and each writes
 an entry to `billing.case_actions`, which the database refuses to update or delete.
 
 | Action | Who | What happens |
 | --- | --- | --- |
 | Attach provider reference | FINANCE or OPS | The server asks the provider whether that reference belongs to this exact payment or refund. Only a verified answer is recorded, through the normal path: capture once, journal once. An unverified reference changes nothing |
-| Request, then approve, a release | Request: FINANCE or OPS. Approve: REFUND_APPROVER, and never the requester | For a payment the provider never received: reservations are released and the payment becomes FAILED. For a refund the provider never created: its amount becomes available again. Late provider evidence is still recorded; a late capture becomes unapplied cash with its own case, never another invoice's money |
+| Request, then approve, a release | Request: FINANCE or OPS. Approve: REFUND_APPROVER, and never the requester | For a payment the provider never received: reservations are released and the payment becomes FAILED. For a refund the provider never created: the refund becomes RELEASED (not FAILED) and its amount becomes available again. Late provider evidence is still recorded; a late capture becomes unapplied cash with its own case, never another invoice's money |
 | Close after review | FINANCE or OPS, with a note | Only for cases that describe something already settled (for example, a late capture booked as unapplied cash). Refused while the payment or refund is still unresolved |
 
 Unknown cases and cases of another merchant both return 404.
+
+## Recovery validation and refund review repair
+
+- A manually supplied reference now uses a separate verification operation. Providers that
+  do not implement it refuse the reference by default.
+- Payment verification compares the local amount, currency, intent, operation key and payment method.
+  Refund verification also compares the refund ID and its original provider payment.
+- Stripe links the refund's PaymentIntent to the saved original Checkout Session using GET.
+  Manual verification never submits another payment or refund.
+- Mismatched, unverified or unsupported evidence leaves the case open without financial or audit changes.
+  A refund that still requires action cannot close its case as if the uncertainty were resolved.
+- Refund `REVIEW` and unrecognised result states are rejected before terminal-state shortcuts.
+  Webhook processing rolls back, retains the event as `UNMATCHED`, and creates one review case
+  per event. Reprocessing the event does not change the refund, money or reserved capacity.
+- Stripe does not deliver events in order. A refund the provider confirmed FAILED is final:
+  an older "succeeded" event processed after it posts no money and writes a
+  `REFUND_EVIDENCE_IGNORED` timeline entry. A staff release is stored as RELEASED
+  (`V14`), so a late provider success for a released refund is still recorded.
+- Existing transaction boundaries remain: provider calls happen outside a transaction;
+  accepted evidence, financial effects and case audit commit together. Caller transactions
+  are rejected before provider I/O. `TransactionTemplate` remains the implementation.
 
 ## Where to read the code
 
@@ -41,6 +62,7 @@ Unknown cases and cases of another merchant both return 404.
 - A stale recovery claim cannot call the provider.
 - A wrong provider reference changes nothing; a verified one captures once.
 - A release needs a second, different approver; late evidence after a release cannot take the invoice from a newer payment.
+- A refund failure processed before an older success event stays FAILED, with no journal, refund amount or ERP event.
 - Stuck cases cannot be closed without resolving them; audit history cannot be changed.
 - Expiry and submit racing for the same intent always leave either no provider operation and no reservation, or one operation with its reservation.
 

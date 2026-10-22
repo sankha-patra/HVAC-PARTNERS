@@ -76,16 +76,23 @@ public class BillingCaseService {
             if(!Set.of("UNKNOWN","SUBMITTING").contains(text(payment,"status"))) throw BillingProblem.conflict("This payment is no longer unresolved; refresh the case");
             if(payment.get("providerId")!=null && !reference.equals(payment.get("providerId")))
                 throw BillingProblem.conflict("This payment already has a different verified provider reference");
-            result=provider.lookup(BillingService.operationKey(intent),reference);
+            result=provider.verifyPaymentReference(new ProviderCommand(intent.toString(),BillingService.operationKey(intent),
+                amount(payment,"amountMinor"),text(payment,"currency"),text(payment,"method"),null),reference);
         } else if(REFUND_STUCK.contains(kind)) {
             UUID refund=id(item.get("refundId"));
             var row=refunds.raw(refund);
+            var payment=payments.raw(intent); payments.requireProvider(payment);
+            if(!intent.toString().equals(text(row,"intentId"))) throw BillingProblem.conflict("Refund does not belong to this payment");
             if(!Set.of("SUBMITTING","UNKNOWN").contains(text(row,"status"))) throw BillingProblem.conflict("This refund is no longer unresolved; refresh the case");
             if(row.get("providerId")!=null && !reference.equals(row.get("providerId")))
                 throw BillingProblem.conflict("This refund already has a different verified provider reference");
-            result=provider.lookupRefund(BillingRefundService.operationKey(refund),reference);
+            if(text(payment,"providerId")==null) throw BillingProblem.conflict("The original verified payment reference is required");
+            result=provider.verifyRefundReference(new RefundCommand(refund.toString(),intent.toString(),text(payment,"providerId"),
+                BillingRefundService.operationKey(refund),amount(row,"amountMinor"),text(payment,"currency")),reference);
         } else throw BillingProblem.conflict("This case is closed after review, not by attaching a provider reference");
-        if(!reference.equals(result.providerId()) || "UNKNOWN".equals(result.state()))
+        Set<String> accepted=PAYMENT_STUCK.contains(kind) ? Set.of("CAPTURED","FAILED","PROCESSING","REQUIRES_ACTION")
+            : Set.of("REFUNDED","FAILED","PROCESSING");
+        if(!reference.equals(result.providerId()) || !accepted.contains(result.state()))
             throw new BillingProblem(409,"PROVIDER_REFERENCE_NOT_VERIFIED","The provider did not confirm that this reference belongs to this operation; nothing was changed");
         ProviderResult verified=result;
         return db.tx(() -> {

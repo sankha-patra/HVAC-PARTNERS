@@ -360,6 +360,115 @@ class StripeBillingProviderTest {
         assertThat(RefundCommand.fromJson(refundCommand().toJson())).isEqualTo(refundCommand());
     }
 
+    @ParameterizedTest @ValueSource(strings = {"amount", "intent", "currency", "key", "reference", "method", "multipleMethods", "missingMethod"})
+    void manualPaymentReferenceRejectsMismatchedLocalEvidence(String mismatch) {
+        JSONObject value = session(PI, "paid", "complete");
+        switch (mismatch) {
+            case "amount" -> value.put("amount_total", 1);
+            case "intent" -> value.getJSONObject("metadata").put("intentId", REFUND);
+            case "currency" -> value.put("currency", "eur");
+            case "key" -> value.getJSONObject("metadata").put("idempotencyKey", "another-key");
+            case "reference" -> value.put("id", "cs_test_other");
+            case "method" -> value.put("payment_method_types", List.of("us_bank_account"));
+            case "multipleMethods" -> value.put("payment_method_types", List.of("card", "us_bank_account"));
+            case "missingMethod" -> value.remove("payment_method_types");
+        }
+        transport.reply(value);
+        assertThat(provider.verifyPaymentReference(command("CARD", 12345), SESSION).state()).isEqualTo("UNKNOWN");
+        assertThat(transport.requests).hasSize(1).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @Test void manualPaymentReferenceAcceptsOnlyTheExpectedCapturedPayment() {
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(paymentIntent("succeeded", 12345));
+        assertThat(provider.verifyPaymentReference(command("CARD", 12345), SESSION))
+                .satisfies(result -> {
+                    assertThat(result.state()).isEqualTo("CAPTURED");
+                    assertThat(result.providerId()).isEqualTo(SESSION);
+                });
+        assertThat(transport.requests).hasSize(2).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"method", "multipleMethods", "missingMethod"})
+    void manualPaymentReferenceAlsoChecksPaymentIntentMethod(String mismatch) {
+        JSONObject intent = paymentIntent("succeeded", 12345);
+        switch (mismatch) {
+            case "method" -> intent.put("payment_method_types", List.of("us_bank_account"));
+            case "multipleMethods" -> intent.put("payment_method_types", List.of("card", "us_bank_account"));
+            case "missingMethod" -> intent.remove("payment_method_types");
+        }
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(intent);
+        assertThat(provider.verifyPaymentReference(command("CARD", 12345), SESSION).state()).isEqualTo("UNKNOWN");
+        assertThat(transport.requests).hasSize(2).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @Test void manualAchReferenceAcceptsOnlyBankAccountEvidence() {
+        transport.reply(session(PI, "unpaid", "complete").put("payment_method_types", List.of("us_bank_account")));
+        transport.reply(paymentIntent("processing", 0).put("payment_method_types", List.of("us_bank_account")));
+        assertThat(provider.verifyPaymentReference(command("ACH", 12345), SESSION).state()).isEqualTo("PROCESSING");
+        assertThat(transport.requests).hasSize(2).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"amount", "intent", "refund", "currency", "key", "reference"})
+    void manualRefundReferenceRejectsMismatchedLocalEvidence(String mismatch) {
+        JSONObject value = refund("succeeded");
+        switch (mismatch) {
+            case "amount" -> value.put("amount", 1);
+            case "intent" -> value.getJSONObject("metadata").put("intentId", REFUND);
+            case "refund" -> value.getJSONObject("metadata").put("refundId", INTENT);
+            case "currency" -> value.put("currency", "eur");
+            case "key" -> value.getJSONObject("metadata").put("idempotencyKey", "another-key");
+            case "reference" -> value.put("id", "re_other");
+        }
+        transport.reply(value);
+        assertThat(provider.verifyRefundReference(refundCommand(), REF).state()).isEqualTo("UNKNOWN");
+        assertThat(transport.requests).hasSize(1).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"paymentIntent", "checkout", "intent", "currency", "amount", "livemode"})
+    void manualRefundReferenceMustBelongToTheOriginalLocalPayment(String mismatch) {
+        JSONObject original = session(PI, "paid", "complete");
+        switch (mismatch) {
+            case "paymentIntent" -> original.put("payment_intent", "pi_other");
+            case "checkout" -> original.put("id", "cs_test_other");
+            case "intent" -> original.getJSONObject("metadata").put("intentId", REFUND);
+            case "currency" -> original.put("currency", "eur");
+            case "amount" -> original.put("amount_total", 499);
+            case "livemode" -> original.put("livemode", true);
+        }
+        transport.reply(refund("succeeded"));
+        transport.reply(original);
+        assertThat(provider.verifyRefundReference(refundCommand(), REF).state()).isEqualTo("UNKNOWN");
+        assertThat(transport.requests).hasSize(2).allMatch(r -> r.method().equals("GET"));
+        assertThat(transport.requests.get(1).uri().getPath()).isEqualTo("/v1/checkout/sessions/" + SESSION);
+    }
+
+    @Test void manualRefundReferenceAcceptsTheExactOperationWithoutReposting() {
+        transport.reply(refund("succeeded"));
+        transport.reply(session(PI, "paid", "complete"));
+        assertThat(provider.verifyRefundReference(refundCommand(), REF))
+                .satisfies(result -> {
+                    assertThat(result.state()).isEqualTo("REFUNDED");
+                    assertThat(result.providerId()).isEqualTo(REF);
+                });
+        assertThat(transport.requests).hasSize(2).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @Test void manualRefundReferenceCannotUseEvidenceWithoutTheOriginalPaymentLookup() {
+        transport.reply(refund("succeeded"));
+        transport.responses.add(new StripeBillingProvider.Response(503, "{}"));
+        assertThatThrownBy(() -> provider.verifyRefundReference(refundCommand(), REF))
+                .isInstanceOf(ProviderUncertainException.class);
+        assertThat(transport.requests).hasSize(2).allMatch(r -> r.method().equals("GET"));
+    }
+
+    @Test void manualReferencesRejectInvalidIdsBeforeNetwork() {
+        assertThat(provider.verifyPaymentReference(command("CARD", 12345), "https://evil.example").state()).isEqualTo("UNKNOWN");
+        assertThat(provider.verifyRefundReference(refundCommand(), "../other").state()).isEqualTo("UNKNOWN");
+        assertThat(transport.requests).isEmpty();
+    }
+
     static ProviderCommand command(String method, long amount) {
         return new ProviderCommand(INTENT, KEY, amount, "USD", method, "http://localhost:4200/billing");
     }
@@ -367,12 +476,14 @@ class StripeBillingProviderTest {
     static JSONObject metadata(String key) { return new JSONObject().put("intentId", INTENT).put("idempotencyKey", key); }
     static JSONObject session(String pi, String paymentStatus, String status) {
         return new JSONObject().put("id", SESSION).put("object", "checkout.session").put("livemode", false)
+                .put("payment_method_types", List.of("card"))
                 .put("mode", "payment").put("metadata", metadata(KEY)).put("amount_total", 12345).put("currency", "usd")
                 .put("payment_intent", pi == null ? JSONObject.NULL : pi).put("payment_status", paymentStatus)
                 .put("status", status).put("url", "https://checkout.stripe.com/c/pay/example");
     }
     static JSONObject paymentIntent(String status, long received) {
         return new JSONObject().put("id", PI).put("object", "payment_intent").put("livemode", false)
+                .put("payment_method_types", List.of("card"))
                 .put("metadata", metadata(KEY)).put("amount", 12345).put("amount_received", received)
                 .put("currency", "usd").put("status", status);
     }

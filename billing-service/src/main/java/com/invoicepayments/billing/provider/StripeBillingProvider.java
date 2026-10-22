@@ -199,6 +199,52 @@ public final class StripeBillingProvider implements BillingProvider {
         }
     }
 
+    @Override public ProviderResult verifyPaymentReference(ProviderCommand expected, String providerId) {
+        ProviderValidation.payment(expected);
+        if (!validId(providerId, "cs_test_")) return unknown(providerId);
+        JSONObject session = request("GET", "/v1/checkout/sessions/" + providerId, null, null);
+        try {
+            validateSession(session, expected.idempotencyKey(), providerId);
+            if (!expected.intentId().equals(intentId(session))
+                    || expected.amountMinor() != amount(session, "amount_total")
+                    || !expected.currency().equalsIgnoreCase(session.getString("currency"))) return unknown(providerId);
+            // This also checks the PaymentIntent's identity, metadata, currency and received amount.
+            return sessionResult(session, expected.idempotencyKey(), expected.method());
+        } catch (ProviderUncertainException ex) {
+            throw ex;
+        } catch (RuntimeException ex) {
+            return unknown(providerId);
+        }
+    }
+
+    @Override public ProviderResult verifyRefundReference(RefundCommand expected, String providerId) {
+        ProviderValidation.refund(expected);
+        if (!validId(providerId, "re_") || !validId(expected.providerPaymentId(), "cs_test_")) return unknown(providerId);
+        JSONObject refund = request("GET", "/v1/refunds/" + providerId, null, null);
+        try {
+            validateRefund(refund, expected.idempotencyKey(), providerId);
+            if (!expected.intentId().equals(intentId(refund))
+                    || !expected.refundId().equals(refund.getJSONObject("metadata").getString("refundId"))
+                    || expected.amountMinor() != amount(refund, "amount")
+                    || !expected.currency().equalsIgnoreCase(refund.getString("currency"))) return unknown(providerId);
+            // The local payment stores a Checkout ID; Stripe refunds refer to its PaymentIntent.
+            // Resolve that link with GET instead of trusting metadata on the submitted refund alone.
+            JSONObject session = request("GET", "/v1/checkout/sessions/" + expected.providerPaymentId(), null, null);
+            validateSession(session, null, expected.providerPaymentId());
+            String paymentIntentId = session.getString("payment_intent");
+            if (!expected.intentId().equals(intentId(session))
+                    || !validId(paymentIntentId, "pi_")
+                    || !paymentIntentId.equals(refund.getString("payment_intent"))
+                    || expected.amountMinor() > amount(session, "amount_total")
+                    || !expected.currency().equalsIgnoreCase(session.getString("currency"))) return unknown(providerId);
+            return refundResult(refund);
+        } catch (ProviderUncertainException ex) {
+            throw ex;
+        } catch (RuntimeException ex) {
+            return unknown(providerId);
+        }
+    }
+
     @Override public ProviderResult lookupRefund(String idempotencyKey, String providerId) {
         ProviderValidation.key(idempotencyKey);
         // Stripe does not offer a GET lookup by idempotency key. Never blindly POST to discover it.
@@ -213,13 +259,19 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     private ProviderResult sessionResult(JSONObject session, String key) {
+        return sessionResult(session, key, null);
+    }
+
+    private ProviderResult sessionResult(JSONObject session, String key, String expectedMethod) {
         String id = session.getString("id");
+        if (expectedMethod != null) validatePaymentMethod(session, expectedMethod);
         String url = checkoutUrl(session.optString("url", null));
         if (session.isNull("payment_intent") || !session.has("payment_intent")) {
             return new ProviderResult(id, "expired".equals(session.optString("status")) ? "FAILED" : "REQUIRES_ACTION",
                     url, "Awaiting hosted Checkout");
         }
         JSONObject intent = fetchPaymentIntent(session, key);
+        if (expectedMethod != null) validatePaymentMethod(intent, expectedMethod);
         String state = switch (intent.getString("status")) {
             case "succeeded" -> amount(intent, "amount_received") == amount(session, "amount_total") ? "CAPTURED" : "UNKNOWN";
             case "processing", "requires_capture" -> "PROCESSING";
@@ -230,6 +282,14 @@ public final class StripeBillingProvider implements BillingProvider {
         };
         return new ProviderResult(id, state, "REQUIRES_ACTION".equals(state) ? url : null,
                 "Stripe test payment " + state.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private static void validatePaymentMethod(JSONObject object, String expectedMethod) {
+        // The pinned API changes the creation parameter to allowed_payment_method_types,
+        // but still returns payment_method_types. This app submits exactly one allowed type.
+        var methods = object.getJSONArray("payment_method_types");
+        String expected = "ACH".equals(expectedMethod) ? "us_bank_account" : "card";
+        if (methods.length() != 1 || !expected.equals(methods.getString(0))) throw new IllegalArgumentException();
     }
 
     private JSONObject fetchPaymentIntent(JSONObject session, String key) {

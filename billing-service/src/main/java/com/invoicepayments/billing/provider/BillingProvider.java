@@ -16,8 +16,16 @@ public interface BillingProvider {
         return lookup(command.idempotencyKey(), providerId);
     }
     ProviderResult lookup(String idempotencyKey, String providerId);
+    /** A staff-supplied reference is untrusted until all expected financial fields match. */
+    default ProviderResult verifyPaymentReference(ProviderCommand expected, String providerId) {
+        return new ProviderResult(providerId, "UNKNOWN", null, "Provider cannot verify this payment reference");
+    }
     ProviderResult refund(RefundCommand command);
     ProviderResult lookupRefund(String idempotencyKey, String providerId);
+    /** Must also verify that the refund belongs to the expected original provider payment. */
+    default ProviderResult verifyRefundReference(RefundCommand expected, String providerId) {
+        return new ProviderResult(providerId, "UNKNOWN", null, "Provider cannot verify this refund reference");
+    }
     /** Identifies the refund request format and provider configuration safe for a saved retry. */
     default String refundRequestVersion() { return null; }
     /** Providers opt in to bounded refund replay; the default remains a read-only lookup. */

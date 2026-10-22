@@ -73,7 +73,7 @@ public class BillingController {
         String user=user(auth); refunds.requireAnyStaff(user);
         return db.rows("""
             SELECT i.id,i.account_id,a.merchant_id,a.name AS account_name,i.provider,i.amount_minor,i.refunded_minor,i.currency,i.status,i.method,i.created_at,
-            i.amount_minor-COALESCE((SELECT SUM(r.amount_minor) FROM billing.refunds r WHERE r.intent_id=i.id AND r.status NOT IN ('FAILED','REJECTED')),0) AS available_refund_minor,
+            i.amount_minor-COALESCE((SELECT SUM(r.amount_minor) FROM billing.refunds r WHERE r.intent_id=i.id AND r.status NOT IN ('FAILED','REJECTED','RELEASED')),0) AS available_refund_minor,
             (i.method='CARD' AND i.status='CAPTURED' AND EXISTS(SELECT 1 FROM billing.staff p WHERE p.merchant_id=a.merchant_id AND p.user_id=? AND p.role='FINANCE')) AS can_request_refund
             FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id
             WHERE EXISTS(SELECT 1 FROM billing.staff s WHERE s.user_id=? AND s.merchant_id=a.merchant_id AND s.role IN ('FINANCE','REFUND_APPROVER'))

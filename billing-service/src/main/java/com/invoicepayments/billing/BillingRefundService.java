@@ -34,7 +34,7 @@ public class BillingRefundService {
             }
             if(!payments.hasCapture(intent) || !"CARD".equals(payment.get("method")) || !"CAPTURED".equals(payment.get("status")))
                 throw BillingProblem.conflict("This workflow supports refunds of captured card payments; ACH returns use their own workflow");
-            long committed=db.rows("SELECT COALESCE(SUM(amount_minor),0) AS total FROM billing.refunds WHERE intent_id=? AND status NOT IN ('FAILED','REJECTED')",intent)
+            long committed=db.rows("SELECT COALESCE(SUM(amount_minor),0) AS total FROM billing.refunds WHERE intent_id=? AND status NOT IN ('FAILED','REJECTED','RELEASED')",intent)
                 .stream().mapToLong(x->amount(x,"total")).sum();
             if(minor>amount(payment,"amountMinor")-committed) throw BillingProblem.conflict("Refund exceeds the amount remaining after existing requests");
             UUID id=UUID.randomUUID();
@@ -83,10 +83,12 @@ public class BillingRefundService {
         record(refund,token,result);
     }
     static String operationKey(UUID refund) { return "refund_"+refund; }
+    static final Set<String> RECORDABLE=Set.of("REFUNDED","FAILED","PROCESSING","UNKNOWN","REQUIRES_ACTION");
     /**
      * Approved case release: two employees confirmed the provider never created this refund.
      * Fences out in-flight recovery and frees the refund capacity. If the provider later
      * reports the refund, record() still posts it, or raises a case if capacity was reused.
+     * RELEASED, not FAILED: a staff release is not provider evidence that the refund failed.
      */
     void releaseUnconfirmed(UUID refund,String message) {
         UUID intent=id(raw(refund).get("intentId"));
@@ -94,7 +96,7 @@ public class BillingRefundService {
             payments.locked(intent);
             var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
             if(!Set.of("SUBMITTING","UNKNOWN").contains(text(row,"status"))) throw BillingProblem.conflict("This refund is no longer unresolved; refresh the case");
-            db.update("UPDATE billing.refunds SET status='FAILED',lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",refund);
+            db.update("UPDATE billing.refunds SET status='RELEASED',lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",refund);
             db.event(intent,"REFUND_RELEASED",message);
             return null;
         });
@@ -105,11 +107,21 @@ public class BillingRefundService {
             var payment=payments.locked(intent); var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
             if(fence!=null && !fence.toString().equals(text(row,"leaseToken"))) return null;
             if(result.providerId()!=null && row.get("providerId")!=null && !result.providerId().equals(row.get("providerId"))) throw BillingProblem.conflict("Refund identity mismatch");
+            // REVIEW (contradictory signed evidence) and unrecognised states never change status, money or capacity.
+            // Checked before the terminal shortcuts so nothing is silently consumed; the caller's rollback retains the evidence.
+            if(result.state()==null || !RECORDABLE.contains(result.state())) throw BillingProblem.conflict("Refund evidence requires finance review");
             if("REFUNDED".equals(row.get("status"))) {
                 if("FAILED".equals(result.state())) db.caseFor(intent,refund,"REFUND_LATER_FAILED",refund.toString());
                 return null;
             }
-            if("FAILED".equals(row.get("status")) && Set.of("PROCESSING","UNKNOWN","REQUIRES_ACTION").contains(result.state())) return null;
+            // A provider failure is final, and provider events can arrive out of order: older pending or
+            // success evidence never reopens it. A staff release is not provider evidence, so a late success still posts.
+            String status=text(row,"status");
+            if(Set.of("FAILED","RELEASED").contains(status) && Set.of("PROCESSING","UNKNOWN","REQUIRES_ACTION").contains(result.state())) return null;
+            if("FAILED".equals(status) && "REFUNDED".equals(result.state())) {
+                db.event(intent,"REFUND_EVIDENCE_IGNORED","Older success evidence arrived after the provider confirmed this refund failed; no money was posted");
+                return null;
+            }
             if(row.get("approvedBy")==null) throw BillingProblem.conflict("Provider evidence has no independently approved refund");
             if("REFUNDED".equals(result.state())) {
                 if(!payments.hasCapture(intent) || row.get("approvedBy")==null) throw BillingProblem.conflict("Refund evidence has no approved capture");
@@ -132,7 +144,7 @@ public class BillingRefundService {
                 db.event(intent,"REFUNDED","Confirmed refund posted; allocated refunds reopen invoice debt and unapplied-cash refunds reverse that liability");
                 db.publish(payment,"PAYMENT_REFUNDED",refund,minor);
             }
-            String state=switch(result.state()) {case "REFUNDED","FAILED","PROCESSING","UNKNOWN"->result.state(); default->"UNKNOWN";};
+            String state="REQUIRES_ACTION".equals(result.state()) ? "UNKNOWN" : result.state();
             db.update("UPDATE billing.refunds SET status=?,provider_id=COALESCE(provider_id,?),lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",state,result.providerId(),refund);
             // Provider evidence that ends the uncertainty also closes the stuck-refund cases it explains.
             if(!"UNKNOWN".equals(state))

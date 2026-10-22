@@ -1,5 +1,90 @@
 # Verification of the extracted repository
 
+## Out-of-order refund events — 22 October 2026
+
+Code review found that a provider "refund failed" event processed before an older
+"refund succeeded" event turned the refund from FAILED to REFUNDED and posted money
+that never left. Stripe does not guarantee event order. The cause: FAILED meant both
+"the provider said it failed" and "two employees released it".
+
+- New test `olderRefundSuccessArrivingAfterProviderFailureCannotPostMoney` failed first
+  (`expected: "FAILED" but was: "REFUNDED"`), then passed after the fix.
+- A staff release is now stored as RELEASED (`V14__separate_released_refunds.sql`,
+  which also converts earlier releases). A provider FAILED is final: older success
+  evidence posts nothing and writes a `REFUND_EVIDENCE_IGNORED` timeline entry.
+- New test `releasedRefundIsNotAProviderFailureAndStillRecordsLateSuccess` shows a
+  released refund still records a late provider success, as before.
+
+The full Java suite passed **326 tests, with zero failures, errors or skips**
+(324 before, plus the two new tests; 124 financial database tests). Run in the
+Docker test containers (Java 17, PostgreSQL 17) with the same steps as
+`scripts/verify-container-tests.ps1`, executed from Bash because Windows PowerShell 5.1
+stopped that script on Docker's progress output. Simulator only; no live Stripe call.
+
+## Payment timeline index — 22 October 2026
+
+The full Java suite passed **324 tests, with zero failures, errors or skips**,
+including a new real-HTTP test for latest-100 timeline ordering, account isolation,
+anonymous rejection and unchanged financial snapshots. The additive V13 index and
+test were included; all 104 build/source input hashes matched before and after.
+
+A separate authenticated HTTP experiment compared the original V12 schema with
+only the timeline index added. Across six paired rounds at 100,000 events and
+eight clients, aggregate payment-detail read rate was **111.35 → 404.73 requests/s**
+and pooled p95 was **124.76 → 63.75 ms**. Every raw sample was retained and independently
+recomputed. Across the main and smaller sensitivity datasets, 50,676 measured
+responses had zero errors or response-hash mismatches. The smaller dataset showed
+no established throughput benefit and a worse observed p95; see the full report.
+
+These are warm-cache local endpoint measurements on a shared host, with the load
+generator sharing the app's CPU quota. They are not captured-payment TPS or a
+production capacity measurement. Claude reviewed the protocol, implemented the
+separate creation harness, and critically reviewed the completed read evidence.
+
+See [the benchmark report](payment-timeline-benchmark-2026-10-22.md) and
+[brief interview notes](payment-timeline-interview-notes-2026-10-22.md).
+The report retains failed/interrupted attempts and their exclusion reasons.
+The guarded creation experiment also passed: 6,144 measured creates and 6,656
+responses including warmups, with zero invalid responses and verified financial
+invariants. Its performance varied across paired rounds, so the read result is
+the recommended resume claim. The insert probe records added WAL/storage cost.
+The [verification manifest](payment-timeline-verification-2026-10-22.json) checks
+both experiments, input hashes, raw-sample audits and restored execution state.
+
+## Manual reference validation and refund review — 21 October 2026
+
+The complete Java suite passed **323 tests, with zero failures, errors or skips**, across
+17 classes. This adds 55 cases to the preceding 268-test suite: 22 manual-reference
+database cases, 28 Stripe adapter cases and five refund review cases. The final run
+includes 122 financial database tests and 76 Stripe adapter tests.
+
+- Matching keys cannot conceal a wrong amount, currency, intent, payment method, refund
+  ID or original payment. Rejected evidence leaves the local records and case unchanged.
+- Verified references settle once. Provider calls have no active transaction; caller
+  transactions are rejected. The existing one-connection test confirms committed
+  preparation and zero borrowed connections during the payment provider call.
+- Refund REVIEW preserves FAILED, REFUNDED, PROCESSING and UNKNOWN states, money and
+  capacity. The inbox retains the evidence and opens one review case on repeated delivery.
+- All seven synthetic network/load scenarios passed, including ERP backlog drainage.
+
+An earlier 316-test run had one failure: the overload scenario observed one unsuccessful
+admitted workflow. Its cause was not established. The final full run passed with the
+same load test, assertions and limits; seven payment-method tests were added between runs.
+
+The final run compiled the current read-only sources into empty build directories in
+Docker, using Java 17.0.20.1, PostgreSQL 17.11 and embedded Kafka. All 102 input hashes
+matched before and after the run. The repository boundary check and nine preserved
+migration hashes passed. Temporary test containers and their network were removed.
+
+See the [verification manifest](payment-reference-review-verification-2026-10-21.json)
+and [repair details](payment-lifecycle-completion.md#recovery-validation-and-refund-review-repair).
+Raw reports and the exact runner are in `output/collaboration/2026-10-21/`.
+The standard reproduction command is `./scripts/verify-container-tests.ps1`.
+
+These results use simulated provider, bank and ERP responses. No live Stripe payment,
+frontend acceptance check or production throughput measurement was performed for this repair.
+Unmatched review events retain the existing 30-second retry schedule.
+
 ## Refund recovery, case resolution and expiry — 21 October 2026
 
 The complete Java suite passed **268 tests, with zero failures, errors or skips**

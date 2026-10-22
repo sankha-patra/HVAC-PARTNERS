@@ -1,0 +1,515 @@
+{
+  "schemaVersion": 1,
+  "verifiedAtUtc": "2026-10-22T04:58:51.606507+00:00",
+  "change": "Add V13 billing.timeline(intent_id,id DESC) index; same Java application in both conditions",
+  "migrationSha256": "d4f1b8e689f4ee5e1472a289fdd87b51aa9c5b9a99828a202204f417c87cde69",
+  "regressionTestSha256": "e7499e3c6619cd6169c08d85c0c81ff3acf2a2f02cba159ba4294c092ae84bb6",
+  "javaSuite": {
+    "summary": {
+      "tests": 324,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "evidence": "output/collaboration/2026-10-21/final-source-tests-20261021T203854792Z",
+    "verifiedInputFiles": 104
+  },
+  "commonApplicationBuildFilesIdenticalAcrossSuiteAndExperiments": 102,
+  "runtime": {
+    "imageId": "sha256:9208b8264c34bed82328bb9a400ddcf58e5376f025cee3d29f594643508b0c59",
+    "postgresId": "sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
+    "appCpuQuota": 2,
+    "postgresCpuQuota": 2,
+    "appLimitMiB": 1792,
+    "postgresLimitMiB": 768,
+    "jvmHeapMiB": 768,
+    "closedLoopClients": 8,
+    "sharedHost": true,
+    "loadGeneratorSharesAppJvm": true,
+    "warmCache": true
+  },
+  "read": {
+    "evidence": "output/benchmarks/payment-read-20261022/run-20261021T205205146Z",
+    "rawCsvSha256": "87852ed2ca77aa51c0b51ace53a8ea2c31b39c08ed35dea0f3ab0a9189789353",
+    "allDatasetsMeasuredRequests": 50676,
+    "errors": 0,
+    "primary": {
+      "A": {
+        "requests": 6729,
+        "errors": 0,
+        "p50Millis": 79.727807,
+        "p95Millis": 124.758335,
+        "p99Millis": 184.323397,
+        "maxMillis": 296.752546,
+        "totalMeasuredWindowNanos": 60000000000,
+        "successfulRequestsPerSecond": 111.35,
+        "successfulRequestsPerSecondIncludingDrain": 111.7585906502654
+      },
+      "B": {
+        "requests": 24332,
+        "errors": 0,
+        "p50Millis": 10.71653,
+        "p95Millis": 63.754176,
+        "p99Millis": 76.513828,
+        "maxMillis": 164.955795,
+        "totalMeasuredWindowNanos": 60000000000,
+        "successfulRequestsPerSecond": 404.73333333333335,
+        "successfulRequestsPerSecondIncludingDrain": 404.2265693791526
+      }
+    },
+    "pairedComparison": {
+      "paired_rounds": 6,
+      "baseline_p95_median_ms": 122.41457199999999,
+      "indexed_p95_median_ms": 58.728832499999996,
+      "baseline_rps_median": 110.3,
+      "indexed_rps_median": 450.4,
+      "paired_p95_reduction_percent": [
+        41.66307964822781,
+        38.541525876834534,
+        62.893097340037855,
+        50.85408337510779,
+        47.44396800716776,
+        61.5673256250981
+      ],
+      "median_paired_p95_reduction_percent": 49.14902569113778,
+      "median_paired_p95_reduction_bootstrap_95_interval": [
+        40.10230276253117,
+        62.23021148256798
+      ],
+      "paired_rps_ratios": [
+        2.7719298245614037,
+        2.4639358860195903,
+        4.327552986512524,
+        4.021371326803206,
+        3.7620578778135045,
+        4.511214953271028
+      ],
+      "median_paired_rps_ratio": 3.8917146023083555,
+      "median_paired_rps_ratio_bootstrap_95_interval": [
+        2.617932855290497,
+        4.419383969891776
+      ]
+    },
+    "aggregateRateRatio": 3.6347852117946418,
+    "pooledP95ReductionPercent": 48.89786241536488,
+    "smallerDataset": {
+      "A": {
+        "requests": 9734,
+        "errors": 0,
+        "p50Millis": 11.199094,
+        "p95Millis": 47.643448,
+        "p99Millis": 59.191945,
+        "maxMillis": 146.922631,
+        "totalMeasuredWindowNanos": 20000000000,
+        "successfulRequestsPerSecond": 485.9,
+        "successfulRequestsPerSecondIncludingDrain": 486.178731634426
+      },
+      "B": {
+        "requests": 9881,
+        "errors": 0,
+        "p50Millis": 9.690923,
+        "p95Millis": 54.708313,
+        "p99Millis": 64.298645,
+        "maxMillis": 158.244029,
+        "totalMeasuredWindowNanos": 20000000000,
+        "successfulRequestsPerSecond": 493.25,
+        "successfulRequestsPerSecondIncludingDrain": 492.43932171062954
+      }
+    }
+  },
+  "create": {
+    "evidence": "output/benchmarks/payment-read-20261022/run-20261022T044330106Z",
+    "measuredRequests": 6144,
+    "totalRetainedRequestsIncludingWarmups": 6656,
+    "invalidResponses": 0,
+    "aggregate": {
+      "A": {
+        "p50Millis": 179.650854,
+        "p95Millis": 460.525811,
+        "p99Millis": 657.006937,
+        "maxMillis": 1312.314829,
+        "samples": 3072,
+        "invalid": 0,
+        "totalMeasuredWallNanos": 84291477846,
+        "createdPaymentIntentRequestsPerSecond": 36.444965475780656,
+        "perRoundP95Millis": {
+          "count": 6,
+          "median": 414.18287599999996,
+          "minimum": 218.973705,
+          "maximum": 584.633016
+        },
+        "perRoundCreatedIntentRequestsPerSecond": {
+          "count": 6,
+          "median": 40.2313948408912,
+          "minimum": 24.780039050486998,
+          "maximum": 62.37091000934909
+        },
+        "perRoundWalBytesPerRequest": {
+          "count": 6,
+          "median": 2370.234375,
+          "minimum": 2342.265625,
+          "maximum": 2433.625
+        },
+        "totalWalBytes": 7317288
+      },
+      "B": {
+        "p50Millis": 135.305321,
+        "p95Millis": 392.281899,
+        "p99Millis": 580.502607,
+        "maxMillis": 1041.921247,
+        "samples": 3072,
+        "invalid": 0,
+        "totalMeasuredWallNanos": 67804825153,
+        "createdPaymentIntentRequestsPerSecond": 45.306510164551035,
+        "perRoundP95Millis": {
+          "count": 6,
+          "median": 268.7107915,
+          "minimum": 190.148171,
+          "maximum": 519.562275
+        },
+        "perRoundCreatedIntentRequestsPerSecond": {
+          "count": 6,
+          "median": 52.63909184783864,
+          "minimum": 28.508957424385663,
+          "maximum": 75.44735554219757
+        },
+        "perRoundWalBytesPerRequest": {
+          "count": 6,
+          "median": 6793.453125,
+          "minimum": 6650.578125,
+          "maximum": 6898.8125
+        },
+        "totalWalBytes": 20811256
+      }
+    },
+    "pairedComparison": {
+      "paired_rounds": 6,
+      "paired_p95_reduction_percent": [
+        11.130185812153993,
+        42.032368237032145,
+        -19.65932006133231,
+        43.745534589775325,
+        46.69730343955925,
+        -14.942275831703178
+      ],
+      "median_paired_p95_reduction_percent": 26.58127702459307,
+      "median_paired_p95_reduction_percent_bootstrap_95_interval": [
+        -17.300797946517743,
+        45.22141901466729
+      ],
+      "paired_rate_ratios": [
+        1.1504807303290097,
+        1.647995799776492,
+        0.8878935745795186,
+        1.3365709183831445,
+        1.7411052474472626,
+        1.053163301582737
+      ],
+      "median_paired_rate_ratio": 1.2435258243560772,
+      "median_paired_rate_ratio_bootstrap_95_interval": [
+        0.9705284380811279,
+        1.6945505236118774
+      ]
+    },
+    "serverCreationTimesWithinRequestClockBrackets": true,
+    "largestAbsolutePhaseClockDifferenceMillis": 16.550130999999965,
+    "writeProbe": {
+      "slots": [
+        {
+          "p50Millis": 1.795182,
+          "p95Millis": 2.728249,
+          "p99Millis": 3.448071,
+          "maxMillis": 7.270509,
+          "design": "A",
+          "pair": 0,
+          "appends": 512,
+          "wallNanos": 968531678,
+          "appendsPerSecond": 528.6352647311139,
+          "walBytes": 2176232,
+          "walBytesPerAppend": 4250.453125,
+          "clock": {
+            "wallEndEpochMillis": 1792644706431,
+            "wallStartEpochMillis": 1792644705462,
+            "wallElapsedMillis": 969,
+            "wallMinusMonotonicMillis": 0.4683219999999437,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 968531678,
+            "monotonicMillis": 968.531678
+          }
+        },
+        {
+          "p50Millis": 2.310885,
+          "p95Millis": 6.319954,
+          "p99Millis": 11.050914,
+          "maxMillis": 12.111756,
+          "design": "B",
+          "pair": 0,
+          "appends": 512,
+          "wallNanos": 1386106264,
+          "appendsPerSecond": 369.3800492052318,
+          "walBytes": 4537904,
+          "walBytesPerAppend": 8863.09375,
+          "clock": {
+            "wallEndEpochMillis": 1792644708389,
+            "wallStartEpochMillis": 1792644707003,
+            "wallElapsedMillis": 1386,
+            "wallMinusMonotonicMillis": -0.10626400000001013,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 1386106264,
+            "monotonicMillis": 1386.106264
+          }
+        },
+        {
+          "p50Millis": 1.582266,
+          "p95Millis": 2.754293,
+          "p99Millis": 4.312511,
+          "maxMillis": 5.933532,
+          "design": "B",
+          "pair": 1,
+          "appends": 512,
+          "wallNanos": 879735222,
+          "appendsPerSecond": 581.9932943414649,
+          "walBytes": 4660208,
+          "walBytesPerAppend": 9101.96875,
+          "clock": {
+            "wallEndEpochMillis": 1792644710394,
+            "wallStartEpochMillis": 1792644709514,
+            "wallElapsedMillis": 880,
+            "wallMinusMonotonicMillis": 0.2647779999999784,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 879735222,
+            "monotonicMillis": 879.735222
+          }
+        },
+        {
+          "p50Millis": 1.97077,
+          "p95Millis": 3.920861,
+          "p99Millis": 7.803976,
+          "maxMillis": 14.880453,
+          "design": "A",
+          "pair": 1,
+          "appends": 512,
+          "wallNanos": 1148305466,
+          "appendsPerSecond": 445.87439070850854,
+          "walBytes": 2182848,
+          "walBytesPerAppend": 4263.375,
+          "clock": {
+            "wallEndEpochMillis": 1792644712030,
+            "wallStartEpochMillis": 1792644710881,
+            "wallElapsedMillis": 1149,
+            "wallMinusMonotonicMillis": 0.694533999999976,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 1148305466,
+            "monotonicMillis": 1148.305466
+          }
+        },
+        {
+          "p50Millis": 1.502324,
+          "p95Millis": 2.886379,
+          "p99Millis": 3.963331,
+          "maxMillis": 7.456236,
+          "design": "A",
+          "pair": 2,
+          "appends": 512,
+          "wallNanos": 836721415,
+          "appendsPerSecond": 611.9121499955872,
+          "walBytes": 2176424,
+          "walBytesPerAppend": 4250.828125,
+          "clock": {
+            "wallEndEpochMillis": 1792644713383,
+            "wallStartEpochMillis": 1792644712547,
+            "wallElapsedMillis": 836,
+            "wallMinusMonotonicMillis": -0.721414999999979,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 836721415,
+            "monotonicMillis": 836.721415
+          }
+        },
+        {
+          "p50Millis": 1.637217,
+          "p95Millis": 2.494466,
+          "p99Millis": 3.113955,
+          "maxMillis": 8.960072,
+          "design": "B",
+          "pair": 2,
+          "appends": 512,
+          "wallNanos": 878564134,
+          "appendsPerSecond": 582.7690662364325,
+          "walBytes": 4674728,
+          "walBytesPerAppend": 9130.328125,
+          "clock": {
+            "wallEndEpochMillis": 1792644714789,
+            "wallStartEpochMillis": 1792644713911,
+            "wallElapsedMillis": 878,
+            "wallMinusMonotonicMillis": -0.5641339999999673,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 878564134,
+            "monotonicMillis": 878.564134
+          }
+        },
+        {
+          "p50Millis": 1.522427,
+          "p95Millis": 2.595719,
+          "p99Millis": 3.198872,
+          "maxMillis": 5.088812,
+          "design": "B",
+          "pair": 3,
+          "appends": 512,
+          "wallNanos": 826217377,
+          "appendsPerSecond": 619.6916383664974,
+          "walBytes": 4602248,
+          "walBytesPerAppend": 8988.765625,
+          "clock": {
+            "wallEndEpochMillis": 1792644716029,
+            "wallStartEpochMillis": 1792644715203,
+            "wallElapsedMillis": 826,
+            "wallMinusMonotonicMillis": -0.2173770000000559,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 826217377,
+            "monotonicMillis": 826.217377
+          }
+        },
+        {
+          "p50Millis": 1.404726,
+          "p95Millis": 2.451572,
+          "p99Millis": 3.110487,
+          "maxMillis": 4.136321,
+          "design": "A",
+          "pair": 3,
+          "appends": 512,
+          "wallNanos": 778226872,
+          "appendsPerSecond": 657.9058349452625,
+          "walBytes": 2129144,
+          "walBytesPerAppend": 4158.484375,
+          "clock": {
+            "wallEndEpochMillis": 1792644717221,
+            "wallStartEpochMillis": 1792644716443,
+            "wallElapsedMillis": 778,
+            "wallMinusMonotonicMillis": -0.22687199999995755,
+            "consistent": true,
+            "toleranceMillis": 2000,
+            "monotonicNanos": 778226872,
+            "monotonicMillis": 778.226872
+          }
+        }
+      ],
+      "perArm": {
+        "A": {
+          "p95Millis": {
+            "count": 4,
+            "median": 2.807314,
+            "minimum": 2.451572,
+            "maximum": 3.920861
+          },
+          "appendsPerSecond": {
+            "count": 4,
+            "median": 570.2737073633506,
+            "minimum": 445.87439070850854,
+            "maximum": 657.9058349452625
+          },
+          "walBytesPerAppend": {
+            "count": 4,
+            "median": 4250.640625,
+            "minimum": 4158.484375,
+            "maximum": 4263.375
+          },
+          "pooledLatencyMillis": {
+            "p50Millis": 1.656737,
+            "p95Millis": 3.049647,
+            "p99Millis": 4.761078,
+            "maxMillis": 14.880453
+          }
+        },
+        "B": {
+          "p95Millis": {
+            "count": 4,
+            "median": 2.6750059999999998,
+            "minimum": 2.494466,
+            "maximum": 6.319954
+          },
+          "appendsPerSecond": {
+            "count": 4,
+            "median": 582.3811802889487,
+            "minimum": 369.3800492052318,
+            "maximum": 619.6916383664974
+          },
+          "walBytesPerAppend": {
+            "count": 4,
+            "median": 9045.3671875,
+            "minimum": 8863.09375,
+            "maximum": 9130.328125
+          },
+          "pooledLatencyMillis": {
+            "p50Millis": 1.704396,
+            "p95Millis": 3.277885,
+            "p99Millis": 6.558705,
+            "maxMillis": 12.111756
+          }
+        }
+      },
+      "pairedComparison": {
+        "paired_rounds": 4,
+        "paired_p95_reduction_percent": [
+          -131.64872414504688,
+          29.752852753515104,
+          13.578015915442831,
+          -5.879778362617927
+        ],
+        "median_paired_p95_reduction_percent": 3.8491187764124524,
+        "median_paired_p95_reduction_percent_bootstrap_95_interval": [
+          -131.64872414504688,
+          29.752852753515104
+        ],
+        "paired_rate_ratios": [
+          0.6987427321805971,
+          1.3052853145852559,
+          0.9523737455460479,
+          0.9419154010361611
+        ],
+        "median_paired_rate_ratio": 0.9471445732911046,
+        "median_paired_rate_ratio_bootstrap_95_interval": [
+          0.6987427321805971,
+          1.3052853145852559
+        ]
+      }
+    },
+    "priorExecutionStateRestored": true
+  },
+  "excludedAttempts": [
+    {
+      "run": "run-20261021T204855689Z",
+      "reason": "Offline Maven cache lacked Surefire provider; no endpoint measurement started"
+    },
+    {
+      "run": "run-20261021T210029904Z",
+      "reason": "Seven-hour clock gap; expired test tokens and transport errors"
+    },
+    {
+      "run": "run-20261022T040835173Z",
+      "reason": "95.61-second server timestamp gap versus about 15.45-second phase monotonic time; eight transport errors"
+    }
+  ],
+  "claimScope": "Local fixed-concurrency endpoint comparisons. Read requests and CREATED intent reservations are distinct from captures and production capacity.",
+  "limits": [
+    "One JVM per experiment, shared host, unexplained early-round drift",
+    "Read sensitivity showed no established rate benefit and worse p95 at 10000 events",
+    "Write probe uses single-event transactions after forced checkpoints; its WAL costs are workload-dependent",
+    "No transaction-hold percentile, CPU attribution, maximum capacity or production deployment is established"
+  ],
+  "collaboration": [
+    "Claude reviewed design, implemented creation harness and clock diagnostics, and critically reviewed read evidence",
+    "Codex implemented migration/read harness, ran tests, audited raw samples and challenged unsupported CPU/tail-bias inferences"
+  ],
+  "finalClaudeReview": {
+    "file": "output/collaboration/2026-10-22/42-claude-final-evidence-review.md",
+    "sha256": "acba387713a2e79bef0d5de05da527d1a1e4fe3e1cadb033347daae1eae3692f",
+    "verdict": "No blocking factual errors; use scoped local read result, not an independent creation-performance headline"
+  }
+}

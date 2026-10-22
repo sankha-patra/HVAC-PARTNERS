@@ -591,13 +591,17 @@ class BillingFinancialDatabaseTest {
         assertThat(count("billing.journals")).isEqualTo(3);
     }
 
-    @ParameterizedTest @ValueSource(strings = {"PROCESSING", "UNKNOWN", "REQUIRES_ACTION"})
-    void failedRefundCannotRegressAndReserveReplacementAmountAgain(String stale) {
+    // Stale pending evidence is ignored; REVIEW evidence is rejected so the caller retains it for finance.
+    @ParameterizedTest @org.junit.jupiter.params.provider.CsvSource({
+        "PROCESSING,false", "UNKNOWN,false", "REQUIRES_ACTION,false", "REVIEW,true"
+    })
+    void failedRefundCannotRegressAndReserveReplacementAmountAgain(String stale, boolean rejected) {
         UUID intent = captured("CARD"); UUID first = requestedRefund(intent, 7000);
         db.update("UPDATE billing.refunds SET status='APPROVED',approved_by=? WHERE id=?", APPROVER, first);
         refunds.record(first, null, new ProviderResult("refund-attempt", "FAILED", null, "Definitive failure"));
         UUID replacement = requestedRefund(intent, 7000);
-        refunds.record(first, null, new ProviderResult("refund-attempt", stale, null, "Stale event"));
+        Runnable late = () -> refunds.record(first, null, new ProviderResult("refund-attempt", stale, null, "Stale event"));
+        if (rejected) assertProblem(409, late); else late.run();
         assertThat(refunds.raw(first).get("status")).isEqualTo("FAILED");
         assertThat(refunds.raw(replacement).get("status")).isEqualTo("REQUESTED");
         assertThat(amount(db.one("SELECT SUM(amount_minor) AS value FROM billing.refunds WHERE status NOT IN ('FAILED','REJECTED')"), "value")).isEqualTo(7000);
@@ -613,6 +617,22 @@ class BillingFinancialDatabaseTest {
         assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='REFUND_LATER_FAILED' AND intent_id=?", intent)).isTrue();
     }
 
+    @Test void olderRefundSuccessArrivingAfterProviderFailureCannotPostMoney() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        db.update("UPDATE billing.refunds SET status='PROCESSING',approved_by=?,provider_id='re_out_of_order' WHERE id=?", APPROVER, refund);
+        // The provider does not deliver events in order: the newer failure is processed before the older success.
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_newer_failure", "re_out_of_order", intent.toString(), "FAILED", 500, "USD", refund.toString()));
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_older_success", "re_out_of_order", intent.toString(), "REFUNDED", 500, "USD", refund.toString()));
+        inbox.process("SIMULATOR", "evt_newer_failure");
+        inbox.process("SIMULATOR", "evt_older_success");
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("FAILED");
+        assertThat(amount(payments.raw(intent), "refundedMinor")).isZero();
+        assertThat(count("billing.journals")).isEqualTo(1); assertInvoice(INVOICE, 10000, 0);
+        assertThat(count("billing.outbox WHERE type='PAYMENT_REFUNDED'")).isZero();
+        assertThat(db.one("SELECT state FROM billing.webhook_inbox WHERE event_id='evt_older_success'").get("state")).isEqualTo("PROCESSED");
+        assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='REFUND_EVIDENCE_IGNORED'", intent)).isTrue();
+    }
+
     @Test void refundEvidenceWithoutIndependentApprovalCannotMoveMoney() {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
         inbox.receive("SIMULATOR", new ProviderWebhookEvent("unapproved", "unknown-refund", intent.toString(), "REFUNDED", 500, "USD", refund.toString()));
@@ -620,6 +640,41 @@ class BillingFinancialDatabaseTest {
         assertThat(refunds.raw(refund).get("status")).isEqualTo("REQUESTED");
         assertThat(count("billing.journals")).isEqualTo(1); assertInvoice(INVOICE, 10000, 0);
         assertThat(db.one("SELECT state FROM billing.webhook_inbox WHERE event_id='unapproved'").get("state")).isEqualTo("UNMATCHED");
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"FAILED", "REFUNDED", "PROCESSING", "UNKNOWN"})
+    void signedReviewRefundEvidenceIsRetainedWithoutChangingStatusMoneyOrCapacity(String current) {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        if ("REFUNDED".equals(current)) refunds.approve(APPROVER, refund);
+        else {
+            db.update("UPDATE billing.refunds SET status='APPROVED',approved_by=? WHERE id=?", APPROVER, refund);
+            refunds.record(refund, null, new ProviderResult("sim_refund_review", current, null, "Earlier provider evidence"));
+        }
+        assertThat(refunds.raw(refund).get("status")).isEqualTo(current);
+        String capacity = "SELECT COALESCE(SUM(amount_minor),0) AS value FROM billing.refunds WHERE intent_id=? AND status NOT IN ('FAILED','REJECTED')";
+        var refundBefore = refunds.raw(refund); var paymentBefore = payments.raw(intent);
+        var invoiceBefore = db.one("SELECT * FROM billing.invoices WHERE id=?", INVOICE);
+        long committed = amount(db.one(capacity, intent), "value");
+        long journals = count("billing.journals"), outbox = count("billing.outbox"), cases = count("billing.cases");
+
+        // Contradictory signed evidence for this exact refund, normalized to REVIEW by the verifier.
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("refund-review", text(refundBefore, "providerId"), intent.toString(), "REVIEW", 500, "USD", refund.toString()));
+        inbox.process("SIMULATOR", "refund-review");
+        inbox.process("SIMULATOR", "refund-review");
+
+        assertThat(refunds.raw(refund)).isEqualTo(refundBefore);
+        assertThat(payments.raw(intent)).isEqualTo(paymentBefore);
+        assertThat(db.one("SELECT * FROM billing.invoices WHERE id=?", INVOICE)).isEqualTo(invoiceBefore);
+        assertThat(amount(db.one(capacity, intent), "value")).isEqualTo(committed);
+        assertThat(count("billing.journals")).isEqualTo(journals); assertThat(count("billing.outbox")).isEqualTo(outbox);
+        var retained = db.one("SELECT state,attempts,payload::text AS payload FROM billing.webhook_inbox WHERE provider='SIMULATOR' AND event_id='refund-review'");
+        assertThat(retained.get("state")).isEqualTo("UNMATCHED"); assertThat(amount(retained, "attempts")).isEqualTo(2);
+        assertThat(new JSONObject(text(retained, "payload")).getString("state")).isEqualTo("REVIEW");
+        assertThat(count("billing.cases")).isEqualTo(cases + 1);
+        assertThat(db.rows("SELECT id FROM billing.cases WHERE reason='WEBHOOK_REQUIRES_REVIEW' AND reference='SIMULATOR:refund-review' AND intent_id=?", intent)).hasSize(1);
+        // Released capacity stays released and reserved capacity stays reserved.
+        requestedRefund(intent, 10000 - committed);
+        assertProblem(409, () -> requestedRefund(intent, 1));
     }
 
     @Test void fabricatedOrAlteredErpMessagesCannotClaimAnAcknowledgement() {
@@ -1376,11 +1431,30 @@ class BillingFinancialDatabaseTest {
         assertProblem(409, () -> requestedRefund(intent, 6000));
         cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request");
         cases.approveRelease(APPROVER, caseId);
-        assertThat(refunds.raw(refund).get("status")).isEqualTo("FAILED");
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("RELEASED");
         UUID replacement = requestedRefund(intent, 6000);
         assertThat(refunds.raw(replacement).get("status")).isEqualTo("REQUESTED");
         assertThat(count("billing.journals")).isEqualTo(1); assertInvoice(INVOICE, 10000, 0);
         assertThat(db.one("SELECT resolution FROM billing.cases WHERE id=?", caseId)).containsEntry("resolution", "RELEASED_NO_PROVIDER_OPERATION");
+    }
+
+    @Test void releasedRefundIsNotAProviderFailureAndStillRecordsLateSuccess() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 6000);
+        BillingProvider unsafe = refundNeverSent(true);
+        var service = service(unsafe, MERCHANT); var refundService = new BillingRefundService(db, service, unsafe);
+        refundService.approve(APPROVER, refund);
+        var worker = new BillingRecovery(db, service, refundService, unsafe);
+        dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
+        UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
+        var cases = new BillingCaseService(db, service, refundService, unsafe);
+        cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request");
+        cases.approveRelease(APPROVER, caseId);
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("RELEASED");
+        // A release is a staff decision, not provider evidence: a late signed success still posts, once.
+        refunds.record(refund, null, new ProviderResult("sim_refund_late", "REFUNDED", null, "Late signed webhook"));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(amount(payments.raw(intent), "refundedMinor")).isEqualTo(6000);
+        assertThat(count("billing.journals")).isEqualTo(2); assertInvoice(INVOICE, 4000, 0);
     }
 
     @Test void verifiedRefundReferencePostsTheRefundOnce() {
@@ -1546,6 +1620,12 @@ class BillingFinancialDatabaseTest {
         @Override public String refundRequestVersion() { return delegate.refundRequestVersion(); }
         @Override public ProviderResult recoverRefund(RefundCommand command, String version, java.time.Instant preparedAt, String id) {
             return delegate.recoverRefund(command, version, preparedAt, id);
+        }
+        @Override public ProviderResult verifyPaymentReference(ProviderCommand expected, String reference) {
+            return delegate.verifyPaymentReference(expected, reference);
+        }
+        @Override public ProviderResult verifyRefundReference(RefundCommand expected, String reference) {
+            return delegate.verifyRefundReference(expected, reference);
         }
     }
 }

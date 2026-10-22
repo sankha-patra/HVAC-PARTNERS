@@ -112,6 +112,22 @@ public final class SimulatorBillingProvider implements BillingProvider {
         return lookupOperation(idempotencyKey, providerId, "REFUND");
     }
 
+    @Override public ProviderResult verifyPaymentReference(ProviderCommand expected, String providerId) {
+        ProviderValidation.payment(expected);
+        Operation operation = byKey(expected.idempotencyKey(), false);
+        if (operation == null || !operation.providerId().equals(providerId) || !operation.matches(expected))
+            return new ProviderResult(providerId, "UNKNOWN", null, "Payment reference does not match the expected operation");
+        return result(operation);
+    }
+
+    @Override public ProviderResult verifyRefundReference(RefundCommand expected, String providerId) {
+        ProviderValidation.refund(expected);
+        Operation operation = byKey(expected.idempotencyKey(), false);
+        if (operation == null || !operation.providerId().equals(providerId) || !operation.matches(expected))
+            return new ProviderResult(providerId, "UNKNOWN", null, "Refund reference does not match the expected operation");
+        return result(operation);
+    }
+
     @Override public String refundRequestVersion() { return "simulator:refund-v1"; }
 
     @Override public ProviderResult recoverRefund(RefundCommand command, String version, Instant preparedAt, String providerId) {
