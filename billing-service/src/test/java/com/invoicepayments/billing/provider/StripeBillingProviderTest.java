@@ -106,6 +106,23 @@ class StripeBillingProviderTest {
         assertThat(transport.requests).hasSize(1);
     }
 
+    // Services log these exceptions with their stack traces, so none may carry the key or a response body.
+    @Test void providerFailuresCarryNoCredentialOrResponseBody() {
+        String key = "sk_test_exampleOnly";
+        transport.responses.add(new StripeBillingProvider.Response(401, "{\"error\":{\"message\":\"Invalid API Key provided: " + key + "\"}}"));
+        assertCarriesNoSecret(catchThrowable(() -> provider.submit(command("CARD", 12345))), key);
+        transport.responses.add(new StripeBillingProvider.Response(200, "not json " + key));
+        assertCarriesNoSecret(catchThrowable(() -> provider.submit(command("CARD", 12345))), key);
+        transport.failure = new IOException("connection reset while sending Bearer " + key);
+        assertCarriesNoSecret(catchThrowable(() -> provider.submit(command("CARD", 12345))), key);
+    }
+
+    private static void assertCarriesNoSecret(Throwable failure, String key) {
+        assertThat(failure).isInstanceOf(ProviderUncertainException.class);
+        var trace = new java.io.StringWriter(); failure.printStackTrace(new java.io.PrintWriter(trace));
+        assertThat(trace.toString()).doesNotContain(key).doesNotContain("Invalid API Key").doesNotContain("Bearer");
+    }
+
     @Test void mismatchedCreatedAmountIsNotTrusted() {
         transport.reply(session(null, "unpaid", "open").put("amount_total", 12346));
         assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderUncertainException.class);

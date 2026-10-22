@@ -14,6 +14,7 @@ import static com.invoicepayments.billing.BillingStore.*;
 @Service
 @Profile("billing")
 public class BillingService {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(BillingService.class);
     private final BillingStore db;
     private final BillingProvider provider;
     private final boolean simulator;
@@ -128,7 +129,11 @@ public class BillingService {
         try {
             result=provider.submitSaved(ProviderCommand.fromJson(text(work,"originalRequest")),
                 text(work,"requestVersion"),Instant.parse(text(work,"createdAt")));
-        } catch(RuntimeException failure) { result=new ProviderResult(null,"UNKNOWN",null,"Provider outcome is uncertain; recovery will query the original operation"); }
+        } catch(RuntimeException failure) {
+            // Identifiers and the exception only: provider exceptions carry no credential or response body.
+            log.warn("Payment submission outcome uncertain; recovery will reconcile intentId={}",intent,failure);
+            result=new ProviderResult(null,"UNKNOWN",null,"Provider outcome is uncertain; recovery will query the original operation");
+        }
         recordResult(intent,token,result);
         return get(user,intent);
     }

@@ -1,5 +1,30 @@
 # Verification of the extracted repository
 
+## Logging of swallowed failures — 22 October 2026
+
+Code review found that payment submission, refund submission, payment and refund
+recovery and the webhook inbox caught failures, turned them into UNKNOWN or UNMATCHED,
+and wrote no log line. The cause of a stuck payment (for example a Stripe HTTP 401)
+was lost. Each of these places now logs the payment, refund or event ID with the exception:
+
+- Uncertain provider outcomes and replay-unsafe escalations log at WARN.
+- Evidence that recovery could not record logs at ERROR, next to its finance case.
+- An unmatched webhook logs at WARN on its first failure and at DEBUG on the 30-second
+  retries. An expected evidence mismatch logs its reason without a stack trace.
+  If recording the failure also fails, the original failure is attached as suppressed.
+
+Four new database tests failed first (no log line was written), then passed. A new
+Stripe adapter test checks that a 401 body echoing the key, an unreadable response
+and a transport error all produce exceptions whose message, cause and stack trace
+contain no key, `Bearer` header or response body. It passed before and after the
+change, and guards that property. Logs contain identifiers, not credentials or card data.
+
+The full Java suite passed **331 tests, with zero failures, errors or skips**
+(326 before, plus five new tests; 128 financial database and 77 Stripe adapter tests).
+The run's test log contained no `sk_test_`, `whsec_` or `Bearer` text. Run in the Docker
+test containers with the same steps as `scripts/verify-container-tests.ps1`, executed
+from Bash. Simulator only; no live Stripe call.
+
 ## Out-of-order refund events — 22 October 2026
 
 Code review found that a provider "refund failed" event processed before an older

@@ -9,6 +9,7 @@ import static com.invoicepayments.billing.BillingStore.*;
 @Service
 @Profile("billing")
 public class BillingRefundService {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(BillingRefundService.class);
     private final BillingStore db; private final BillingService payments; private final BillingProvider provider;
     public BillingRefundService(BillingStore db,BillingService payments,BillingProvider provider) {this.db=db;this.payments=payments;this.provider=provider;}
     public List<Map<String,Object>> list(String user) {
@@ -79,7 +80,10 @@ public class BillingRefundService {
         if(work==null) return;
         ProviderResult result;
         try { result=provider.refund(RefundCommand.fromJson(text(work,"originalRequest"))); }
-        catch(RuntimeException failure) { result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request"); }
+        catch(RuntimeException failure) {
+            log.warn("Refund submission outcome uncertain; recovery will reuse the saved request refundId={} intentId={}",refund,intent,failure);
+            result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request");
+        }
         record(refund,token,result);
     }
     static String operationKey(UUID refund) { return "refund_"+refund; }

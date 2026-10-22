@@ -10,6 +10,7 @@ import static com.invoicepayments.billing.BillingStore.*;
 @Service
 @Profile("billing")
 public class BillingRecovery {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(BillingRecovery.class);
     private final BillingStore db; private final BillingService payments; private final BillingRefundService refunds; private final BillingProvider provider;
     public BillingRecovery(BillingStore db,BillingService payments,BillingRefundService refunds,BillingProvider provider) {this.db=db;this.payments=payments;this.refunds=refunds;this.provider=provider;}
     public List<Map<String,Object>> claimPayments(int limit) {
@@ -52,12 +53,19 @@ public class BillingRecovery {
             }
         }
         catch(ProviderReplayUnsafeException failure) {
+            log.warn("Saved payment cannot be replayed safely; escalating intentId={} reason={}",intent,failure.getMessage());
             db.tx(() -> {db.escalate(intent,null,"PAYMENT_REPLAY_UNSAFE",intent.toString(),"Saved payment request can no longer be replayed safely");return null;});
             result=new ProviderResult(null,"UNKNOWN",null,"Saved payment requires investigation before further submission");
         }
-        catch(RuntimeException failure) {result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Original provider operation is not yet confirmed");}
+        catch(RuntimeException failure) {
+            log.warn("Payment recovery outcome still uncertain intentId={}",intent,failure);
+            result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Original provider operation is not yet confirmed");
+        }
         try { payments.recordResult(intent,token,result); }
-        catch(RuntimeException failure) {db.tx(() -> {db.caseFor(intent,"RECOVERY_EVIDENCE_MISMATCH",intent.toString());return null;});}
+        catch(RuntimeException failure) {
+            log.error("Payment recovery could not record provider evidence intentId={}",intent,failure);
+            db.tx(() -> {db.caseFor(intent,"RECOVERY_EVIDENCE_MISMATCH",intent.toString());return null;});
+        }
         db.tx(() -> {
             // Backoff is per operation; stuck oldest records do not monopolize each batch.
             long seconds=backoffSeconds(amount(work,"recoveryCount"));
@@ -105,12 +113,19 @@ public class BillingRecovery {
             }
         }
         catch(ProviderReplayUnsafeException failure) {
+            log.warn("Saved refund cannot be replayed safely; escalating refundId={} intentId={} reason={}",refund,intent,failure.getMessage());
             db.tx(() -> {db.escalate(intent,refund,"REFUND_REPLAY_UNSAFE",refund.toString(),"Saved refund request can no longer be replayed safely");return null;});
             result=new ProviderResult(null,"UNKNOWN",null,"Saved refund requires investigation before further submission");
         }
-        catch(RuntimeException failure) {result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Refund remains uncertain");}
+        catch(RuntimeException failure) {
+            log.warn("Refund recovery outcome still uncertain refundId={} intentId={}",refund,intent,failure);
+            result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Refund remains uncertain");
+        }
         try {refunds.record(refund,token,result);}
-        catch(RuntimeException failure) {db.tx(() -> {db.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund evidence could not be recorded");return null;});}
+        catch(RuntimeException failure) {
+            log.error("Refund recovery could not record provider evidence refundId={} intentId={}",refund,intent,failure);
+            db.tx(() -> {db.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund evidence could not be recorded");return null;});
+        }
         long attempts=amount(work,"recoveryCount");
         db.tx(() -> {
             db.update("UPDATE billing.refunds SET next_recovery_at=NOW()+(? * INTERVAL '1 second') WHERE id=? AND lease_token IS NULL AND status IN ('SUBMITTING','PROCESSING','UNKNOWN')",backoffSeconds(attempts),refund);

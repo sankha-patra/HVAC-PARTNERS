@@ -1,5 +1,8 @@
 package com.invoicepayments.billing;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.invoicepayments.billing.provider.*;
 import org.flywaydb.core.Flyway;
 import org.json.JSONObject;
@@ -98,6 +101,9 @@ class BillingFinancialDatabaseTest {
         jdbc.execute("DROP TRIGGER IF EXISTS billing_test_reject_outbox ON billing.outbox");
         jdbc.execute("DROP FUNCTION IF EXISTS billing.test_reject_outbox()");
     }
+
+    final List<Runnable> logCaptures = new ArrayList<>();
+    @AfterEach void detachLogCaptures() { logCaptures.forEach(Runnable::run); }
 
     @Test void sameRequestReplayReturnsSameIntentWithoutDoubleReservation() {
         String key = key();
@@ -1457,6 +1463,67 @@ class BillingFinancialDatabaseTest {
         assertThat(count("billing.journals")).isEqualTo(2); assertInvoice(INVOICE, 4000, 0);
     }
 
+    @Test void uncertainPaymentSubmissionAndRecoveryAreLoggedWithThePaymentId() {
+        var serviceLog = captureLogs(BillingService.class); var recoveryLog = captureLogs(BillingRecovery.class);
+        BillingProvider lost = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Stripe did not confirm this operation (HTTP 401); reconcile before retrying"); }
+            @Override public ProviderResult lookup(String key, String id) { throw new ProviderUncertainException("Stripe operation timed out or was unavailable; acceptance is unknown"); }
+        };
+        BillingService service = service(lost, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
+        assertLogged(serviceLog, Level.WARN, intent.toString(), "HTTP 401");
+        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, lost), lost);
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertLogged(recoveryLog, Level.WARN, intent.toString(), "timed out");
+    }
+
+    @Test void recoveryThatCannotRecordProviderEvidenceLogsAnError() {
+        var recoveryLog = captureLogs(BillingRecovery.class);
+        BillingProvider contradictory = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Response missing"); }
+            @Override public ProviderResult lookup(String key, String id) { return new ProviderResult("sim_other_payment", "CAPTURED", null, "A different operation"); }
+        };
+        BillingService service = service(contradictory, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        db.update("UPDATE billing.intents SET provider_id='sim_original_payment' WHERE id=?", intent);
+        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, contradictory), contradictory);
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='RECOVERY_EVIDENCE_MISMATCH' AND intent_id=?", intent)).isTrue();
+        assertLogged(recoveryLog, Level.ERROR, intent.toString(), "does not match");
+    }
+
+    @Test void uncertainRefundSubmissionAndRecoveryAreLoggedWithTheRefundId() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        var refundLog = captureLogs(BillingRefundService.class); var recoveryLog = captureLogs(BillingRecovery.class);
+        BillingProvider lost = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { throw new ProviderUncertainException("Stripe did not confirm this operation (HTTP 500); reconcile before retrying"); }
+            @Override public ProviderResult recoverRefund(RefundCommand c, String v, java.time.Instant p, String id) {
+                throw new ProviderUncertainException("Stripe operation timed out or was unavailable; acceptance is unknown");
+            }
+        };
+        var service = service(lost, MERCHANT); var refundService = new BillingRefundService(db, service, lost);
+        refundService.approve(APPROVER, refund);
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
+        assertLogged(refundLog, Level.WARN, refund.toString(), "HTTP 500");
+        var worker = new BillingRecovery(db, service, refundService, lost);
+        dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
+        assertLogged(recoveryLog, Level.WARN, refund.toString(), "timed out");
+    }
+
+    @Test void unmatchedWebhookIsLoggedOnceAtWarnWithItsEventId() {
+        var inboxLog = captureLogs(BillingInbox.class);
+        UUID intent = submitted("CARD");
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_wrong_amount", providerId(intent), intent.toString(), "CAPTURED", 1, "USD", null));
+        inbox.process("SIMULATOR", "evt_wrong_amount");
+        inbox.process("SIMULATOR", "evt_wrong_amount");
+        assertThat(db.one("SELECT state,attempts FROM billing.webhook_inbox WHERE event_id='evt_wrong_amount'"))
+                .containsEntry("state", "UNMATCHED").containsEntry("attempts", 2);
+        // Retries every 30 seconds must not flood the log: only the first failure is a warning.
+        assertThat(inboxLog.list).filteredOn(event -> event.getLevel() == Level.WARN).singleElement()
+                .satisfies(event -> assertThat(event.getFormattedMessage()).contains("evt_wrong_amount", "Payment amount mismatch"));
+    }
+
     @Test void verifiedRefundReferencePostsTheRefundOnce() {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
         BillingProvider lossy = new DelegateProvider(provider) {
@@ -1594,6 +1661,19 @@ class BillingFinancialDatabaseTest {
     void assertInvoice(UUID invoice, long paid, long reserved) {
         var row = db.one("SELECT paid_minor,reserved_minor FROM billing.invoices WHERE id=?", invoice);
         assertThat(amount(row, "paidMinor")).isEqualTo(paid); assertThat(amount(row, "reservedMinor")).isEqualTo(reserved);
+    }
+    ListAppender<ILoggingEvent> captureLogs(Class<?> type) {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(type);
+        var appender = new ListAppender<ILoggingEvent>(); appender.start(); logger.addAppender(appender);
+        logCaptures.add(() -> logger.detachAppender(appender));
+        return appender;
+    }
+    static void assertLogged(ListAppender<ILoggingEvent> log, Level level, String... fragments) {
+        assertThat(log.list).anySatisfy(event -> {
+            assertThat(event.getLevel()).isEqualTo(level);
+            String text = event.getFormattedMessage() + (event.getThrowableProxy() == null ? "" : " " + event.getThrowableProxy().getMessage());
+            assertThat(text).contains(fragments);
+        });
     }
     static void assertProblem(int status, Runnable action) {
         assertThatThrownBy(action::run).isInstanceOfSatisfying(BillingProblem.class, ex -> assertThat(ex.status()).isEqualTo(status));
