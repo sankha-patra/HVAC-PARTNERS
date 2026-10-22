@@ -129,6 +129,10 @@ public class BillingService {
         try {
             result=provider.submitSaved(ProviderCommand.fromJson(text(work,"originalRequest")),
                 text(work,"requestVersion"),Instant.parse(text(work,"createdAt")));
+        } catch(ProviderRejectedException rejected) {
+            // TX-A made this the first attempt with this key, and the provider refused it before acting.
+            log.warn("Provider rejected the payment before acting; releasing invoices intentId={} reason={}",intent,rejected.getMessage());
+            result=new ProviderResult(null,"FAILED",null,"Provider rejected the request before creating a payment");
         } catch(RuntimeException failure) {
             // Identifiers and the exception only: provider exceptions carry no credential or response body.
             log.warn("Payment submission outcome uncertain; recovery will reconcile intentId={}",intent,failure);
@@ -250,7 +254,7 @@ public class BillingService {
     }
     private void returned(Map<String,Object> intent) {
         UUID id=id(intent.get("id"));
-        if(!"ACH".equals(intent.get("method"))) {db.caseFor(id,"DISPUTE_REQUIRES_REVIEW",id.toString()); return;}
+        if(!"ACH".equals(intent.get("method"))) {db.escalate(id,null,"DISPUTE_REQUIRES_REVIEW",id.toString(),"New dispute evidence arrived for this card payment"); return;}
         if(!hasCapture(id)) throw BillingProblem.conflict("A return cannot precede recorded payment evidence");
         if(db.exists("SELECT 1 FROM billing.journals WHERE effect_key=?","return:"+id)) return;
         boolean allocated=false;

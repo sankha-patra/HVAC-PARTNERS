@@ -77,17 +77,43 @@ class StripeBillingProviderTest {
         assertThat(transport.requests).isEmpty();
     }
 
+    // Nothing was sent, so the caller may treat these as definite failures.
     @ParameterizedTest @ValueSource(longs = {-1, 0, 49, 100000000})
     void invalidUsdAmountsFailBeforeNetwork(long amount) {
-        assertThatThrownBy(() -> provider.submit(command("CARD", amount))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> provider.submit(command("CARD", amount))).isInstanceOf(ProviderRejectedException.class);
         assertThat(transport.requests).isEmpty();
     }
 
     @ParameterizedTest @ValueSource(strings = {"http://evil.example/return", "https://user:password@example.com/return", "javascript:alert(1)"})
     void unsafeReturnUrlsFailBeforeNetwork(String url) {
         assertThatThrownBy(() -> provider.submit(new ProviderCommand(INTENT, KEY, 12345, "USD", "CARD", url)))
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOf(ProviderRejectedException.class);
         assertThat(transport.requests).isEmpty();
+    }
+
+    @Test void onlyResponsesThatProveNothingHappenedAreRejections() {
+        transport.responses.add(new StripeBillingProvider.Response(401, "{}"));
+        assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderRejectedException.class);
+        transport.responses.add(new StripeBillingProvider.Response(403, "{}"));
+        assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderRejectedException.class);
+        transport.responses.add(new StripeBillingProvider.Response(400, "{\"error\":{\"type\":\"invalid_request_error\"}}"));
+        assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderRejectedException.class)
+                .hasMessageContaining("HTTP 400");
+        // A reused key with other parameters, a conflict, a rate limit, a server error or an unreadable body prove nothing.
+        for (var response : List.of(new StripeBillingProvider.Response(400, "{\"error\":{\"type\":\"idempotency_error\"}}"),
+                new StripeBillingProvider.Response(400, "not json"), new StripeBillingProvider.Response(409, "{}"),
+                new StripeBillingProvider.Response(429, "{}"), new StripeBillingProvider.Response(500, "{}"))) {
+            transport.responses.add(response);
+            assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderUncertainException.class)
+                    .isNotInstanceOf(ProviderRejectedException.class);
+        }
+    }
+
+    @Test void refundRefusedBeforeItsPostIsARejection() {
+        transport.responses.add(new StripeBillingProvider.Response(401, "{}"));
+        assertThatThrownBy(() -> provider.refund(refundCommand())).isInstanceOf(ProviderRejectedException.class);
+        assertThat(transport.requests).hasSize(1);
+        assertThat(transport.requests.get(0).method()).isEqualTo("GET");
     }
 
     @Test void timeoutLeavesOutcomeUnknownAndDoesNotRetrySubmit() {

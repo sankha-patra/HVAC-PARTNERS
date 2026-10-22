@@ -1,5 +1,48 @@
 # Verification of the extracted repository
 
+## Error classes, reopening cases, refund rejection, JSON library and timeouts — 22 October 2026
+
+Five remaining review findings, fixed in order. Every new test below failed first
+(timeout tests: the lock wait was still blocked when cut off at 8 s; refund rejection:
+the method was a stub), then passed.
+
+1. **Temporary failures are not evidence.** `BillingStore.isTransient` recognises lock,
+   statement and transaction timeouts, deadlocks, serialization failures and lost
+   connections. Recovery retries them without a `RECOVERY_EVIDENCE_MISMATCH` or
+   `REFUND_UNRESOLVED` case. A webhook stays queued (retry in 10 s) and becomes
+   UNMATCHED only after 10 temporary failures. A review case closes itself when its
+   event later applies. `ProviderRejectedException` means the provider did nothing:
+   the request was invalid and never sent, or Stripe answered 401, 403, or 400
+   `invalid_request_error`. A first submission then fails at once and frees the
+   invoice or refund amount. During recovery it stays uncertain, because an earlier
+   attempt may have succeeded. A reused key (`idempotency_error`), 409, 429, 5xx and
+   unreadable bodies stay uncertain.
+2. **Closed cases reopen.** Problems that can recur (`RECOVERY_EVIDENCE_MISMATCH`,
+   `ORIGINAL_PROVIDER_UNAVAILABLE`, `DISPUTE_REQUIRES_REVIEW`, `REFUND_LATER_FAILED`)
+   use `escalate`, which reopens a resolved case with a `REOPENED` audit entry.
+   One-time events keep one case.
+3. **Refund requests can be rejected.** `POST /finance/refunds/{id}/reject` with a
+   10–1000 character note, by the requester (FINANCE) or a REFUND_APPROVER of the
+   merchant, only while REQUESTED. No money moves and the amount is available again.
+   `V15__refund_rejection.sql` records who, when and why, and a trigger keeps a
+   rejection final. The finance page has a Reject button.
+4. **JSON library.** `org.json` 20180130 → 20260814 (fixes CVE-2022-45688 and
+   CVE-2023-5072). No code change was needed; the full suite passed on the new version.
+5. **Timeouts.** Each `BillingStore` transaction has a 10-second Spring deadline and
+   sets, for that transaction only, `lock_timeout` 3 s, `statement_timeout` 10 s and
+   `idle_in_transaction_session_timeout` 20 s. Statements outside transactions have
+   a 15-second query timeout (`spring.jdbc.template.query-timeout`). A test holding a
+   row lock from another connection now gets a temporary error after 3.6 s, with no
+   change saved. Cost: one extra `set_config` statement per transaction (not measured).
+
+The full Java suite passed **345 tests, with zero failures, errors or skips**
+(331 before, plus 14 new; 139 financial database and 79 Stripe adapter tests).
+The frontend production build passed and **46 frontend tests** passed (44 before,
+plus two for refund rejection), run in a `node:24-alpine` container from
+`frontend/Dockerfile`. The Java test log contained no `sk_test_`, `whsec_` or
+`Bearer` text. Java tests ran in the Docker test containers with the same steps as
+`scripts/verify-container-tests.ps1`, executed from Bash. Simulator only; no live Stripe call.
+
 ## Logging of swallowed failures — 22 October 2026
 
 Code review found that payment submission, refund submission, payment and refund

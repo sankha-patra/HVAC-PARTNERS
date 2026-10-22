@@ -40,7 +40,7 @@ public class BillingRecovery {
             """,intent,token);
         if(owned.isEmpty()) return;
         var work=owned.get(0);
-        if(!provider.name().equals(work.get("provider"))) {db.tx(()->{db.caseFor(intent,"ORIGINAL_PROVIDER_UNAVAILABLE",intent.toString());return null;});return;}
+        if(!provider.name().equals(work.get("provider"))) {db.tx(()->{db.escalate(intent,null,"ORIGINAL_PROVIDER_UNAVAILABLE",intent.toString(),"The original payment provider is still unavailable");return null;});return;}
         try {
             if(work.get("originalRequest")==null || work.get("providerId")!=null) {
                 result=provider.lookup(BillingService.operationKey(intent),text(work,"providerId"));
@@ -63,8 +63,12 @@ public class BillingRecovery {
         }
         try { payments.recordResult(intent,token,result); }
         catch(RuntimeException failure) {
-            log.error("Payment recovery could not record provider evidence intentId={}",intent,failure);
-            db.tx(() -> {db.caseFor(intent,"RECOVERY_EVIDENCE_MISMATCH",intent.toString());return null;});
+            // A temporary database failure is not evidence: the claim's lease expires and recovery tries again.
+            if(isTransient(failure)) log.warn("Payment recovery hit a temporary database failure; will retry intentId={}",intent,failure);
+            else {
+                log.error("Payment recovery could not record provider evidence intentId={}",intent,failure);
+                db.tx(() -> {db.escalate(intent,null,"RECOVERY_EVIDENCE_MISMATCH",intent.toString(),"Recovery again could not record provider evidence");return null;});
+            }
         }
         db.tx(() -> {
             // Backoff is per operation; stuck oldest records do not monopolize each batch.
@@ -97,7 +101,7 @@ public class BillingRecovery {
             """,refund,token);
         if(owned.isEmpty()) return;
         var work=owned.get(0); UUID intent=id(work.get("intentId"));
-        if(!provider.name().equals(work.get("paymentProvider"))) {db.tx(()->{db.caseFor(intent,refund,"ORIGINAL_PROVIDER_UNAVAILABLE",refund.toString());return null;});return;}
+        if(!provider.name().equals(work.get("paymentProvider"))) {db.tx(()->{db.escalate(intent,refund,"ORIGINAL_PROVIDER_UNAVAILABLE",refund.toString(),"The original payment provider is still unavailable");return null;});return;}
         if("APPROVED".equals(work.get("status"))) {refunds.submitApproved(refund);return;}
         String key=BillingRefundService.operationKey(refund); ProviderResult result;
         try {
@@ -123,8 +127,11 @@ public class BillingRecovery {
         }
         try {refunds.record(refund,token,result);}
         catch(RuntimeException failure) {
-            log.error("Refund recovery could not record provider evidence refundId={} intentId={}",refund,intent,failure);
-            db.tx(() -> {db.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund evidence could not be recorded");return null;});
+            if(isTransient(failure)) log.warn("Refund recovery hit a temporary database failure; will retry refundId={} intentId={}",refund,intent,failure);
+            else {
+                log.error("Refund recovery could not record provider evidence refundId={} intentId={}",refund,intent,failure);
+                db.tx(() -> {db.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund evidence could not be recorded");return null;});
+            }
         }
         long attempts=amount(work,"recoveryCount");
         db.tx(() -> {

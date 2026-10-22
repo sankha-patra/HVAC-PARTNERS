@@ -86,6 +86,9 @@ public class BillingController {
         return refunds.request(user(auth),intent,key,request.amountMinor(),request.reason());
     }
     @PostMapping("/finance/refunds/{refund}/approve") public Object approve(Authentication auth,@PathVariable UUID refund) {return refunds.approve(user(auth),refund);}
+    @PostMapping("/finance/refunds/{refund}/reject") public Object rejectRefund(Authentication auth,@PathVariable UUID refund,@RequestBody CaseNote request) {
+        return refunds.reject(user(auth),refund,request.note());
+    }
     @PostMapping("/finance/reconciliation/import") public Object importReport(Authentication auth,@RequestBody BillingReconciliation.Report report) {return reconciliation.receive(user(auth),report);}
     @PostMapping("/finance/settlements/{settlement}/bank-confirmation") public Object bankCredit(Authentication auth,@PathVariable UUID settlement,@RequestBody BillingReconciliation.BankCredit credit) {return reconciliation.confirmBank(user(auth),settlement,credit);}
     @GetMapping("/finance/merchants") public Object merchants(Authentication auth) {

@@ -100,6 +100,18 @@ class BillingFinancialDatabaseTest {
     @AfterEach void removeOnlyTestFaultTrigger() {
         jdbc.execute("DROP TRIGGER IF EXISTS billing_test_reject_outbox ON billing.outbox");
         jdbc.execute("DROP FUNCTION IF EXISTS billing.test_reject_outbox()");
+        removeTransientFault();
+    }
+
+    /** Timeline inserts of this type fail with a deadlock (SQLSTATE 40P01), as a real lock conflict would. */
+    void injectTransientFault(String timelineType) {
+        jdbc.execute("CREATE FUNCTION billing.test_transient_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.type='"
+                + timelineType + "' THEN RAISE EXCEPTION 'Injected deadlock' USING ERRCODE='40P01'; END IF; RETURN NEW; END $$");
+        jdbc.execute("CREATE TRIGGER billing_test_transient_fault BEFORE INSERT ON billing.timeline FOR EACH ROW EXECUTE FUNCTION billing.test_transient_fault()");
+    }
+    void removeTransientFault() {
+        jdbc.execute("DROP TRIGGER IF EXISTS billing_test_transient_fault ON billing.timeline");
+        jdbc.execute("DROP FUNCTION IF EXISTS billing.test_transient_fault()");
     }
 
     final List<Runnable> logCaptures = new ArrayList<>();
@@ -1522,6 +1534,159 @@ class BillingFinancialDatabaseTest {
         // Retries every 30 seconds must not flood the log: only the first failure is a warning.
         assertThat(inboxLog.list).filteredOn(event -> event.getLevel() == Level.WARN).singleElement()
                 .satisfies(event -> assertThat(event.getFormattedMessage()).contains("evt_wrong_amount", "Payment amount mismatch"));
+    }
+
+    // #3: a temporary database failure is not evidence. It is retried and opens no finance case.
+    @Test void temporaryDatabaseFailureDuringRecoveryRetriesWithoutAFinanceCase() {
+        BillingProvider settled = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Response missing"); }
+            @Override public ProviderResult lookup(String key, String id) { return new ProviderResult("sim_settled_payment", "CAPTURED", null, "Captured"); }
+        };
+        BillingService service = service(settled, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        injectTransientFault("CAPTURED");
+        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, settled), settled);
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
+        assertThat(count("billing.cases")).isZero();
+        removeTransientFault(); due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(service.raw(intent).get("status")).isEqualTo("CAPTURED"); assertInvoice(INVOICE, 10000, 0);
+    }
+
+    @Test void temporaryDatabaseFailureLeavesAWebhookQueuedWithoutAFinanceCase() {
+        UUID intent = submitted("CARD");
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_temporary", providerId(intent), intent.toString(), "CAPTURED", 10000, "USD", null));
+        injectTransientFault("CAPTURED");
+        inbox.process("SIMULATOR", "evt_temporary");
+        assertThat(db.one("SELECT state,attempts FROM billing.webhook_inbox WHERE event_id='evt_temporary'"))
+                .containsEntry("state", "NEW").containsEntry("attempts", 1);
+        assertThat(count("billing.cases")).isZero();
+        removeTransientFault(); inbox.process("SIMULATOR", "evt_temporary");
+        assertThat(db.one("SELECT state FROM billing.webhook_inbox WHERE event_id='evt_temporary'").get("state")).isEqualTo("PROCESSED");
+        assertThat(payments.raw(intent).get("status")).isEqualTo("CAPTURED");
+    }
+
+    @Test void webhookReviewCaseClosesItselfWhenTheEventLaterApplies() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_early_refund", "re_early", intent.toString(), "REFUNDED", 500, "USD", refund.toString()));
+        inbox.process("SIMULATOR", "evt_early_refund");
+        UUID review = id(db.one("SELECT id FROM billing.cases WHERE reason='WEBHOOK_REQUIRES_REVIEW' AND reference='SIMULATOR:evt_early_refund'").get("id"));
+        db.update("UPDATE billing.refunds SET status='PROCESSING',approved_by=?,provider_id='re_early' WHERE id=?", APPROVER, refund);
+        inbox.process("SIMULATOR", "evt_early_refund");
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(db.one("SELECT status,resolution FROM billing.cases WHERE id=?", review))
+                .containsEntry("status", "RESOLVED").containsEntry("resolution", "PROVIDER_EVIDENCE");
+    }
+
+    // #3: the first submission of a key is the only attempt, so a refusal before acting is a definite failure.
+    @Test void paymentTheProviderRejectedBeforeActingFailsAndFreesTheInvoice() {
+        BillingProvider rejecting = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderRejectedException("Stripe rejected this operation (HTTP 401); it was not performed"); }
+        };
+        BillingService service = service(rejecting, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        assertThat(service.raw(intent).get("status")).isEqualTo("FAILED"); assertInvoice(INVOICE, 0, 0);
+        assertThat(count("billing.journals")).isZero();
+        assertThat(db.exists("SELECT 1 FROM billing.outbox WHERE aggregate_id=? AND type='PAYMENT_FAILED'", intent)).isTrue();
+    }
+
+    @Test void refundTheProviderRejectedBeforeActingFailsAndFreesItsAmount() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 10000);
+        BillingProvider rejecting = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { throw new ProviderRejectedException("Stripe rejected this operation (HTTP 400); it was not performed"); }
+        };
+        var service = service(rejecting, MERCHANT); new BillingRefundService(db, service, rejecting).approve(APPROVER, refund);
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("FAILED");
+        assertThat(refunds.raw(requestedRefund(intent, 10000)).get("status")).isEqualTo("REQUESTED");
+        assertThat(count("billing.journals")).isEqualTo(1);
+    }
+
+    @Test void rejectionDuringRecoveryStaysUncertainBecauseAnEarlierAttemptMayHaveSucceeded() {
+        BillingProvider lostThenRejected = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Response missing"); }
+            @Override public ProviderResult lookup(String key, String id) { throw new ProviderRejectedException("Stripe rejected this operation (HTTP 401); it was not performed"); }
+        };
+        BillingService service = service(lostThenRejected, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, lostThenRejected), lostThenRejected);
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN"); assertInvoice(INVOICE, 0, 10000);
+    }
+
+    // #4: a case closed by staff reopens, with an audit entry, when the same problem happens again.
+    @Test void closedCaseReopensWhenTheSameProblemHappensAgain() {
+        BillingProvider contradictory = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Response missing"); }
+            @Override public ProviderResult lookup(String key, String id) { return new ProviderResult("sim_other_payment", "CAPTURED", null, "A different operation"); }
+        };
+        BillingService service = service(contradictory, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        db.update("UPDATE billing.intents SET provider_id='sim_original_payment' WHERE id=?", intent);
+        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, contradictory), contradictory);
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        UUID mismatch = caseId("RECOVERY_EVIDENCE_MISMATCH", intent);
+        new BillingCaseService(db, service, refunds, contradictory).close("operator", mismatch, "Checked the provider dashboard; looked like a one-off");
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(db.one("SELECT status FROM billing.cases WHERE id=?", mismatch).get("status")).isEqualTo("OPEN");
+        assertThat(db.rows("SELECT action FROM billing.case_actions WHERE case_id=? ORDER BY created_at,id", mismatch)).extracting(row -> row.get("action"))
+                .containsExactly("CLOSED_AFTER_REVIEW", "REOPENED");
+    }
+
+    // #5: a refund request that is never approved can be rejected; its amount becomes available again.
+    @Test void refundRequestCanBeRejectedOnceAndFreesItsAmount() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 10000);
+        assertProblem(409, () -> requestedRefund(intent, 1));
+        assertProblem(400, () -> refunds.reject(APPROVER, refund, "too short"));
+        assertProblem(403, () -> refunds.reject("operator", refund, "Customer withdrew the refund request"));
+        assertProblem(403, () -> refunds.reject("other-checker", refund, "Customer withdrew the refund request"));
+        var rejected = refunds.reject(APPROVER, refund, "Customer withdrew the refund request");
+        assertThat(rejected).containsEntry("status", "REJECTED").containsEntry("rejectedBy", APPROVER)
+                .containsEntry("rejectionNote", "Customer withdrew the refund request");
+        assertThat(refunds.reject(APPROVER, refund, "Customer withdrew the refund request").get("status")).isEqualTo("REJECTED");
+        refunds.approve("second-checker", refund);
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REJECTED");
+        assertThat(count("billing.journals")).isEqualTo(1); assertInvoice(INVOICE, 10000, 0);
+        assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='REFUND_REJECTED'", intent)).isTrue();
+        assertThat(refunds.raw(requestedRefund(intent, 10000)).get("status")).isEqualTo("REQUESTED");
+        assertThatThrownBy(() -> db.update("UPDATE billing.refunds SET status='APPROVED',approved_by=? WHERE id=?", APPROVER, refund))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class);
+    }
+
+    @Test void requesterCanWithdrawButAnApprovedRefundCannotBeRejected() {
+        UUID intent = captured("CARD"); UUID first = requestedRefund(intent, 500);
+        assertThat(refunds.reject(FINANCE, first, "Raised against the wrong payment").get("status")).isEqualTo("REJECTED");
+        UUID second = requestedRefund(intent, 500);
+        refunds.approve(APPROVER, second);
+        assertProblem(409, () -> refunds.reject(APPROVER, second, "Too late to reject this refund"));
+        assertThat(refunds.raw(second).get("status")).isEqualTo("REFUNDED");
+    }
+
+    // Timeouts: every transaction has a deadline, and PostgreSQL bounds lock waits, statements and idle sessions.
+    @Test void transactionsCarryADeadlineAndLockStatementAndIdleLimits() {
+        var limits = db.tx(() -> {
+            var holder = (org.springframework.jdbc.datasource.ConnectionHolder)
+                    org.springframework.transaction.support.TransactionSynchronizationManager.getResource(jdbc.getDataSource());
+            var row = db.one("SELECT current_setting('lock_timeout') AS lock_limit,current_setting('statement_timeout') AS statement_limit,"
+                    + "current_setting('idle_in_transaction_session_timeout') AS idle_limit");
+            row.put("deadline", holder.hasTimeout()); return row;
+        });
+        assertThat(limits).containsEntry("lockLimit", "3s").containsEntry("statementLimit", "10s")
+                .containsEntry("idleLimit", "20s").containsEntry("deadline", true);
+    }
+
+    @Test void waitingForAHeldRowLockFailsFastAsATemporaryErrorAndChangesNothing() throws Exception {
+        UUID intent = created("CARD");
+        try (Connection holder = jdbc.getDataSource().getConnection()) {
+            holder.setAutoCommit(false);
+            try (var lock = holder.prepareStatement("SELECT id FROM billing.intents WHERE id=? FOR UPDATE")) { lock.setObject(1, intent); lock.executeQuery(); }
+            Throwable failure = Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(8),
+                    () -> { return catchThrowable(() -> payments.cancel(PAYER, intent)); });
+            assertThat(failure).isNotNull();
+            assertThat(BillingStore.isTransient(failure)).isTrue();
+            holder.rollback();
+        }
+        assertThat(payments.raw(intent).get("status")).isEqualTo("CREATED"); assertInvoice(INVOICE, 0, 10000);
+        assertThat(payments.cancel(PAYER, intent).get("status")).isEqualTo("CANCELLED");
     }
 
     @Test void verifiedRefundReferencePostsTheRefundOnce() {

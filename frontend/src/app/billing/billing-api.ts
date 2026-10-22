@@ -34,7 +34,7 @@ export interface FinancePayment {
 }
 export interface FinanceRefund {
   id: string; intentId: string; amountMinor: number; reason: string; requestedBy: string;
-  approvedBy?: string; status: string; createdAt: string; canApprove?: boolean;
+  approvedBy?: string; status: string; createdAt: string; canApprove?: boolean; canReject?: boolean;
   provider?: string;
 }
 export interface FinanceMerchant { id: string; name: string; canImport: boolean; canConfirm: boolean; }
@@ -99,6 +99,9 @@ export class BillingApi {
   }
   approveRefund(refundId: string) {
     return this.http.post<FinanceRefund>(`${this.base}/finance/refunds/${encodeURIComponent(refundId)}/approve`, {});
+  }
+  rejectRefund(refundId: string, body: { note: string }) {
+    return this.http.post<FinanceRefund>(`${this.base}/finance/refunds/${encodeURIComponent(refundId)}/reject`, body);
   }
   reconciliationMerchants() { return this.http.get<FinanceMerchant[]>(`${this.base}/finance/merchants`); }
   settlements() { return this.http.get<SettlementReport[]>(`${this.base}/finance/settlements`); }

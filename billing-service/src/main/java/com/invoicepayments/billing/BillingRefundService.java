@@ -16,11 +16,13 @@ public class BillingRefundService {
         requireAnyStaff(user);
         return db.rows("""
             SELECT r.id,r.intent_id,i.provider,r.amount_minor,r.reason,r.requested_by,r.approved_by,r.status,r.created_at,
-            (r.status='REQUESTED' AND r.requested_by<>? AND EXISTS(SELECT 1 FROM billing.staff p WHERE p.merchant_id=a.merchant_id AND p.user_id=? AND p.role='REFUND_APPROVER')) AS can_approve
+            (r.status='REQUESTED' AND r.requested_by<>? AND EXISTS(SELECT 1 FROM billing.staff p WHERE p.merchant_id=a.merchant_id AND p.user_id=? AND p.role='REFUND_APPROVER')) AS can_approve,
+            (r.status='REQUESTED' AND ((r.requested_by=? AND EXISTS(SELECT 1 FROM billing.staff f WHERE f.merchant_id=a.merchant_id AND f.user_id=? AND f.role='FINANCE'))
+              OR EXISTS(SELECT 1 FROM billing.staff q WHERE q.merchant_id=a.merchant_id AND q.user_id=? AND q.role='REFUND_APPROVER'))) AS can_reject
             FROM billing.refunds r JOIN billing.intents i ON i.id=r.intent_id JOIN billing.accounts a ON a.id=i.account_id
             WHERE EXISTS(SELECT 1 FROM billing.staff s WHERE s.merchant_id=a.merchant_id AND s.user_id=? AND s.role IN ('FINANCE','REFUND_APPROVER'))
             ORDER BY r.created_at DESC LIMIT 200
-            """,user,user,user);
+            """,user,user,user,user,user,user);
     }
     public Map<String,Object> request(String user,UUID intent,String key,long minor,String reason) {
         BillingService.validateKey(key);
@@ -57,6 +59,27 @@ public class BillingRefundService {
         });
         submitApproved(refund); return raw(refund);
     }
+    /**
+     * A refund that still awaits approval can be rejected by an approver, or withdrawn by its requester.
+     * No money moves and its amount becomes available again. The database keeps the rejection final.
+     */
+    public Map<String,Object> reject(String user,UUID refund,String note) {
+        String reason=note==null?"":note.trim();
+        if(reason.length()<10 || reason.length()>1000) throw BillingProblem.invalid("Record why the refund is rejected, in 10 to 1000 characters");
+        UUID intent=id(raw(refund).get("intentId"));
+        return db.tx(() -> {
+            var payment=payments.locked(intent); UUID merchant=merchant(payment);
+            var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
+            boolean requester=user.equals(row.get("requestedBy"))
+                && db.exists("SELECT 1 FROM billing.staff WHERE user_id=? AND merchant_id=? AND role='FINANCE'",user,merchant);
+            if(!requester) payments.staff(user,merchant,"REFUND_APPROVER");
+            if("REJECTED".equals(row.get("status"))) return row;
+            if(!"REQUESTED".equals(row.get("status"))) throw BillingProblem.conflict("Only a refund that still awaits approval can be rejected");
+            db.update("UPDATE billing.refunds SET status='REJECTED',rejected_by=?,rejected_at=NOW(),rejection_note=?,updated_at=NOW() WHERE id=?",user,reason,refund);
+            db.event(intent,"REFUND_REJECTED","Refund request rejected before approval; no money moved and its amount is available again");
+            return raw(refund);
+        });
+    }
     public void submitApproved(UUID refund) {
         requireNoTransaction();
         UUID token=UUID.randomUUID(); UUID intent=id(raw(refund).get("intentId"));
@@ -80,6 +103,11 @@ public class BillingRefundService {
         if(work==null) return;
         ProviderResult result;
         try { result=provider.refund(RefundCommand.fromJson(text(work,"originalRequest"))); }
+        catch(ProviderRejectedException rejected) {
+            // Only an APPROVED refund reaches this call, so no earlier attempt used this key.
+            log.warn("Provider rejected the refund before acting; its amount is available again refundId={} intentId={} reason={}",refund,intent,rejected.getMessage());
+            result=new ProviderResult(null,"FAILED",null,"Provider rejected the request before creating a refund");
+        }
         catch(RuntimeException failure) {
             log.warn("Refund submission outcome uncertain; recovery will reuse the saved request refundId={} intentId={}",refund,intent,failure);
             result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request");
@@ -115,7 +143,7 @@ public class BillingRefundService {
             // Checked before the terminal shortcuts so nothing is silently consumed; the caller's rollback retains the evidence.
             if(result.state()==null || !RECORDABLE.contains(result.state())) throw BillingProblem.conflict("Refund evidence requires finance review");
             if("REFUNDED".equals(row.get("status"))) {
-                if("FAILED".equals(result.state())) db.caseFor(intent,refund,"REFUND_LATER_FAILED",refund.toString());
+                if("FAILED".equals(result.state())) db.escalate(intent,refund,"REFUND_LATER_FAILED",refund.toString(),"The provider again reported that this refund failed");
                 return null;
             }
             // A provider failure is final, and provider events can arrive out of order: older pending or

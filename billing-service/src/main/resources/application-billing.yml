@@ -12,6 +12,10 @@ spring:
       ddl-auto: none
   cache:
     type: none
+  jdbc:
+    template:
+      # Bounds statements outside transactions. BillingStore transactions carry their own 10-second deadline.
+      query-timeout: 15s
 app:
   jwt:
     ttl-seconds: 900

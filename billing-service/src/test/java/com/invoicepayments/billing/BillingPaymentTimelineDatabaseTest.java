@@ -113,6 +113,12 @@ class BillingPaymentTimelineDatabaseTest {
     }
 
     @Test
+    void applicationStatementsOutsideTransactionsHaveAQueryTimeout() {
+        // Transactions carry their own deadline; this bounds every other statement of the configured app.
+        assertThat(jdbc.getQueryTimeout()).isEqualTo(15);
+    }
+
+    @Test
     void statusReadKeepsLatestHundredEventsTenantScopedAndFinancialStateUnchanged() throws Exception {
         Map<String, List<String>> before = snapshot();
         assertThat(before.get("journals")).isEmpty();

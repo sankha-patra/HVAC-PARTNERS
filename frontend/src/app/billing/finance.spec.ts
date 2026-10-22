@@ -152,6 +152,41 @@ describe('Finance cases', () => {
     expect(component.uncertainApprovals()).toEqual([refund.id]);
   });
 
+  it('rejects a requested refund with a recorded reason and refreshes balances', () => {
+    initialize();
+    component.refunds.set([{ ...refund, canReject: true }]);
+    component.beginRefundRejection(refund.id);
+    expect(component.rejectingRefund()).toBe(refund.id);
+    component.refundRejectionNote = 'too short';
+    component.rejectRefund();
+    http.expectNone(`${base}/refunds/refund-a/reject`);
+    expect(component.actionError()).toContain('10 to 1000 characters');
+    component.refundRejectionNote = '  Customer withdrew the refund request  ';
+    component.rejectRefund();
+    const rejection = http.expectOne(`${base}/refunds/refund-a/reject`);
+    expect(rejection.request.method).toBe('POST');
+    expect(rejection.request.body).toEqual({ note: 'Customer withdrew the refund request' });
+    rejection.flush({ ...refund, status: 'REJECTED' });
+    refreshLists([{ ...refund, status: 'REJECTED', canReject: false }]);
+    expect(component.actionMessage()).toContain('No money moved');
+    expect(component.rejectingRefund()).toBeNull();
+    expect(component.refunds()[0].status).toBe('REJECTED');
+  });
+
+  it('offers rejection only when the server grants it and keeps the form after a conflict', () => {
+    initialize();
+    component.beginRefundRejection(refund.id);
+    expect(component.rejectingRefund()).toBeNull();
+    component.refunds.set([{ ...refund, canReject: true }]);
+    component.beginRefundRejection(refund.id);
+    component.refundRejectionNote = 'Customer withdrew the refund request';
+    component.rejectRefund();
+    http.expectOne(`${base}/refunds/refund-a/reject`).flush({ code: 'CONFLICT' }, { status: 409, statusText: 'Conflict' });
+    expect(component.actionError()).toContain('changed since it was loaded');
+    expect(component.rejectingRefund()).toBe(refund.id);
+    expect(component.actionMessage()).toBe('');
+  });
+
   it('only clears an unrecorded request when the server explicitly reports no refund was created', () => {
     initialize(); draft(); component.sendRefundRequest();
     http.expectOne(`${base}/intents/intent-a/refunds`).flush({ code: 'REFUND_UNAVAILABLE' }, { status: 409, statusText: 'Conflict' });

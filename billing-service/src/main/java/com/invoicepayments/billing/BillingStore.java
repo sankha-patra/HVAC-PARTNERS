@@ -17,10 +17,23 @@ import java.util.function.Supplier;
 public class BillingStore {
     public final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    // Every transaction is bounded. Spring cancels statements past the deadline; PostgreSQL stops waiting
+    // for a row lock, a slow statement, or a session that went idle inside a transaction while holding locks.
+    static final int TRANSACTION_TIMEOUT_SECONDS=10;
+    static final String LOCK_TIMEOUT="3s", STATEMENT_TIMEOUT="10s", IDLE_IN_TRANSACTION_TIMEOUT="20s";
     public BillingStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
         this.jdbc=jdbc; this.transaction=new TransactionTemplate(manager);
+        transaction.setTimeout(TRANSACTION_TIMEOUT_SECONDS);
     }
-    public <T> T tx(Supplier<T> action) { return transaction.execute(s -> action.get()); }
+    public <T> T tx(Supplier<T> action) {
+        boolean outermost=!TransactionSynchronizationManager.isActualTransactionActive();
+        return transaction.execute(s -> {
+            // is_local=true works like SET LOCAL: the limits end with this transaction and never stay on a pooled connection.
+            if(outermost) jdbc.queryForList("SELECT set_config('lock_timeout',?,true),set_config('statement_timeout',?,true),set_config('idle_in_transaction_session_timeout',?,true)",
+                LOCK_TIMEOUT,STATEMENT_TIMEOUT,IDLE_IN_TRANSACTION_TIMEOUT);
+            return action.get();
+        });
+    }
     public static void requireNoTransaction() {
         // REQUIRED blocks below must commit before provider IO. Suspending an outer
         // transaction would still leave its connection borrowed while the provider waits.
@@ -29,6 +42,27 @@ public class BillingStore {
             throw new IllegalTransactionStateException("Payment orchestration must run outside an existing transaction");
         }
     }
+    /**
+     * True when retrying later can succeed: a lock, statement or transaction timeout, a deadlock or
+     * serialization failure, or a lost or refused connection. Such a failure is not evidence of anything.
+     */
+    public static boolean isTransient(Throwable failure) {
+        int depth=0;
+        for(Throwable cause=failure; cause!=null && depth++<20; cause=cause.getCause()) {
+            if(cause instanceof org.springframework.dao.TransientDataAccessException
+                || cause instanceof org.springframework.dao.RecoverableDataAccessException
+                || cause instanceof org.springframework.jdbc.CannotGetJdbcConnectionException
+                || cause instanceof org.springframework.transaction.TransactionTimedOutException
+                || cause instanceof org.springframework.transaction.CannotCreateTransactionException) return true;
+            if(cause instanceof java.sql.SQLException sql && sql.getSQLState()!=null) {
+                String state=sql.getSQLState();
+                if(state.startsWith("08") || TRANSIENT_STATES.contains(state)) return true;
+            }
+        }
+        return false;
+    }
+    // Serialization failure, deadlock, lock timeout, statement cancelled or timed out, server shutdown, too many connections.
+    private static final Set<String> TRANSIENT_STATES=Set.of("40001","40P01","55P03","57014","57P01","53300");
     public int update(String sql,Object... args) { return jdbc.update(sql,args); }
     public List<Map<String,Object>> rows(String sql,Object... args) {
         return jdbc.query(sql,(rs,n) -> {
@@ -73,7 +107,11 @@ public class BillingStore {
         update("INSERT INTO billing.outbox(id,aggregate_id,type,payload) VALUES(?,?,?,?::jsonb)",event,intentId,type,payload.toString());
     }
     public void caseFor(UUID intent,String reason,String reference) { caseFor(intent,null,reason,reference); }
-    /** Informational case: recorded once per reason and reference. */
+    /**
+     * One-time case: recorded once per reason and reference and never reopened. Use it only for an event
+     * that cannot recur (one webhook, one late capture, one ACH return). A problem that can happen again
+     * uses escalate(), so a case that staff closed reopens with an audit entry instead of hiding it.
+     */
     public void caseFor(UUID intent,UUID refund,String reason,String reference) {
         update("""
             INSERT INTO billing.cases(id,merchant_id,intent_id,refund_id,reason,reference)
@@ -81,7 +119,7 @@ public class BillingStore {
             WHERE i.id=? ON CONFLICT(reason,reference) DO NOTHING
             """,UUID.randomUUID(),refund,reason,reference,intent);
     }
-    /** Stuck-operation case: opened once, and reopened with an audit entry if the problem recurs after resolution. */
+    /** Recurring-problem case: opened once, and reopened with an audit entry if the problem recurs after resolution. */
     public void escalate(UUID intent,UUID refund,String reason,String reference,String note) {
         var changed=rows("""
             INSERT INTO billing.cases(id,merchant_id,intent_id,refund_id,reason,reference)

@@ -91,7 +91,15 @@ interface SavedRefundRequest {
             @for (refund of refunds(); track refund.id) { <tr><th scope="row" class="reference">{{ refund.id }}<p>{{ refund.intentId }}</p></th><td>{{ refund.amountMinor / 100 | currency:'USD' }}</td>
               <td class="reason-cell">{{ refund.reason }}</td><td>{{ refund.requestedBy }}</td><td>{{ refund.approvedBy || 'Not recorded' }}</td><td>{{ refund.status }}<p class="muted">{{ refund.provider || 'Provider not reported' }}</p></td>
               <td>@if (refund.canApprove === true) { <button mat-stroked-button (click)="approveRefund(refund.id)" [disabled]="actionBusy() || !!storageError() || uncertainApprovals().includes(refund.id)">Approve refund</button> }
-              @else { <span class="muted">No approval action available</span> }</td></tr> }
+              @if (refund.canReject === true) { <button mat-button (click)="beginRefundRejection(refund.id)" [disabled]="actionBusy()">Reject request</button> }
+              @if (refund.canApprove !== true && refund.canReject !== true) { <span class="muted">No approval action available</span> }</td></tr>
+              @if (rejectingRefund() === refund.id) { <tr><td colspan="7">
+                <mat-form-field appearance="outline" class="refund-reason"><mat-label>Why is this refund rejected?</mat-label>
+                  <textarea matInput [(ngModel)]="refundRejectionNote" maxlength="1000" rows="2" [disabled]="actionBusy()"></textarea>
+                </mat-form-field>
+                <div class="actions"><button mat-flat-button (click)="rejectRefund()" [disabled]="actionBusy()">Reject refund request</button>
+                  <button mat-button (click)="cancelRefundRejection()" [disabled]="actionBusy()">Cancel</button></div>
+              </td></tr> } }
           </tbody></table></div> }
         }
       </mat-card-content></mat-card>
@@ -181,9 +189,11 @@ export class FinanceComponent implements OnInit, OnDestroy {
   readonly caseMessage = signal('');
   readonly historyFor = signal<string | null>(null);
   readonly history = signal<CaseAction[]>([]);
+  readonly rejectingRefund = signal<string | null>(null);
   private recoveryBlocked = false;
   refundAmount = '';
   refundReason = '';
+  refundRejectionNote = '';
   caseNote = '';
   caseReference = '';
 
@@ -397,6 +407,41 @@ export class FinanceComponent implements OnInit, OnDestroy {
       error: () => {
         this.actionBusy.set(false);
         this.actionError.set('Approval has no confirmed response. Refresh refunds to recover the server status; do not infer that money was returned.');
+      }
+    });
+  }
+
+  beginRefundRejection(id: string) {
+    if (this.actionBusy() || this.refunds().find(row => row.id === id)?.canReject !== true) return;
+    this.rejectingRefund.set(id); this.refundRejectionNote = '';
+    this.actionError.set(''); this.actionMessage.set('');
+  }
+
+  cancelRefundRejection() {
+    if (!this.actionBusy()) this.rejectingRefund.set(null);
+  }
+
+  rejectRefund() {
+    const id = this.rejectingRefund();
+    if (!id || this.actionBusy()) return;
+    const note = this.refundRejectionNote.trim();
+    if (note.length < 10 || note.length > 1000) { this.actionError.set('Record why the refund is rejected, in 10 to 1000 characters.'); return; }
+    this.actionBusy.set(true); this.actionError.set(''); this.actionMessage.set('');
+    this.api.rejectRefund(id, { note }).pipe(takeUntil(this.destroyed)).subscribe({
+      next: result => {
+        this.actionBusy.set(false);
+        if (result.id !== id) { this.actionError.set('The rejection response could not be matched. Refresh refunds before taking another action.'); return; }
+        this.rejectingRefund.set(null);
+        this.refunds.update(rows => rows.map(row => row.id === id ? { ...row, ...result, canApprove: false, canReject: false } : row));
+        this.actionMessage.set('Refund request rejected. No money moved, and its amount is available to refund again.');
+        this.loadRefunds(); this.loadPayments();
+      },
+      error: failure => {
+        this.actionBusy.set(false);
+        this.actionError.set(failure.status === 403 ? 'Rejecting needs the requester or a refund approver for this merchant.'
+          : failure.status === 409 ? 'The refund changed since it was loaded. Refresh refunds before acting again.'
+          : failure.status === 400 ? 'The server rejected the input. Record why the refund is rejected, in 10 to 1000 characters.'
+          : 'The rejection has no confirmed response. Refresh refunds to see the recorded status.');
       }
     });
   }

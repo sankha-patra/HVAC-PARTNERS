@@ -116,9 +116,13 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     @Override public ProviderResult submit(ProviderCommand command) {
-        ProviderValidation.payment(command);
-        if (command.amountMinor() < 50) throw new IllegalArgumentException("Stripe USD payments must be at least 50 cents");
-        validateReturnUrl(command.returnUrl());
+        try {
+            ProviderValidation.payment(command);
+            if (command.amountMinor() < 50) throw new IllegalArgumentException("Stripe USD payments must be at least 50 cents");
+            validateReturnUrl(command.returnUrl());
+        } catch (IllegalArgumentException invalid) {
+            throw new ProviderRejectedException("Payment request is invalid and was not sent: " + invalid.getMessage());
+        }
         Map<String, String> form = new LinkedHashMap<>();
         form.put("mode", "payment");
         form.put("ui_mode", "hosted_page");
@@ -163,8 +167,12 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     @Override public ProviderResult refund(RefundCommand command) {
-        ProviderValidation.refund(command);
-        if (!validId(command.providerPaymentId(), "cs_test_")) throw new IllegalArgumentException("A Stripe test Checkout Session is required");
+        try {
+            ProviderValidation.refund(command);
+            if (!validId(command.providerPaymentId(), "cs_test_")) throw new IllegalArgumentException("A Stripe test Checkout Session is required");
+        } catch (IllegalArgumentException invalid) {
+            throw new ProviderRejectedException("Refund request is invalid and was not sent: " + invalid.getMessage());
+        }
         JSONObject session = request("GET", "/v1/checkout/sessions/" + command.providerPaymentId(), null, null);
         String paymentIntentId;
         try {
@@ -178,6 +186,8 @@ public final class StripeBillingProvider implements BillingProvider {
                     || amount(paymentIntent, "amount_received") != amount(session, "amount_total")) {
                 throw new IllegalArgumentException();
             }
+        } catch (ProviderRejectedException ex) {
+            throw ex; // Refused before the refund POST: nothing was performed.
         } catch (RuntimeException ex) {
             throw new ProviderUncertainException("Original captured Stripe payment could not be confirmed");
         }
@@ -397,6 +407,9 @@ public final class StripeBillingProvider implements BillingProvider {
         try {
             Response response = transport.send(builder.build());
             if (response.status() < 200 || response.status() >= 300) {
+                if (notPerformed(response)) {
+                    throw new ProviderRejectedException("Stripe rejected this operation (HTTP " + response.status() + "); it was not performed");
+                }
                 throw new ProviderUncertainException("Stripe did not confirm this operation (HTTP " + response.status() + "); reconcile before retrying");
             }
             return new JSONObject(response.body());
@@ -409,6 +422,20 @@ public final class StripeBillingProvider implements BillingProvider {
             throw ex;
         } catch (RuntimeException ex) {
             throw new ProviderUncertainException("Stripe response could not be verified; acceptance is unknown");
+        }
+    }
+
+    /**
+     * Stripe performs nothing on an authentication, permission or request-validation error. A key reused
+     * with other parameters (idempotency_error), a conflict, a rate limit or a server error proves nothing.
+     */
+    private static boolean notPerformed(Response response) {
+        if (response.status() == 401 || response.status() == 403) return true;
+        if (response.status() != 400) return false;
+        try {
+            return "invalid_request_error".equals(new JSONObject(response.body()).getJSONObject("error").optString("type"));
+        } catch (RuntimeException unreadable) {
+            return false;
         }
     }
 

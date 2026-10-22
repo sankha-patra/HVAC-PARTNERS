@@ -56,27 +56,41 @@ public class BillingInbox {
                 payments.recordResult(intent,null,new ProviderResult(event.getString("providerId"),state,null,"Authenticated provider event"));
             }
             db.update("UPDATE billing.webhook_inbox SET state='PROCESSED',last_error=NULL WHERE provider=? AND event_id=?",provider,eventId);
+            // Evidence that applies on a later attempt closes the review case an earlier failure opened.
+            db.resolveCases(provider+":"+eventId,"WEBHOOK_REQUIRES_REVIEW","WEBHOOK_REQUIRES_REVIEW","system","PROVIDER_EVIDENCE","AUTO_RESOLVED",
+                "Webhook evidence was applied on a later attempt");
             return null;
         }); } catch(RuntimeException failure) {
-            long attempts;
-            try {
-                attempts=db.tx(() -> {
-                    var updated=db.rows("UPDATE billing.webhook_inbox SET state='UNMATCHED',attempts=attempts+1,next_attempt_at=NOW()+INTERVAL '30 seconds',last_error='Evidence requires matching or finance review' WHERE provider=? AND event_id=? AND state<>'PROCESSED' RETURNING attempts",provider,eventId);
-                    var payload=db.one("SELECT payload::text AS payload,merchant_id FROM billing.webhook_inbox WHERE provider=? AND event_id=?",provider,eventId);
-                    try { UUID intent=id(new JSONObject(text(payload,"payload")).getString("intentId"));
-                        if(db.exists("SELECT 1 FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id WHERE i.id=? AND a.merchant_id=?",intent,id(payload.get("merchantId")))) db.caseFor(intent,"WEBHOOK_REQUIRES_REVIEW",provider+":"+eventId);
-                    } catch(BillingProblem ignored) { /* Unknown events remain durably visible in the finance inbox. */ }
-                    return updated.isEmpty()?0L:amount(updated.get(0),"attempts");
-                });
-            } catch(RuntimeException unrecorded) { unrecorded.addSuppressed(failure); throw unrecorded; }
-            logUnmatched(provider,eventId,attempts,failure);
+            Failure outcome;
+            try { outcome=db.tx(() -> recordFailure(provider,eventId,failure)); }
+            catch(RuntimeException unrecorded) { unrecorded.addSuppressed(failure); throw unrecorded; }
+            if(outcome!=null) logFailure(provider,eventId,outcome,failure);
         }
     }
-    /** First failure at WARN; the 30-second retries repeat at DEBUG. Expected evidence mismatches need no stack trace. */
-    private static void logUnmatched(String provider,String eventId,long attempts,RuntimeException failure) {
+    /** After this many temporary failures in a row, the event is shown to finance as unmatched. */
+    static final int TEMPORARY_RETRIES=10;
+    private record Failure(long attempts,boolean temporary,boolean firstReport) {}
+    /** A temporary failure keeps the event queued without a case; any other failure makes it UNMATCHED for finance review. */
+    private Failure recordFailure(String provider,String eventId,RuntimeException failure) {
+        var rows=db.rows("SELECT state,attempts,payload::text AS payload,merchant_id FROM billing.webhook_inbox WHERE provider=? AND event_id=? AND state<>'PROCESSED' FOR UPDATE",provider,eventId);
+        if(rows.isEmpty()) return null;
+        var row=rows.get(0); long attempts=amount(row,"attempts")+1;
+        if(isTransient(failure) && attempts<TEMPORARY_RETRIES) {
+            db.update("UPDATE billing.webhook_inbox SET attempts=?,next_attempt_at=NOW()+INTERVAL '10 seconds',last_error='Temporary failure; will retry' WHERE provider=? AND event_id=?",attempts,provider,eventId);
+            return new Failure(attempts,true,attempts==1);
+        }
+        db.update("UPDATE billing.webhook_inbox SET state='UNMATCHED',attempts=?,next_attempt_at=NOW()+INTERVAL '30 seconds',last_error='Evidence requires matching or finance review' WHERE provider=? AND event_id=?",attempts,provider,eventId);
+        try { UUID intent=id(new JSONObject(text(row,"payload")).getString("intentId"));
+            if(db.exists("SELECT 1 FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id WHERE i.id=? AND a.merchant_id=?",intent,id(row.get("merchantId")))) db.caseFor(intent,"WEBHOOK_REQUIRES_REVIEW",provider+":"+eventId);
+        } catch(BillingProblem ignored) { /* Unknown events remain durably visible in the finance inbox. */ }
+        return new Failure(attempts,false,!"UNMATCHED".equals(row.get("state")));
+    }
+    /** The first report of a failure is a warning; repeats on retry are DEBUG. Expected evidence mismatches need no stack trace. */
+    private static void logFailure(String provider,String eventId,Failure outcome,RuntimeException failure) {
         String reason=failure.getClass().getSimpleName()+": "+failure.getMessage();
-        Object[] args=failure instanceof BillingProblem ? new Object[]{provider,eventId,attempts,reason} : new Object[]{provider,eventId,attempts,reason,failure};
-        String message="Webhook event kept for retry and finance review provider={} eventId={} attempts={} reason={}";
-        if(attempts==1) log.warn(message,args); else log.debug(message,args);
+        Object[] args=failure instanceof BillingProblem ? new Object[]{provider,eventId,outcome.attempts(),reason} : new Object[]{provider,eventId,outcome.attempts(),reason,failure};
+        String message=outcome.temporary() ? "Webhook event hit a temporary failure; will retry provider={} eventId={} attempts={} reason={}"
+            : "Webhook event kept for retry and finance review provider={} eventId={} attempts={} reason={}";
+        if(outcome.firstReport()) log.warn(message,args); else log.debug(message,args);
     }
 }
