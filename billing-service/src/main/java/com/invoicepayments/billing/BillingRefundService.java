@@ -93,8 +93,8 @@ public class BillingRefundService {
             // Save the exact request, its provider format and its age before provider I/O.
             // A crash or lost response can then replay this request, never a different one.
             db.update("""
-                UPDATE billing.refunds SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',
-                  next_recovery_at=NOW()+INTERVAL '45 seconds',original_request=?::jsonb,request_version=?,submitted_at=NOW(),updated_at=NOW()
+                UPDATE billing.refunds SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',
+                  next_recovery_at=NOW()+INTERVAL '120 seconds',original_request=?::jsonb,request_version=?,submitted_at=NOW(),updated_at=NOW()
                 WHERE id=?
                 """,token,command.toJson(),provider.refundRequestVersion(),refund);
             db.event(intent,"REFUND_SUBMITTING","Refund submission prepared; provider acceptance is not yet known");
@@ -116,17 +116,31 @@ public class BillingRefundService {
     }
     static String operationKey(UUID refund) { return "refund_"+refund; }
     static final Set<String> RECORDABLE=Set.of("REFUNDED","FAILED","PROCESSING","UNKNOWN","REQUIRES_ACTION");
+    /** Fences out recovery while a release asks the provider to prove there is no refund. Refused while recovery is calling it. */
+    Map<String,Object> leaseForRelease(UUID refund,UUID token) {
+        if(db.update("UPDATE billing.refunds SET lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds' WHERE id=? AND (lease_until IS NULL OR lease_until<NOW())",token,refund)==0)
+            throw BillingProblem.conflict("Recovery is checking this refund with the provider right now. Try the release again in two minutes");
+        return db.one("SELECT r.*,i.provider_id AS payment_provider_id FROM billing.refunds r JOIN billing.intents i ON i.id=r.intent_id WHERE r.id=?",refund);
+    }
+    /** The exact refund request saved before the first provider call, or, for legacy refunds, its identity. */
+    RefundCommand savedCommand(Map<String,Object> claim) {
+        if(claim.get("originalRequest")!=null) return RefundCommand.fromJson(text(claim,"originalRequest"));
+        UUID refund=id(claim.get("id"));
+        return new RefundCommand(refund.toString(),text(claim,"intentId"),text(claim,"paymentProviderId"),operationKey(refund),amount(claim,"amountMinor"),"USD");
+    }
     /**
-     * Approved case release: two employees confirmed the provider never created this refund.
-     * Fences out in-flight recovery and frees the refund capacity. If the provider later
-     * reports the refund, record() still posts it, or raises a case if capacity was reused.
+     * Approved case release, after the provider showed no refund with this ID and replay is no longer possible.
+     * The lease taken by leaseForRelease fences the release. If the provider later reports the refund, record()
+     * still posts it, or raises a case if capacity was reused.
      * RELEASED, not FAILED: a staff release is not provider evidence that the refund failed.
      */
-    void releaseUnconfirmed(UUID refund,String message) {
+    void releaseUnconfirmed(UUID refund,UUID fence,String message) {
         UUID intent=id(raw(refund).get("intentId"));
         db.tx(() -> {
             payments.locked(intent);
             var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
+            if(!fence.toString().equals(text(row,"leaseToken")))
+                throw BillingProblem.conflict("Another process took over this refund during the release check; nothing was released. Try again");
             if(!Set.of("SUBMITTING","UNKNOWN").contains(text(row,"status"))) throw BillingProblem.conflict("This refund is no longer unresolved; refresh the case");
             db.update("UPDATE billing.refunds SET status='RELEASED',lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",refund);
             db.event(intent,"REFUND_RELEASED",message);
@@ -137,7 +151,9 @@ public class BillingRefundService {
         UUID intent=id(raw(refund).get("intentId"));
         db.tx(() -> {
             var payment=payments.locked(intent); var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
-            if(fence!=null && !fence.toString().equals(text(row,"leaseToken"))) return null;
+            boolean owner=fence==null || fence.toString().equals(text(row,"leaseToken"));
+            // A superseded worker's uncertain answer is dropped; a refund the provider made or definitively failed is still recorded.
+            if(!owner && !Set.of("REFUNDED","FAILED").contains(result.state())) return null;
             if(result.providerId()!=null && row.get("providerId")!=null && !result.providerId().equals(row.get("providerId"))) throw BillingProblem.conflict("Refund identity mismatch");
             // REVIEW (contradictory signed evidence) and unrecognised states never change status, money or capacity.
             // Checked before the terminal shortcuts so nothing is silently consumed; the caller's rollback retains the evidence.
@@ -177,7 +193,9 @@ public class BillingRefundService {
                 db.publish(payment,"PAYMENT_REFUNDED",refund,minor);
             }
             String state="REQUIRES_ACTION".equals(result.state()) ? "UNKNOWN" : result.state();
-            db.update("UPDATE billing.refunds SET status=?,provider_id=COALESCE(provider_id,?),lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",state,result.providerId(),refund);
+            // Only the lease owner returns the lease; a superseded worker leaves the current owner's lease alone.
+            if(owner) db.update("UPDATE billing.refunds SET status=?,provider_id=COALESCE(provider_id,?),lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",state,result.providerId(),refund);
+            else db.update("UPDATE billing.refunds SET status=?,provider_id=COALESCE(provider_id,?),updated_at=NOW() WHERE id=?",state,result.providerId(),refund);
             // Provider evidence that ends the uncertainty also closes the stuck-refund cases it explains.
             if(!"UNKNOWN".equals(state))
                 db.resolveCases(refund.toString(),"REFUND_UNRESOLVED","REFUND_REPLAY_UNSAFE","system","PROVIDER_EVIDENCE","AUTO_RESOLVED",

@@ -16,6 +16,7 @@ import static com.invoicepayments.billing.BillingStore.*;
 @Service
 @Profile("billing")
 public class BillingCaseService {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(BillingCaseService.class);
     static final Set<String> PAYMENT_STUCK=Set.of("PAYMENT_UNRESOLVED","PAYMENT_REPLAY_UNSAFE");
     static final Set<String> REFUND_STUCK=Set.of("REFUND_UNRESOLVED","REFUND_REPLAY_UNSAFE");
     private final BillingStore db; private final BillingService payments; private final BillingRefundService refunds; private final BillingProvider provider;
@@ -40,9 +41,10 @@ public class BillingCaseService {
             boolean open="OPEN".equals(row.get("status")), unresolved=unresolved(row);
             boolean stuck=PAYMENT_STUCK.contains(text(row,"reason")) || REFUND_STUCK.contains(text(row,"reason"));
             boolean pending=row.get("releaseRequestedBy")!=null;
+            boolean releasable=open && unresolved && !replayPossible(row);
             row.put("canVerifyReference",open && stuck && unresolved && maker);
-            row.put("canRequestRelease",open && stuck && unresolved && maker && !pending);
-            row.put("canApproveRelease",open && unresolved && pending && checker && !user.equals(row.get("releaseRequestedBy")));
+            row.put("canRequestRelease",releasable && stuck && maker && !pending);
+            row.put("canApproveRelease",releasable && pending && checker && !user.equals(row.get("releaseRequestedBy")));
             row.put("canClose",open && !unresolved && maker);
             row.remove("merchantId");
         }
@@ -121,26 +123,57 @@ public class BillingCaseService {
         });
     }
 
-    /** Checker step: a different authorized approver confirms; reservations or refund capacity are released. */
+    /**
+     * Checker step: a different authorized approver confirms. Before anything is released, the provider must prove
+     * the operation does not exist and cannot appear: an open payment page is expired first. The operation's lease
+     * keeps recovery from replaying it during that check, and fences the release itself.
+     */
     public Map<String,Object> approveRelease(String user,UUID caseId) {
+        requireNoTransaction(); // provider I/O happens between two short transactions
         var item=visible(user,caseId);
-        return db.tx(() -> {
-            var locked=lock(item); requireRole(user,locked,"REFUND_APPROVER"); requireOpen(locked);
-            if(locked.get("releaseRequestedBy")==null) throw BillingProblem.conflict("No release request is waiting for approval");
-            if(user.equals(locked.get("releaseRequestedBy"))) throw new BillingProblem(403,"SEPARATION_OF_DUTIES","The requester cannot approve their own release");
-            requireReleasable(locked);
-            String reason=text(locked,"reason"), note=text(locked,"releaseNote");
-            if(PAYMENT_STUCK.contains(reason)) {
-                payments.releaseUnresolved(id(locked.get("intentId")),
-                    "Two authorized employees confirmed that the provider has no payment; invoice reservations released. Later provider evidence is still recorded.");
-                db.resolveCases(text(locked,"intentId"),"PAYMENT_UNRESOLVED","PAYMENT_REPLAY_UNSAFE",user,"RELEASED_NO_PROVIDER_OPERATION","APPROVED_RELEASE",note);
+        boolean payment=PAYMENT_STUCK.contains(text(item,"reason"));
+        UUID intent=id(item.get("intentId")), token=UUID.randomUUID();
+        var claim=db.tx(() -> {
+            var locked=lock(item); requireApprovable(user,locked);
+            return payment ? payments.leaseForRelease(intent,token) : refunds.leaseForRelease(id(locked.get("refundId")),token);
+        });
+        ProviderResult proof;
+        try {
+            proof=payment ? provider.closePayment(payments.savedCommand(claim),text(claim,"requestVersion"),payments.preparedAt(claim),text(claim,"providerId"))
+                : provider.findRefund(refunds.savedCommand(claim),text(claim,"providerId"));
+        } catch(RuntimeException failure) {
+            log.warn("Release check got no definite answer from the provider caseId={}",caseId,failure);
+            proof=new ProviderResult(null,"UNKNOWN",null,"The provider check gave no definite answer");
+        }
+        if("ABSENT".equals(proof.state())) return db.tx(() -> {
+            var locked=lock(item); requireApprovable(user,locked);
+            String note=text(locked,"releaseNote");
+            if(payment) {
+                payments.releaseUnresolved(intent,token,
+                    "Two authorized employees approved the release after the provider confirmed it has no payment and can take none; invoice reservations released.");
+                db.resolveCases(intent.toString(),"PAYMENT_UNRESOLVED","PAYMENT_REPLAY_UNSAFE",user,"RELEASED_NO_PROVIDER_OPERATION","APPROVED_RELEASE",note);
             } else {
-                refunds.releaseUnconfirmed(id(locked.get("refundId")),
-                    "Two authorized employees confirmed that the provider has no refund; refund capacity released. Later provider evidence is still recorded.");
+                refunds.releaseUnconfirmed(id(locked.get("refundId")),token,
+                    "Two authorized employees approved the release after the provider showed no such refund; refund capacity released.");
                 db.resolveCases(text(locked,"refundId"),"REFUND_UNRESOLVED","REFUND_REPLAY_UNSAFE",user,"RELEASED_NO_PROVIDER_OPERATION","APPROVED_RELEASE",note);
             }
             return view(caseId);
         });
+        // The provider has the operation, or could not prove it does not. Record its answer, which also returns the lease.
+        ProviderResult answer=proof;
+        db.tx(() -> {
+            if(payment) payments.recordResult(intent,token,answer); else refunds.record(id(item.get("refundId")),token,answer);
+            return null;
+        });
+        if("UNKNOWN".equals(proof.state()))
+            throw new BillingProblem(409,"PROVIDER_ABSENCE_NOT_CONFIRMED","The provider could not confirm that nothing exists, so nothing was released. Try again later or attach the provider reference.");
+        throw new BillingProblem(409,"PROVIDER_HAS_OPERATION","The provider has this "+(payment?"payment":"refund")+" (status "+proof.state()+"), so nothing was released. Its status was recorded.");
+    }
+    private void requireApprovable(String user,Map<String,Object> locked) {
+        requireRole(user,locked,"REFUND_APPROVER"); requireOpen(locked);
+        if(locked.get("releaseRequestedBy")==null) throw BillingProblem.conflict("No release request is waiting for approval");
+        if(user.equals(locked.get("releaseRequestedBy"))) throw new BillingProblem(403,"SEPARATION_OF_DUTIES","The requester cannot approve their own release");
+        requireReleasable(locked);
     }
 
     public Map<String,Object> rejectRelease(String user,UUID caseId,String note) {
@@ -200,6 +233,12 @@ public class BillingCaseService {
         if(!PAYMENT_STUCK.contains(reason) && !REFUND_STUCK.contains(reason)) throw BillingProblem.conflict("Only a stuck payment or refund can be released");
         if(!unresolved(item)) throw BillingProblem.conflict("The payment or refund is no longer unresolved; refresh the case");
         if(PAYMENT_STUCK.contains(reason) && payments.hasCapture(id(item.get("intentId")))) throw BillingProblem.conflict("Capture evidence exists; this payment cannot be released");
+        if(replayPossible(item)) throw BillingProblem.conflict("Recovery can still settle this refund by replaying its saved request. A release is allowed only once replay is no longer possible.");
+    }
+    /** A stuck refund whose saved request recovery can still replay must not be released: the replay may still create it. */
+    private boolean replayPossible(Map<String,Object> item) {
+        return "REFUND_UNRESOLVED".equals(text(item,"reason"))
+            && db.exists("SELECT 1 FROM billing.refunds WHERE id=? AND original_request IS NOT NULL",id(item.get("refundId")));
     }
     private static void requireOpen(Map<String,Object> item) {
         if(!"OPEN".equals(item.get("status"))) throw BillingProblem.conflict("This case is already resolved");

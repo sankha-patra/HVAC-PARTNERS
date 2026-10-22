@@ -22,7 +22,7 @@ public class BillingRecovery {
                 """,Math.min(limit,20));
             for(var row:due) {
                 UUID token=UUID.randomUUID(); row.put("recoveryToken",token);
-                db.update("UPDATE billing.intents SET lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',next_recovery_at=NOW()+INTERVAL '45 seconds',recovery_count=recovery_count+1 WHERE id=?",token,id(row.get("id")));
+                db.update("UPDATE billing.intents SET lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds',recovery_count=recovery_count+1 WHERE id=?",token,id(row.get("id")));
             }
             return due;
         });
@@ -85,7 +85,7 @@ public class BillingRecovery {
         return db.tx(() -> {
             var due=db.rows("SELECT * FROM billing.refunds WHERE status IN ('APPROVED','SUBMITTING','PROCESSING','UNKNOWN') AND next_recovery_at<=NOW() AND (lease_until IS NULL OR lease_until<NOW()) ORDER BY next_recovery_at,id FOR UPDATE SKIP LOCKED LIMIT ?",Math.min(limit,20));
             for(var row:due) {UUID token=UUID.randomUUID();row.put("recoveryToken",token);
-                db.update("UPDATE billing.refunds SET lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',next_recovery_at=NOW()+INTERVAL '45 seconds',recovery_count=recovery_count+1 WHERE id=?",token,id(row.get("id")));}
+                db.update("UPDATE billing.refunds SET lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds',recovery_count=recovery_count+1 WHERE id=?",token,id(row.get("id")));}
             return due;
         });
     }

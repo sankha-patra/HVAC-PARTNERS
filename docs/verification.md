@@ -1,5 +1,50 @@
 # Verification of the extracted repository
 
+## Release proof, late evidence, transaction guard and remaining review risks — 22 October 2026
+
+Remaining risks from the 21 October review, fixed in order of money impact. Every new test
+failed first, then passed.
+
+1. **A released payment could still be paid (risk 1).** A release now asks the provider first.
+   Stripe expires the open Checkout Session (`POST .../expire`) and the release goes ahead
+   only if the session is then expired and unpaid. Without a session ID, every session
+   created in the 24-hour replay window is searched. If the provider has the payment, its
+   status is recorded instead (`PROVIDER_HAS_OPERATION`). If it cannot prove absence,
+   nothing is released (`PROVIDER_ABSENCE_NOT_CONFIRMED`).
+2. **A released refund could still be paid out (risk 2).** A refund whose saved request can
+   still be replayed cannot be released. Otherwise Stripe's refunds on the original payment
+   are listed, and the release goes ahead only if none carries this refund ID.
+3. **Release and recovery could act at once.** The release takes the operation's lease
+   before asking the provider, is refused while recovery holds it, and is fenced by it.
+4. **Late definitive evidence was discarded (risk 9).** A superseded worker's uncertain
+   answer is still dropped, but CAPTURED, FAILED, RETURNED, REFUNDED and refund FAILED are
+   booked, without taking the current owner's lease.
+5. **Transaction loophole.** `journal`, `publish`, `escalate`, `resolveCases` and
+   `caseAction` throw outside a transaction, like MANDATORY propagation.
+6. **Lease (risk 6).** 45 s → 120 s; the slowest provider sequence is about 40 s.
+7. **Lock order (risk 7).** Payment creation locked invoices in Java's signed UUID order.
+   A test showed creation already holding the second invoice while it waited for the first
+   (`could not obtain lock on row`). It now locks in PostgreSQL's order.
+8. **Saved Stripe 500 (risk 4).** Stripe returns a saved server error on every replay of
+   that key. Recovery now searches for the session or refund instead of replaying.
+9. **Smaller items.** Scheduled jobs use 4 threads instead of 1. A temporary database
+   failure leaves a settlement import RECEIVED for retry, with no false case. Unmatched
+   webhook retries back off from 30 s to at most 1 hour. Refused (403) finance requests
+   are written to `billing.denied_actions` (V16), which cannot be updated or deleted.
+
+The full Java suite passed **367 tests, with zero failures, errors or skips**
+(345 before, plus 22 new; batch 1 alone was 361). **47 frontend tests** passed,
+including the new release messages. The Java test log contained no `sk_test_`, `whsec_`
+or `Bearer` text. Simulator and Stripe adapter with a fake transport; no live Stripe call.
+
+Not fixed in code:
+- Risk 5 is only partly fixed. The application's database user still owns the audit tables,
+  so it could `TRUNCATE` them. That needs a separate migration user in deployment.
+- Risk 8 (two replicas) needs no change: claims use `SKIP LOCKED` or row locks, and
+  waits are bounded by the 3-second lock timeout.
+- Rotating the Stripe key makes saved requests unsafe to replay. This is deliberate
+  (fail closed), and the cases are released with provider proof.
+
 ## Error classes, reopening cases, refund rejection, JSON library and timeouts — 22 October 2026
 
 Five remaining review findings, fixed in order. Every new test below failed first

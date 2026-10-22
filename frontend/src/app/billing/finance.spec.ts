@@ -217,6 +217,18 @@ describe('Finance cases', () => {
     http.expectOne(`${base}/refunds`).flush([refund]);
   }
 
+  it('explains when the provider blocks a release, without calling it approved', () => {
+    initialize();
+    const pending: FinanceCase = { ...stuckCase, releaseRequestedBy: 'another-user', canApproveRelease: true };
+    for (const [code, text] of [['PROVIDER_HAS_OPERATION', 'nothing was released'], ['PROVIDER_ABSENCE_NOT_CONFIRMED', 'could not confirm']]) {
+      component.beginCaseAction(pending, 'approve-release');
+      component.submitCaseAction();
+      http.expectOne(`${base}/cases/case-a/release-approval`).flush({ code }, { status: 409, statusText: 'Conflict' });
+      expect(component.caseError()).toContain(text);
+      expect(component.caseMessage()).toBe('');
+    }
+  });
+
   it('offers a case action only when the server grants it to this user', () => {
     initialize();
     component.beginCaseAction(stuckCase, 'approve-release');

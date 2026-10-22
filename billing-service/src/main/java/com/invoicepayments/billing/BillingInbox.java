@@ -79,7 +79,9 @@ public class BillingInbox {
             db.update("UPDATE billing.webhook_inbox SET attempts=?,next_attempt_at=NOW()+INTERVAL '10 seconds',last_error='Temporary failure; will retry' WHERE provider=? AND event_id=?",attempts,provider,eventId);
             return new Failure(attempts,true,attempts==1);
         }
-        db.update("UPDATE billing.webhook_inbox SET state='UNMATCHED',attempts=?,next_attempt_at=NOW()+INTERVAL '30 seconds',last_error='Evidence requires matching or finance review' WHERE provider=? AND event_id=?",attempts,provider,eventId);
+        // Back off from 30 seconds, doubling to at most an hour: unmatched evidence waits for people, not for a tighter loop.
+        long delay=Math.min(3600,30L<<Math.min(attempts-1,7));
+        db.update("UPDATE billing.webhook_inbox SET state='UNMATCHED',attempts=?,next_attempt_at=NOW()+(? * INTERVAL '1 second'),last_error='Evidence requires matching or finance review' WHERE provider=? AND event_id=?",attempts,delay,provider,eventId);
         try { UUID intent=id(new JSONObject(text(row,"payload")).getString("intentId"));
             if(db.exists("SELECT 1 FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id WHERE i.id=? AND a.merchant_id=?",intent,id(row.get("merchantId")))) db.caseFor(intent,"WEBHOOK_REQUIRES_REVIEW",provider+":"+eventId);
         } catch(BillingProblem ignored) { /* Unknown events remain durably visible in the finance inbox. */ }

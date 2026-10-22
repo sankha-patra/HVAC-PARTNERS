@@ -109,9 +109,16 @@ class BillingFinancialDatabaseTest {
                 + timelineType + "' THEN RAISE EXCEPTION 'Injected deadlock' USING ERRCODE='40P01'; END IF; RETURN NEW; END $$");
         jdbc.execute("CREATE TRIGGER billing_test_transient_fault BEFORE INSERT ON billing.timeline FOR EACH ROW EXECUTE FUNCTION billing.test_transient_fault()");
     }
+    /** Every insert into this table fails with a deadlock (SQLSTATE 40P01). */
+    void injectTransientInsertFault(String table) {
+        jdbc.execute("CREATE FUNCTION billing.test_transient_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Injected deadlock' USING ERRCODE='40P01'; END $$");
+        jdbc.execute("CREATE TRIGGER billing_test_transient_insert BEFORE INSERT ON billing." + table + " FOR EACH ROW EXECUTE FUNCTION billing.test_transient_insert()");
+    }
     void removeTransientFault() {
         jdbc.execute("DROP TRIGGER IF EXISTS billing_test_transient_fault ON billing.timeline");
         jdbc.execute("DROP FUNCTION IF EXISTS billing.test_transient_fault()");
+        jdbc.execute("DROP TRIGGER IF EXISTS billing_test_transient_insert ON billing.settlement_reports");
+        jdbc.execute("DROP FUNCTION IF EXISTS billing.test_transient_insert()");
     }
 
     final List<Runnable> logCaptures = new ArrayList<>();
@@ -1689,6 +1696,192 @@ class BillingFinancialDatabaseTest {
         assertThat(payments.cancel(PAYER, intent).get("status")).isEqualTo("CANCELLED");
     }
 
+    // Risk 1: a payment release first makes the provider unable to take the payment, then proves nothing was paid.
+    @Test void paymentReleaseExpiresTheOpenProviderSessionFirst() {
+        var stuck = stuckPayment(true);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().requestRelease(FINANCE, caseId, "Provider dashboard has no completed payment");
+        stuck.cases().approveRelease(APPROVER, caseId);
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("FAILED"); assertInvoice(INVOICE, 0, 0);
+        assertThat(provider.lookup(BillingService.operationKey(stuck.intent()), null).state()).isEqualTo("FAILED");
+        assertThatThrownBy(() -> provider.simulateResult(stuck.intent().toString(), "CAPTURED")).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test void paymentReleaseRecordsTheProviderPaymentInsteadOfReleasing() {
+        var stuck = stuckPayment(true);
+        provider.simulateResult(stuck.intent().toString(), "CAPTURED");
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().requestRelease(FINANCE, caseId, "Provider dashboard has no completed payment");
+        assertThatThrownBy(() -> stuck.cases().approveRelease(APPROVER, caseId)).isInstanceOfSatisfying(BillingProblem.class,
+                problem -> assertThat(problem.code()).isEqualTo("PROVIDER_HAS_OPERATION"));
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("CAPTURED"); assertInvoice(INVOICE, 10000, 0);
+        assertThat(db.one("SELECT status,resolution FROM billing.cases WHERE id=?", caseId))
+                .containsEntry("status", "RESOLVED").containsEntry("resolution", "PROVIDER_EVIDENCE");
+    }
+
+    @Test void paymentReleaseIsRefusedWhenTheProviderCannotProveNothingExists() {
+        var stuck = stuckPayment(false);
+        BillingProvider unsure = new DelegateProvider(provider) {
+            @Override public ProviderResult closePayment(ProviderCommand c, String v, java.time.Instant p, String id) { throw new ProviderUncertainException("Provider unavailable"); }
+        };
+        var cases = new BillingCaseService(db, stuck.service(), refunds, unsure);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        cases.requestRelease(FINANCE, caseId, "Provider dashboard has no payment for this intent");
+        assertThatThrownBy(() -> cases.approveRelease(APPROVER, caseId)).isInstanceOfSatisfying(BillingProblem.class,
+                problem -> assertThat(problem.code()).isEqualTo("PROVIDER_ABSENCE_NOT_CONFIRMED"));
+        assertThat(stuck.service().raw(stuck.intent())).containsEntry("status", "UNKNOWN").containsEntry("leaseToken", null);
+        assertInvoice(INVOICE, 0, 10000);
+        assertThat(db.one("SELECT status,release_requested_by FROM billing.cases WHERE id=?", caseId))
+                .containsEntry("status", "OPEN").containsEntry("releaseRequestedBy", FINANCE);
+    }
+
+    @Test void releaseWaitsWhileARecoveryIsCheckingTheProvider() {
+        var stuck = stuckPayment(false);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().requestRelease(FINANCE, caseId, "Provider dashboard has no payment for this intent");
+        db.update("UPDATE billing.intents SET lease_token=?,lease_until=NOW()+INTERVAL '1 minute' WHERE id=?", UUID.randomUUID(), stuck.intent());
+        assertProblem(409, () -> stuck.cases().approveRelease(APPROVER, caseId));
+        assertInvoice(INVOICE, 0, 10000);
+        due(stuck.intent());
+        stuck.cases().approveRelease(APPROVER, caseId);
+        assertInvoice(INVOICE, 0, 0);
+    }
+
+    // Risk 2: a refund is released only once its replay is impossible, and only if the provider shows no such refund.
+    @Test void refundReleaseIsRefusedWhileItsSavedRequestCanStillBeReplayed() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        BillingProvider lost = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { throw new ProviderUncertainException("No response"); }
+        };
+        var service = service(lost, MERCHANT); var refundService = new BillingRefundService(db, service, lost);
+        refundService.approve(APPROVER, refund);
+        db.tx(() -> { db.escalate(intent, refund, "REFUND_UNRESOLVED", refund.toString(), "Five recovery attempts were inconclusive"); return null; });
+        var cases = new BillingCaseService(db, service, refundService, lost);
+        UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_UNRESOLVED' AND refund_id=?", refund).get("id"));
+        assertThat(cases.list(FINANCE)).filteredOn(row -> caseId.toString().equals(row.get("id"))).singleElement()
+                .satisfies(row -> assertThat(row.get("canRequestRelease")).isEqualTo(false));
+        assertProblem(409, () -> cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request"));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
+    }
+
+    @Test void refundReleaseRecordsTheProviderRefundInsteadOfFreeingItsAmount() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 6000);
+        BillingProvider lostThenUnsafe = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { delegate.refund(command); throw new ProviderUncertainException("Response lost after acceptance"); }
+            @Override public ProviderResult recoverRefund(RefundCommand c, String v, java.time.Instant p, String id) { throw new ProviderReplayUnsafeException("Replay window elapsed"); }
+        };
+        var service = service(lostThenUnsafe, MERCHANT); var refundService = new BillingRefundService(db, service, lostThenUnsafe);
+        refundService.approve(APPROVER, refund);
+        var worker = new BillingRecovery(db, service, refundService, lostThenUnsafe);
+        dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
+        UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
+        var cases = new BillingCaseService(db, service, refundService, lostThenUnsafe);
+        cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request");
+        assertThatThrownBy(() -> cases.approveRelease(APPROVER, caseId)).isInstanceOfSatisfying(BillingProblem.class,
+                problem -> assertThat(problem.code()).isEqualTo("PROVIDER_HAS_OPERATION"));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(amount(payments.raw(intent), "refundedMinor")).isEqualTo(6000);
+        assertProblem(409, () -> requestedRefund(intent, 6000));
+    }
+
+    // Risk 9: a superseded worker's uncertain answer is dropped, but its definitive answer is still booked.
+    @Test void definitivePaymentEvidenceFromASupersededWorkerIsStillRecorded() {
+        BillingProvider lost = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Response missing"); }
+        };
+        BillingService service = service(lost, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        UUID stale = UUID.randomUUID(), current = UUID.randomUUID();
+        db.update("UPDATE billing.intents SET lease_token=?,lease_until=NOW()+INTERVAL '1 minute' WHERE id=?", current, intent);
+        service.recordResult(intent, stale, new ProviderResult("sim_late_payment", "PROCESSING", null, "Stale pending answer"));
+        assertThat(service.raw(intent)).containsEntry("status", "UNKNOWN").containsEntry("leaseToken", current.toString());
+        service.recordResult(intent, stale, new ProviderResult("sim_late_payment", "CAPTURED", null, "Stale but definitive answer"));
+        assertThat(service.raw(intent)).containsEntry("status", "CAPTURED").containsEntry("leaseToken", current.toString());
+        assertInvoice(INVOICE, 10000, 0); assertThat(count("billing.journals")).isEqualTo(1);
+    }
+
+    @Test void definitiveRefundEvidenceFromASupersededWorkerIsStillRecorded() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        db.update("UPDATE billing.refunds SET status='UNKNOWN',approved_by=?,lease_token=?,lease_until=NOW()+INTERVAL '1 minute' WHERE id=?",
+                APPROVER, UUID.randomUUID(), refund);
+        refunds.record(refund, UUID.randomUUID(), new ProviderResult("re_late", "PROCESSING", null, "Stale pending answer"));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
+        refunds.record(refund, UUID.randomUUID(), new ProviderResult("re_late", "REFUNDED", null, "Stale but definitive answer"));
+        assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
+        assertThat(amount(payments.raw(intent), "refundedMinor")).isEqualTo(500);
+    }
+
+    // Transaction loophole: money, event and audit helpers refuse to run without a transaction (like MANDATORY propagation).
+    @Test void moneyEventAndAuditHelpersRefuseToRunOutsideATransaction() {
+        UUID intent = captured("CARD"); var payment = payments.raw(intent);
+        long outbox = count("billing.outbox"), journals = count("billing.journals");
+        for (Runnable write : List.<Runnable>of(
+                () -> db.publish(payment, "PAYMENT_CAPTURED"),
+                () -> db.journal(payment, "test:" + intent, "PROVIDER_CLEARING", "CUSTOMER_RECEIVABLES", 1),
+                () -> db.escalate(intent, null, "RECOVERY_EVIDENCE_MISMATCH", intent.toString(), "Outside a transaction"),
+                () -> db.resolveCases(intent.toString(), "PAYMENT_UNRESOLVED", "PAYMENT_REPLAY_UNSAFE", "system", "PROVIDER_EVIDENCE", "AUTO_RESOLVED", "Outside a transaction")))
+            assertThatThrownBy(write::run).isInstanceOf(org.springframework.transaction.IllegalTransactionStateException.class);
+        assertThat(count("billing.outbox")).isEqualTo(outbox); assertThat(count("billing.journals")).isEqualTo(journals);
+        assertThat(count("billing.cases")).isZero();
+    }
+
+    // Risk 6: leases outlast the slowest provider sequence (about 40 seconds) with margin.
+    @Test void leasesOutlastTheSlowestProviderSequenceWithMargin() {
+        var seconds = new java.util.concurrent.atomic.AtomicReference<Double>();
+        BillingProvider observing = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) {
+                seconds.set(jdbc.queryForObject("SELECT EXTRACT(EPOCH FROM lease_until-NOW()) FROM billing.intents WHERE id=?::uuid", Double.class, command.intentId()));
+                throw new ProviderUncertainException("Response lost");
+            }
+        };
+        BillingService service = service(observing, MERCHANT);
+        UUID intent = created("CARD"); service.submit(PAYER, intent);
+        assertThat(seconds.get()).isBetween(110.0, 121.0);
+        due(intent); new BillingRecovery(db, service, new BillingRefundService(db, service, observing), observing).claimPayments(1);
+        assertThat(jdbc.queryForObject("SELECT EXTRACT(EPOCH FROM lease_until-NOW()) FROM billing.intents WHERE id=?", Double.class, intent))
+                .isBetween(110.0, 121.0);
+    }
+
+    // Risk 7: creation locks invoices in PostgreSQL's order, the same order as every other path.
+    @Test void paymentCreationLocksInvoicesInTheSameOrderAsEveryOtherPath() throws Exception {
+        UUID low = UUID.fromString("7fffffff-0000-0000-0000-000000000001"), high = UUID.fromString("80000000-0000-0000-0000-000000000001");
+        invoice(low, ACCOUNT, 1000); invoice(high, ACCOUNT, 2000);
+        // Java compares these as signed numbers and puts high first; PostgreSQL puts low first.
+        assertThat(List.of(low, high).stream().sorted().toList()).containsExactly(high, low);
+        var pool = Executors.newSingleThreadExecutor();
+        try (Connection holder = jdbc.getDataSource().getConnection(); Connection probe = jdbc.getDataSource().getConnection()) {
+            holder.setAutoCommit(false); probe.setAutoCommit(false);
+            try (var lock = holder.prepareStatement("SELECT id FROM billing.invoices WHERE id=? FOR UPDATE")) { lock.setObject(1, low); lock.executeQuery(); }
+            var creating = pool.submit(() -> payments.create(PAYER, ACCOUNT, key(), List.of(high, low), "CARD"));
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(2)).until(() -> jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'", Long.class) > 0);
+            // The waiting creation must not already hold the other invoice: that is exactly what a lock-order deadlock needs.
+            try (var other = probe.prepareStatement("SELECT id FROM billing.invoices WHERE id=? FOR UPDATE NOWAIT")) { other.setObject(1, high); other.executeQuery(); }
+            probe.rollback(); holder.rollback();
+            assertThat(creating.get(5, TimeUnit.SECONDS).get("status")).isEqualTo("CREATED");
+        } finally { pool.shutdownNow(); }
+    }
+
+    @Test void temporaryDatabaseFailureLeavesASettlementImportForRetryWithoutAFinanceCase() {
+        UUID intent = captured("CARD");
+        var reconciler = reconciliation();
+        injectTransientInsertFault("settlement_reports");
+        var imported = reconciler.receive(FINANCE, report(intent, "temporary-failure-report", 10000, 125));
+        assertThat(imported.get("state")).isEqualTo("RECEIVED");
+        assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='SETTLEMENT_REPORT_MISMATCH'")).isFalse();
+        removeTransientFault();
+        reconciler.process(id(imported.get("id")));
+        assertThat(db.one("SELECT state FROM billing.reconciliation_imports WHERE id=?", id(imported.get("id"))).get("state")).isEqualTo("MATCHED");
+    }
+
+    @Test void unmatchedWebhookRetriesBackOffInsteadOfEveryThirtySecondsForever() {
+        UUID intent = submitted("CARD");
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_backoff", providerId(intent), intent.toString(), "CAPTURED", 1, "USD", null));
+        for (int attempt = 0; attempt < 3; attempt++) inbox.process("SIMULATOR", "evt_backoff");
+        assertThat(jdbc.queryForObject("SELECT EXTRACT(EPOCH FROM next_attempt_at-NOW()) FROM billing.webhook_inbox WHERE event_id='evt_backoff'", Double.class))
+                .isBetween(110.0, 121.0);
+    }
+
     @Test void verifiedRefundReferencePostsTheRefundOnce() {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
         BillingProvider lossy = new DelegateProvider(provider) {
@@ -1872,5 +2065,9 @@ class BillingFinancialDatabaseTest {
         @Override public ProviderResult verifyRefundReference(RefundCommand expected, String reference) {
             return delegate.verifyRefundReference(expected, reference);
         }
+        @Override public ProviderResult closePayment(ProviderCommand saved, String version, java.time.Instant preparedAt, String id) {
+            return delegate.closePayment(saved, version, preparedAt, id);
+        }
+        @Override public ProviderResult findRefund(RefundCommand saved, String id) { return delegate.findRefund(saved, id); }
     }
 }

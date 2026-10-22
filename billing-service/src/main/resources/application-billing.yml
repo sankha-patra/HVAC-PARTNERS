@@ -16,6 +16,12 @@ spring:
     template:
       # Bounds statements outside transactions. BillingStore transactions carry their own 10-second deadline.
       query-timeout: 15s
+  task:
+    scheduling:
+      # Inbox draining and expiry run on the scheduler thread; one slow job must not delay publishing or recovery.
+      pool:
+        size: 4
+      thread-name-prefix: billing-scheduler-
 app:
   jwt:
     ttl-seconds: 900

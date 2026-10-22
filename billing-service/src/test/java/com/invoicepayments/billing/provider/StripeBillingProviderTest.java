@@ -20,6 +20,7 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Flow;
 
 import static org.assertj.core.api.Assertions.*;
@@ -107,6 +108,101 @@ class StripeBillingProviderTest {
             assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderUncertainException.class)
                     .isNotInstanceOf(ProviderRejectedException.class);
         }
+    }
+
+    // A release must first make the session unpayable, then prove nothing was paid.
+    @Test void releaseCheckExpiresAnOpenSessionBeforeReportingNoPayment() {
+        transport.reply(session(null, "unpaid", "open"));
+        transport.reply(session(null, "unpaid", "expired"));
+        ProviderResult result = provider.closePayment(command("CARD", 12345), provider.paymentRequestVersion(), Instant.now(), SESSION);
+        assertThat(result.state()).isEqualTo("ABSENT");
+        assertThat(result.providerId()).isEqualTo(SESSION);
+        assertThat(transport.requests).extracting(r -> r.method() + " " + r.uri().getPath())
+                .containsExactly("GET /v1/checkout/sessions/" + SESSION, "POST /v1/checkout/sessions/" + SESSION + "/expire");
+    }
+
+    @Test void releaseCheckReportsAPaymentThatCompletedBeforeTheSessionCouldExpire() {
+        transport.reply(session(null, "unpaid", "open"));
+        transport.responses.add(new StripeBillingProvider.Response(400, "{\"error\":{\"type\":\"invalid_request_error\"}}"));
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(paymentIntent("succeeded", 12345));
+        ProviderResult result = provider.closePayment(command("CARD", 12345), provider.paymentRequestVersion(), Instant.now(), SESSION);
+        assertThat(result.state()).isEqualTo("CAPTURED");
+        assertThat(result.providerId()).isEqualTo(SESSION);
+    }
+
+    @Test void releaseCheckWithoutASessionIdSearchesTheWholeReplayWindow() {
+        Instant prepared = Instant.parse("2026-10-21T08:00:00Z");
+        transport.reply(list(true, otherSession("cs_test_other1")));
+        transport.reply(list(false));
+        ProviderResult result = provider.closePayment(command("CARD", 12345), provider.paymentRequestVersion(), prepared, null);
+        assertThat(result.state()).isEqualTo("ABSENT");
+        assertThat(transport.requests.get(0).uri().getRawQuery())
+                .contains("created%5Bgte%5D=" + prepared.minusSeconds(300).getEpochSecond())
+                .contains("created%5Blte%5D=" + prepared.plus(Duration.ofHours(24)).getEpochSecond());
+        assertThat(transport.requests.get(1).uri().getRawQuery()).contains("starting_after=cs_test_other1");
+        transport.requests.clear();
+        transport.reply(list(false, otherSession("cs_test_other2"), session(null, "unpaid", "open")));
+        transport.reply(session(null, "unpaid", "expired"));
+        assertThat(provider.closePayment(command("CARD", 12345), provider.paymentRequestVersion(), prepared, null))
+                .satisfies(found -> assertThat(found.state()).isEqualTo("ABSENT"))
+                .satisfies(found -> assertThat(found.providerId()).isEqualTo(SESSION));
+        assertThat(transport.requests).extracting(HttpRequest::method).containsExactly("GET", "POST");
+    }
+
+    @Test void releaseCheckGivesUpRatherThanClaimingAbsenceItCouldNotCheck() {
+        for (int page = 0; page < 8; page++) transport.reply(list(true, otherSession("cs_test_page" + page)));
+        assertThatThrownBy(() -> provider.closePayment(command("CARD", 12345), provider.paymentRequestVersion(), Instant.now(), null))
+                .isInstanceOf(ProviderUncertainException.class);
+        assertThat(transport.requests).hasSize(8);
+    }
+
+    @Test void refundReleaseCheckListsTheOriginalPaymentsRefunds() {
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(list(false, refund("succeeded")));
+        assertThat(provider.findRefund(refundCommand(), null).state()).isEqualTo("REFUNDED");
+        assertThat(transport.requests.get(1).uri().getRawQuery()).contains("payment_intent=" + PI);
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(list(false, refund("succeeded").put("id", "re_other").put("metadata", metadata(REFUND_KEY).put("refundId", UUID.randomUUID().toString()))));
+        assertThat(provider.findRefund(refundCommand(), null).state()).isEqualTo("ABSENT");
+    }
+
+    // Stripe saves a first server error with its idempotency key and repeats it on every replay: search instead.
+    @Test void replayThatKeepsGettingTheSavedServerErrorFindsTheSessionBySearching() {
+        Instant now = Instant.parse("2026-10-21T08:00:00Z");
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, Clock.fixed(now, ZoneOffset.UTC));
+        transport.responses.add(new StripeBillingProvider.Response(500, "{}"));
+        transport.reply(list(false, session(null, "unpaid", "open")));
+        transport.reply(session(null, "unpaid", "open"));
+        ProviderResult result = adapter.recoverPayment(command("CARD", 12345), adapter.paymentRequestVersion(), now.minusSeconds(60), null);
+        assertThat(result.state()).isEqualTo("REQUIRES_ACTION");
+        assertThat(result.providerId()).isEqualTo(SESSION);
+        assertThat(transport.requests).extracting(HttpRequest::method).containsExactly("POST", "GET", "GET");
+        transport.responses.add(new StripeBillingProvider.Response(500, "{}"));
+        transport.reply(list(false));
+        assertThatThrownBy(() -> adapter.recoverPayment(command("CARD", 12345), adapter.paymentRequestVersion(), now.minusSeconds(60), null))
+                .isInstanceOf(ProviderUncertainException.class);
+    }
+
+    @Test void refundReplayThatKeepsGettingTheSavedServerErrorFindsTheRefundBySearching() {
+        Instant now = Instant.parse("2026-10-21T08:00:00Z");
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, Clock.fixed(now, ZoneOffset.UTC));
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(paymentIntent("succeeded", 12345));
+        transport.responses.add(new StripeBillingProvider.Response(500, "{}"));
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(list(false, refund("succeeded")));
+        ProviderResult result = adapter.recoverRefund(refundCommand(), adapter.refundRequestVersion(), now.minusSeconds(60), null);
+        assertThat(result.state()).isEqualTo("REFUNDED");
+        assertThat(result.providerId()).isEqualTo(REF);
+    }
+
+    static JSONObject list(boolean hasMore, JSONObject... items) {
+        return new JSONObject().put("object", "list").put("has_more", hasMore).put("data", List.of(items));
+    }
+    static JSONObject otherSession(String id) {
+        return session(null, "unpaid", "open").put("id", id)
+                .put("metadata", new JSONObject().put("intentId", UUID.randomUUID().toString()).put("idempotencyKey", "billing_other"));
     }
 
     @Test void refundRefusedBeforeItsPostIsARejection() {

@@ -56,6 +56,9 @@ public class BillingService {
         if(!Set.of("CARD","ACH").contains(Objects.toString(method,""))) throw BillingProblem.invalid("Select CARD or ACH");
         List<UUID> ids=requested.stream().sorted().toList();
         String fingerprint=hash(method+":"+ids);
+        // Lock in PostgreSQL's uuid order (unsigned, the same as the text form), as every other path does.
+        // UUID.compareTo is signed, so its order can invert and deadlock. The fingerprint keeps its original order.
+        List<UUID> lockOrder=requested.stream().sorted(Comparator.comparing(UUID::toString)).toList();
         return db.tx(() -> {
             // Serialize this customer's creation commands and the uniqueness check, not provider IO.
             db.one("SELECT id FROM billing.accounts WHERE id=? FOR UPDATE",account);
@@ -65,7 +68,7 @@ public class BillingService {
                 return view(prior.get(0));
             }
             List<Map<String,Object>> selected=new ArrayList<>(); long total=0;
-            for(UUID invoice:ids) {
+            for(UUID invoice:lockOrder) {
                 var row=db.one("SELECT * FROM billing.invoices WHERE id=? AND account_id=? FOR UPDATE",invoice,account);
                 long available=amount(row,"totalMinor")-amount(row,"paidMinor")-amount(row,"reservedMinor");
                 if(available<=0) throw new BillingProblem(409,"INVOICE_UNAVAILABLE","An invoice is already paid or reserved by another payment; no intent was created for this key");
@@ -116,7 +119,7 @@ public class BillingService {
             var row=locked(intent);
             requireProvider(row);
             if(!"CREATED".equals(row.get("status"))) return null;
-            db.update("UPDATE billing.intents SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '45 seconds',next_recovery_at=NOW()+INTERVAL '45 seconds',updated_at=NOW() WHERE id=?",token,intent);
+            db.update("UPDATE billing.intents SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds',updated_at=NOW() WHERE id=?",token,intent);
             ProviderCommand command=new ProviderCommand(intent.toString(),operationKey(intent),amount(row,"amountMinor"),
                 text(row,"currency"),text(row,"method"),publicUrl+"/invoices?intentId="+intent);
             db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status,original_request,request_version) VALUES(?,?,?,?,'SUBMITTING',?::jsonb,?)",
@@ -152,10 +155,15 @@ public class BillingService {
         catch(ProviderUncertainException ex) { recordResult(intent,null,new ProviderResult(null,"UNKNOWN",null,"Response lost; query the original provider operation")); }
         return get(user,intent);
     }
+    /** States the provider never takes back: a superseded worker's answer of this kind is still booked. */
+    static final Set<String> DEFINITIVE=Set.of("CAPTURED","FAILED","RETURNED");
     public void recordResult(UUID intent,UUID fence,ProviderResult result) {
         db.tx(() -> {
             var row=locked(intent);
-            if(fence!=null && !fence.toString().equals(text(row,"leaseToken"))) return null;
+            boolean owner=fence==null || fence.toString().equals(text(row,"leaseToken"));
+            // A superseded worker's uncertain answer is dropped. A definitive one is always booked: capture, failure and
+            // return are idempotent, and a capture after a release becomes unapplied cash with its own case.
+            if(!owner && !DEFINITIVE.contains(result.state())) return null;
             String existing=text(row,"providerId");
             if(result.providerId()!=null && existing!=null && !existing.equals(result.providerId()))
                 throw BillingProblem.conflict("Provider operation identity does not match the original payment");
@@ -175,7 +183,9 @@ public class BillingService {
                 }
                 default -> throw BillingProblem.invalid("Unsupported provider result");
             }
-            db.update("UPDATE billing.intents SET lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",intent);
+            // Only the lease owner returns the lease; a superseded worker leaves the current owner's lease alone.
+            if(owner) db.update("UPDATE billing.intents SET lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",intent);
+            else db.update("UPDATE billing.intents SET updated_at=NOW() WHERE id=?",intent);
             db.update("UPDATE billing.attempts SET status=(SELECT status FROM billing.intents WHERE id=?),updated_at=NOW() WHERE intent_id=?",intent,intent);
             // Evidence that ends the uncertainty also closes the stuck-payment cases it explains.
             String current=text(db.one("SELECT status FROM billing.intents WHERE id=?",intent),"status");
@@ -186,13 +196,35 @@ public class BillingService {
         });
     }
     /**
-     * Approved case release: two employees confirmed the provider has no payment. Fences out any
-     * in-flight recovery, then releases reservations. Late provider evidence is still recorded:
-     * a later capture becomes unapplied cash with its own case, never another invoice's money.
+     * Fences out submission and recovery while a release asks the provider to prove there is no payment.
+     * Refused while one of them is talking to the provider. Returns what the provider check needs.
      */
-    void releaseUnresolved(UUID intent,String message) {
+    Map<String,Object> leaseForRelease(UUID intent,UUID token) {
+        locked(intent);
+        if(db.update("UPDATE billing.intents SET lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds' WHERE id=? AND (lease_until IS NULL OR lease_until<NOW())",token,intent)==0)
+            throw BillingProblem.conflict("Recovery is checking this payment with the provider right now. Try the release again in two minutes");
+        return db.one("""
+            SELECT i.id AS intent_id,i.amount_minor,i.currency,i.method,i.provider_id,i.created_at,a.original_request,a.request_version,a.created_at AS prepared_at
+            FROM billing.intents i LEFT JOIN billing.attempts a ON a.intent_id=i.id WHERE i.id=?
+            """,intent);
+    }
+    /** The exact request that was saved before the first provider call, or, for legacy attempts, its identity. */
+    ProviderCommand savedCommand(Map<String,Object> claim) {
+        if(claim.get("originalRequest")!=null) return ProviderCommand.fromJson(text(claim,"originalRequest"));
+        UUID intent=id(claim.get("intentId"));
+        return new ProviderCommand(intent.toString(),operationKey(intent),amount(claim,"amountMinor"),text(claim,"currency"),text(claim,"method"),null);
+    }
+    Instant preparedAt(Map<String,Object> claim) { return Instant.parse(text(claim,claim.get("preparedAt")!=null?"preparedAt":"createdAt")); }
+    /**
+     * Approved case release, after the provider proved it has no payment and can no longer take one. The lease
+     * taken by leaseForRelease fences the release. Late provider evidence is still recorded: a later capture
+     * becomes unapplied cash with its own case, never another invoice's money.
+     */
+    void releaseUnresolved(UUID intent,UUID fence,String message) {
         db.tx(() -> {
             var row=locked(intent);
+            if(!fence.toString().equals(text(row,"leaseToken")))
+                throw BillingProblem.conflict("Another process took over this payment during the release check; nothing was released. Try again");
             if(!Set.of("UNKNOWN","SUBMITTING").contains(text(row,"status")) || hasCapture(intent))
                 throw BillingProblem.conflict("This payment is no longer unresolved; refresh the case");
             db.update("UPDATE billing.intents SET lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",intent);

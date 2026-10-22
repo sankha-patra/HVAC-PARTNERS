@@ -1,5 +1,6 @@
 package com.invoicepayments.billing.provider;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
@@ -14,6 +15,7 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
@@ -79,7 +81,15 @@ public final class StripeBillingProvider implements BillingProvider {
                 "Saved refund cannot be safely replayed; reconciliation required");
         // Same key and same parameters: Stripe returns the original refund if it was created,
         // or performs the refund the lost request never delivered. It never creates a second one.
-        ProviderResult replay = refund(command);
+        ProviderResult replay;
+        try {
+            replay = refund(command);
+        } catch (ServerError saved) {
+            // A saved server error repeats on every replay: look the refund up on the original payment instead.
+            ProviderResult found = findRefund(command, null);
+            if ("ABSENT".equals(found.state())) throw saved;
+            return found;
+        }
         // A replay returns the original response. Read the refund's current state before
         // applying evidence; keep the verified identity even if that read fails.
         try { return lookupRefund(command.idempotencyKey(), replay.providerId()); }
@@ -104,7 +114,15 @@ public final class StripeBillingProvider implements BillingProvider {
 
     @Override public ProviderResult recoverPayment(ProviderCommand command, String version, Instant preparedAt, String providerId) {
         if (providerId != null) return lookup(command.idempotencyKey(), providerId);
-        ProviderResult replay = submitSaved(command, version, preparedAt);
+        ProviderResult replay;
+        try {
+            replay = submitSaved(command, version, preparedAt);
+        } catch (ServerError saved) {
+            // A saved server error repeats for as long as the key lives: stop replaying and search for the session instead.
+            List<JSONObject> found = findSessions(command, preparedAt);
+            if (found.size() != 1) throw saved;
+            return lookup(command.idempotencyKey(), found.get(0).getString("id"));
+        }
         // A replay returns the original response. Read current Checkout state before
         // applying evidence: the customer may have paid or the session may have expired.
         try { return lookup(command.idempotencyKey(), replay.providerId()); }
@@ -253,6 +271,106 @@ public final class StripeBillingProvider implements BillingProvider {
         } catch (RuntimeException ex) {
             return unknown(providerId);
         }
+    }
+
+    /** Pages read when searching. With the 10-second request timeout this keeps a release check inside its 120-second lease. */
+    static final int MAX_LIST_PAGES = 8;
+
+    @Override public ProviderResult closePayment(ProviderCommand saved, String version, Instant preparedAt, String providerId) {
+        ProviderValidation.payment(saved);
+        JSONObject session;
+        if (providerId != null) {
+            if (!validId(providerId, "cs_test_")) return unknown(providerId);
+            session = request("GET", "/v1/checkout/sessions/" + providerId, null, null);
+            validateOwnSession(session, saved, providerId);
+        } else {
+            List<JSONObject> found = findSessions(saved, preparedAt);
+            if (found.isEmpty()) return absent(null, "Stripe has no Checkout Session for this payment");
+            if (found.size() > 1) return unknown(null);
+            session = found.get(0);
+        }
+        String id = session.getString("id");
+        if ("open".equals(session.getString("status"))) {
+            try {
+                session = request("POST", "/v1/checkout/sessions/" + id + "/expire", "expire_" + saved.idempotencyKey(), Map.of());
+            } catch (ProviderRejectedException notOpen) {
+                // Stripe expires only open sessions: the customer finished meanwhile, so read what happened.
+                session = request("GET", "/v1/checkout/sessions/" + id, null, null);
+            }
+            validateOwnSession(session, saved, id);
+        }
+        ProviderResult state = sessionResult(session, saved.idempotencyKey(), saved.method());
+        // Expired and unpaid is the only proof that no payment exists and none can be made.
+        return "expired".equals(session.getString("status")) && "FAILED".equals(state.state())
+                ? absent(id, "Stripe Checkout Session is expired and unpaid") : state;
+    }
+
+    /**
+     * Without a session ID, search every session created while a replay could have created this one: from just
+     * before preparation to the end of the 23-hour replay window, plus an hour for clock differences.
+     */
+    private List<JSONObject> findSessions(ProviderCommand saved, Instant preparedAt) {
+        if (preparedAt == null) throw new ProviderUncertainException("The payment's preparation time is unknown");
+        long from = preparedAt.minusSeconds(300).getEpochSecond(), to = preparedAt.plus(Duration.ofHours(24)).getEpochSecond();
+        List<JSONObject> matches = new ArrayList<>();
+        String after = null;
+        for (int page = 0; page < MAX_LIST_PAGES; page++) {
+            JSONObject list = request("GET", "/v1/checkout/sessions?limit=100&created%5Bgte%5D=" + from + "&created%5Blte%5D=" + to
+                    + (after == null ? "" : "&starting_after=" + after), null, null);
+            JSONArray data = list.getJSONArray("data");
+            for (int i = 0; i < data.length(); i++) {
+                JSONObject candidate = data.getJSONObject(i);
+                after = candidate.getString("id");
+                JSONObject metadata = candidate.optJSONObject("metadata");
+                if (metadata == null || !saved.intentId().equals(metadata.optString("intentId"))) continue;
+                validateOwnSession(candidate, saved, null); // our intent under another key or amount is contradictory
+                matches.add(candidate);
+            }
+            if (!list.getBoolean("has_more")) return matches;
+            if (!validId(after, "cs_test_")) throw new ProviderUncertainException("Stripe returned an unreadable session list");
+        }
+        throw new ProviderUncertainException("Too many Checkout Sessions to prove that none belongs to this payment");
+    }
+
+    private static void validateOwnSession(JSONObject session, ProviderCommand saved, String id) {
+        validateSession(session, saved.idempotencyKey(), id);
+        if (!saved.intentId().equals(intentId(session)) || amount(session, "amount_total") != saved.amountMinor()
+                || !saved.currency().equalsIgnoreCase(session.getString("currency"))) throw new IllegalArgumentException();
+    }
+
+    /** Stripe cannot look a refund up by idempotency key, but it lists a payment's refunds: find ours by its refund ID. */
+    @Override public ProviderResult findRefund(RefundCommand saved, String providerId) {
+        ProviderValidation.refund(saved);
+        if (providerId != null) return lookupRefund(saved.idempotencyKey(), providerId);
+        if (!validId(saved.providerPaymentId(), "cs_test_")) return unknown(null);
+        JSONObject session = request("GET", "/v1/checkout/sessions/" + saved.providerPaymentId(), null, null);
+        validateSession(session, null, saved.providerPaymentId());
+        String paymentIntent = session.isNull("payment_intent") ? null : session.getString("payment_intent");
+        if (!saved.intentId().equals(intentId(session)) || !validId(paymentIntent, "pi_")) return unknown(null);
+        String after = null;
+        for (int page = 0; page < MAX_LIST_PAGES; page++) {
+            JSONObject list = request("GET", "/v1/refunds?limit=100&payment_intent=" + paymentIntent
+                    + (after == null ? "" : "&starting_after=" + after), null, null);
+            JSONArray data = list.getJSONArray("data");
+            for (int i = 0; i < data.length(); i++) {
+                JSONObject candidate = data.getJSONObject(i);
+                after = candidate.getString("id");
+                JSONObject metadata = candidate.optJSONObject("metadata");
+                if (metadata == null || !saved.refundId().equals(metadata.optString("refundId"))) continue;
+                validateRefund(candidate, saved.idempotencyKey(), null);
+                if (saved.amountMinor() != amount(candidate, "amount") || !paymentIntent.equals(candidate.getString("payment_intent"))) {
+                    return unknown(candidate.getString("id"));
+                }
+                return refundResult(candidate);
+            }
+            if (!list.getBoolean("has_more")) return absent(null, "Stripe has no refund with this refund ID on the original payment");
+            if (!validId(after, "re_")) throw new ProviderUncertainException("Stripe returned an unreadable refund list");
+        }
+        throw new ProviderUncertainException("Too many refunds on this payment to prove that none is this one");
+    }
+
+    private static ProviderResult absent(String id, String message) {
+        return new ProviderResult(id, "ABSENT", null, message);
     }
 
     @Override public ProviderResult lookupRefund(String idempotencyKey, String providerId) {
@@ -410,7 +528,9 @@ public final class StripeBillingProvider implements BillingProvider {
                 if (notPerformed(response)) {
                     throw new ProviderRejectedException("Stripe rejected this operation (HTTP " + response.status() + "); it was not performed");
                 }
-                throw new ProviderUncertainException("Stripe did not confirm this operation (HTTP " + response.status() + "); reconcile before retrying");
+                String message = "Stripe did not confirm this operation (HTTP " + response.status() + "); reconcile before retrying";
+                if (response.status() >= 500) throw new ServerError(message);
+                throw new ProviderUncertainException(message);
             }
             return new JSONObject(response.body());
         } catch (InterruptedException ex) {
@@ -442,6 +562,11 @@ public final class StripeBillingProvider implements BillingProvider {
     private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
     private static ProviderResult unknown(String id) {
         return new ProviderResult(id, "UNKNOWN", null, "Provider correlation unavailable; manual reconciliation required");
+    }
+
+    /** Stripe's idempotency layer saves a first server error and returns it again on every replay with that key. */
+    static final class ServerError extends ProviderUncertainException {
+        ServerError(String message) { super(message); }
     }
 
     @FunctionalInterface interface Transport {

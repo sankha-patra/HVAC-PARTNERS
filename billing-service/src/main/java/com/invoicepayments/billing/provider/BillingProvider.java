@@ -32,4 +32,19 @@ public interface BillingProvider {
     default ProviderResult recoverRefund(RefundCommand command, String version, Instant preparedAt, String providerId) {
         return lookupRefund(command.idempotencyKey(), providerId);
     }
+    /**
+     * Before a two-person release of a stuck payment: make the provider unable to take this payment (expire
+     * its hosted page), then report what exists. "ABSENT" means proven: no payment exists or can appear.
+     * Any other state is evidence to record instead of releasing. The default proves nothing.
+     */
+    default ProviderResult closePayment(ProviderCommand saved, String version, Instant preparedAt, String providerId) {
+        return new ProviderResult(providerId, "UNKNOWN", null, "Provider cannot prove that no payment exists");
+    }
+    /**
+     * Before a two-person release of a refund that can no longer be replayed: "ABSENT" means the provider
+     * shows no refund with this refund ID on the original payment. The default proves nothing.
+     */
+    default ProviderResult findRefund(RefundCommand saved, String providerId) {
+        return new ProviderResult(providerId, "UNKNOWN", null, "Provider cannot prove that no refund exists");
+    }
 }

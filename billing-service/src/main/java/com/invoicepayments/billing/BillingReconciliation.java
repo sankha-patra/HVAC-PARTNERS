@@ -12,6 +12,7 @@ import static com.invoicepayments.billing.BillingStore.*;
 @Service
 @Profile("billing")
 public class BillingReconciliation {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(BillingReconciliation.class);
     public record Line(UUID intentId,long amountMinor) {}
     public record Report(UUID merchantId,String externalId,String source,long grossMinor,long feeMinor,long netMinor,String bankReference,List<Line> lines) {
         public Report {bankReference=normalizeReference(bankReference);}
@@ -61,7 +62,11 @@ public class BillingReconciliation {
                 settlement,merchant,report.getString("externalId"),report.getString("source"),report.getLong("grossMinor"),report.getLong("feeMinor"),report.getLong("netMinor"),report.getString("bankReference"),batch.get("createdBy"));
             for(Object item:report.getJSONArray("lines")) {JSONObject line=(JSONObject)item;db.update("INSERT INTO billing.settlement_lines(report_id,intent_id,amount_minor) VALUES(?,?,?) ON CONFLICT(report_id,intent_id) DO NOTHING",settlement,id(line.getString("intentId")),line.getLong("amountMinor"));}
             db.update("UPDATE billing.reconciliation_imports SET state='MATCHED' WHERE id=?",importId);return null;
-        });} catch(RuntimeException mismatch) {db.tx(()->{
+        });} catch(RuntimeException mismatch) {
+            // A temporary database failure is not a mismatch: the import stays RECEIVED, and resubmitting the same report retries it.
+            if(isTransient(mismatch)) {log.warn("Settlement import hit a temporary failure; it stays RECEIVED for retry importId={}",importId,mismatch);return;}
+            log.warn("Settlement import does not match local evidence; opening a finance case importId={}",importId,mismatch);
+            db.tx(()->{
             var batch=db.one("SELECT merchant_id FROM billing.reconciliation_imports WHERE id=?",importId);
             db.update("UPDATE billing.reconciliation_imports SET state='EXCEPTION' WHERE id=?",importId);
             db.update("INSERT INTO billing.cases(id,merchant_id,reason,reference) VALUES(?,?,'SETTLEMENT_REPORT_MISMATCH',?) ON CONFLICT(reason,reference) DO NOTHING",UUID.randomUUID(),id(batch.get("merchantId")),importId.toString());return null;

@@ -140,6 +140,36 @@ public final class SimulatorBillingProvider implements BillingProvider {
     }
 
     /**
+     * An open card payment is the hosted page waiting for the customer: expire it so it can never be paid.
+     * A processing ACH debit, or any completed payment, is evidence and is reported instead.
+     */
+    @Override public ProviderResult closePayment(ProviderCommand saved, String version, Instant preparedAt, String providerId) {
+        ProviderValidation.payment(saved);
+        return independent.execute(tx -> {
+            Operation operation = byKey(saved.idempotencyKey(), true);
+            if (operation == null) return absent(providerId);
+            if (!operation.matches(saved)) throw new IllegalArgumentException("Idempotency key was already used for a different operation");
+            if ("PROCESSING".equals(operation.state()) && "CARD".equals(operation.method())) {
+                jdbc.update("UPDATE billing.provider_operations SET state='FAILED',updated_at=now() WHERE idempotency_key=?", operation.key());
+                return absent(operation.providerId());
+            }
+            return "FAILED".equals(operation.state()) ? absent(operation.providerId()) : result(operation);
+        });
+    }
+
+    @Override public ProviderResult findRefund(RefundCommand saved, String providerId) {
+        ProviderValidation.refund(saved);
+        Operation operation = byKey(saved.idempotencyKey(), false);
+        if (operation == null) return absent(providerId);
+        if (!operation.matches(saved)) return new ProviderResult(operation.providerId(), "UNKNOWN", null, "Refund reference does not match the expected operation");
+        return result(operation);
+    }
+
+    private static ProviderResult absent(String providerId) {
+        return new ProviderResult(providerId, "ABSENT", null, "Simulated provider has no such operation, and none can appear");
+    }
+
+    /**
      * Authenticated, explicitly enabled nonproduction fault control. The application owns that gate.
      * TIMEOUT_AFTER_ACCEPT commits the provider success before throwing, so reconciliation can recover it.
      */

@@ -31,6 +31,7 @@ import java.util.Date;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Starts the real billing HTTP application against only the explicitly allowlisted PostgreSQL 17
@@ -191,6 +192,16 @@ class BillingHttpSecurityDatabaseTest {
         var read = send("GET", "/api/v1/billing/finance/cases", null, "Cookie", "IP_AUTH=" + financeBearer);
         assertThat(read.statusCode()).isEqualTo(200);
         assertThat(send("POST", path, body, "Cookie", "IP_AUTH=" + financeBearer).statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void refusedFinanceAccessIsAuditedEvenThoughTheActionRolledBack() throws Exception {
+        assertThat(send("GET", "/api/v1/billing/finance/cases", null, "Authorization", "Bearer " + bearer).statusCode()).isEqualTo(403);
+        assertThat(jdbc.queryForList("SELECT method,path,code FROM billing.denied_actions WHERE actor=?", user)).singleElement()
+            .satisfies(row -> assertThat(row).containsEntry("method", "GET").containsEntry("path", "/api/v1/billing/finance/cases")
+                .containsEntry("code", "FORBIDDEN"));
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM billing.denied_actions WHERE actor=?", user))
+            .isInstanceOf(org.springframework.dao.DataAccessException.class);
     }
 
     @Test

@@ -34,6 +34,12 @@ public class BillingStore {
             return action.get();
         });
     }
+    /** Money, event and audit writes must commit with the change they describe, like MANDATORY propagation. */
+    static void requireTransaction() {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalTransactionStateException("Financial, event and audit writes must run inside a billing transaction");
+        }
+    }
     public static void requireNoTransaction() {
         // REQUIRED blocks below must commit before provider IO. Suspending an outer
         // transaction would still leave its connection borrowed while the provider waits.
@@ -99,6 +105,7 @@ public class BillingStore {
         publish(intent,type,null,amount(intent,"amountMinor"));
     }
     public void publish(Map<String,Object> intent,String type,UUID refund,long effectAmount) {
+        requireTransaction();
         UUID event=UUID.randomUUID(); UUID intentId=id(intent.get("id"));
         JSONObject payload=new JSONObject().put("schemaVersion",1).put("eventId",event.toString())
             .put("eventType",type).put("intentId",intentId.toString()).put("accountId",intent.get("accountId"))
@@ -121,6 +128,7 @@ public class BillingStore {
     }
     /** Recurring-problem case: opened once, and reopened with an audit entry if the problem recurs after resolution. */
     public void escalate(UUID intent,UUID refund,String reason,String reference,String note) {
+        requireTransaction();
         var changed=rows("""
             INSERT INTO billing.cases(id,merchant_id,intent_id,refund_id,reason,reference)
             SELECT ?,a.merchant_id,i.id,?,?,? FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id WHERE i.id=?
@@ -133,6 +141,7 @@ public class BillingStore {
     }
     /** Resolves the open cases of one operation for the given reasons; every resolution is audited. */
     public void resolveCases(String reference,String reasonA,String reasonB,String actor,String resolution,String action,String note) {
+        requireTransaction();
         for(var row:rows("""
             UPDATE billing.cases SET status='RESOLVED',resolved_at=NOW(),resolved_by=?,resolution=?,
               release_requested_by=NULL,release_note=NULL,release_requested_at=NULL
@@ -140,10 +149,12 @@ public class BillingStore {
             """,actor,resolution,reference,reasonA,reasonB)) caseAction(id(row.get("id")),action,actor,note,null);
     }
     public void caseAction(UUID caseId,String action,String actor,String note,String evidenceJson) {
+        requireTransaction();
         update("INSERT INTO billing.case_actions(id,case_id,action,actor,note,evidence) VALUES(?,?,?,?,?,?::jsonb)",
             UUID.randomUUID(),caseId,action,actor,note,evidenceJson);
     }
     public void journal(Map<String,Object> intent,String effect,String debit,String credit,long minor) {
+        requireTransaction();
         UUID journal=UUID.randomUUID();
         int added=update("""
             INSERT INTO billing.journals(id,merchant_id,intent_id,effect_key,currency)

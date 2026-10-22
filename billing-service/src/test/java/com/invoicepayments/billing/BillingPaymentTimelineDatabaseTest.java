@@ -112,6 +112,16 @@ class BillingPaymentTimelineDatabaseTest {
         cleanup(foreign);
     }
 
+    @Autowired org.springframework.beans.factory.ObjectProvider<org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler> schedulers;
+
+    @Test
+    void scheduledJobsDoNotShareASingleThread() {
+        // Inbox draining runs on the scheduler thread; with one thread it would delay outbox publishing and recovery.
+        var scheduler = schedulers.getIfAvailable();
+        assertThat(scheduler).isNotNull();
+        assertThat(scheduler.getScheduledThreadPoolExecutor().getCorePoolSize()).isEqualTo(4);
+    }
+
     @Test
     void applicationStatementsOutsideTransactionsHaveAQueryTimeout() {
         // Transactions carry their own deadline; this bounds every other statement of the configured app.

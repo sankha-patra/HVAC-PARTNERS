@@ -240,6 +240,10 @@ export class FinanceComponent implements OnInit, OnDestroy {
         this.actionBusy.set(false);
         this.caseError.set(failure.error?.code === 'PROVIDER_REFERENCE_NOT_VERIFIED'
           ? 'The provider did not confirm this reference for this operation. Nothing was changed.'
+          : failure.error?.code === 'PROVIDER_HAS_OPERATION'
+          ? 'The provider has this operation, so nothing was released. Its recorded status was updated; refresh cases.'
+          : failure.error?.code === 'PROVIDER_ABSENCE_NOT_CONFIRMED'
+          ? 'The provider could not confirm that nothing exists, so nothing was released. Try again later or attach the provider reference.'
           : failure.status === 403 ? 'This action needs a different authorized employee or role.'
           : failure.status === 409 ? 'The case changed since it was loaded. Refresh cases before acting again.'
           : failure.status === 400 ? 'The server rejected the input. Check the reference and the note.'
