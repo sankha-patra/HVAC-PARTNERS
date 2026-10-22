@@ -135,6 +135,9 @@ public class BillingCaseService {
         UUID intent=id(item.get("intentId")), token=UUID.randomUUID();
         var claim=db.tx(() -> {
             var locked=lock(item); requireApprovable(user,locked);
+            // Only the payment's original provider can prove there is nothing to release: absence elsewhere proves nothing.
+            if(!provider.name().equals(text(payments.raw(intent),"provider")))
+                throw BillingProblem.conflict("Only this payment's original provider can confirm a release. Restore it before approving.");
             return payment ? payments.leaseForRelease(intent,token) : refunds.leaseForRelease(id(locked.get("refundId")),token);
         });
         ProviderResult proof;

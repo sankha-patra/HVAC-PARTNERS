@@ -1735,6 +1735,23 @@ class BillingFinancialDatabaseTest {
                 .containsEntry("status", "OPEN").containsEntry("releaseRequestedBy", FINANCE);
     }
 
+    // Gap B: only the payment's original provider can prove there is nothing to release.
+    @Test void releaseIsRefusedWhenTheConfiguredProviderIsNotThePaymentsProvider() {
+        var stuck = stuckPayment(false);
+        BillingProvider otherSystem = new DelegateProvider(provider) {
+            @Override public String name() { return "STRIPE"; }
+            @Override public ProviderResult closePayment(ProviderCommand c, String v, java.time.Instant p, String id) {
+                return new ProviderResult(null, "ABSENT", null, "Nothing in this other system");
+            }
+        };
+        var cases = new BillingCaseService(db, stuck.service(), refunds, otherSystem);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        cases.requestRelease(FINANCE, caseId, "Provider dashboard has no payment for this intent");
+        assertProblem(409, () -> cases.approveRelease(APPROVER, caseId));
+        assertThat(stuck.service().raw(stuck.intent())).containsEntry("status", "UNKNOWN").containsEntry("leaseToken", null);
+        assertInvoice(INVOICE, 0, 10000);
+    }
+
     @Test void releaseWaitsWhileARecoveryIsCheckingTheProvider() {
         var stuck = stuckPayment(false);
         UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
@@ -1825,8 +1842,9 @@ class BillingFinancialDatabaseTest {
         assertThat(count("billing.cases")).isZero();
     }
 
-    // Risk 6: leases outlast the slowest provider sequence (about 40 seconds) with margin.
-    @Test void leasesOutlastTheSlowestProviderSequenceWithMargin() {
+    // Risk 6: a lease outlasts a whole provider operation, which its 60-second budget bounds, with time left to record the result.
+    @Test void leasesOutlastTheProviderOperationBudgetWithMargin() {
+        assertThat(StripeBillingProvider.OPERATION_BUDGET).isLessThanOrEqualTo(java.time.Duration.ofSeconds(60));
         var seconds = new java.util.concurrent.atomic.AtomicReference<Double>();
         BillingProvider observing = new DelegateProvider(provider) {
             @Override public ProviderResult submit(ProviderCommand command) {

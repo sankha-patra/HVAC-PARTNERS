@@ -36,9 +36,13 @@ public final class StripeBillingProvider implements BillingProvider {
     static final String API_VERSION = "2026-09-30.endive";
     private static final String API = "https://api.stripe.com";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
+    /** Time one provider operation may take in total, searches included: half the 120-second lease of its caller. */
+    public static final Duration OPERATION_BUDGET = Duration.ofSeconds(60);
     private final String secretKey;
     private final Transport transport;
     private final Clock clock;
+    /** End of the current operation's budget on this thread; calls nested inside one operation share it. */
+    private final ThreadLocal<Instant> deadline = new ThreadLocal<>();
 
     public StripeBillingProvider(String secretKey) {
         this(secretKey, new JdkTransport());
@@ -69,13 +73,44 @@ public final class StripeBillingProvider implements BillingProvider {
         return API_VERSION + ":refund-v1:" + credentialFingerprint();
     }
 
+    /**
+     * Runs one provider operation inside OPERATION_BUDGET. Every public operation goes through here; a call made
+     * from inside another operation keeps the outer deadline, so searches and fallbacks share one budget.
+     */
+    private ProviderResult withinBudget(java.util.function.Supplier<ProviderResult> operation) {
+        if (deadline.get() != null) return operation.get();
+        deadline.set(clock.instant().plus(OPERATION_BUDGET));
+        try {
+            return operation.get();
+        } finally {
+            deadline.remove();
+        }
+    }
+
+    /** The timeout for the next request, cut to what the operation has left. Nothing new is sent once the budget is used. */
+    private Duration remainingBudget() {
+        Instant end = deadline.get();
+        if (end == null) return REQUEST_TIMEOUT;
+        Duration left = Duration.between(clock.instant(), end);
+        if (left.compareTo(Duration.ofMillis(500)) < 0) {
+            throw new ProviderUncertainException("The provider operation used its time budget; its outcome stays uncertain");
+        }
+        return left.compareTo(REQUEST_TIMEOUT) < 0 ? left : REQUEST_TIMEOUT;
+    }
+
     @Override public ProviderResult submitSaved(ProviderCommand command, String version, Instant preparedAt) {
+        return withinBudget(() -> submitSavedNow(command, version, preparedAt));
+    }
+    private ProviderResult submitSavedNow(ProviderCommand command, String version, Instant preparedAt) {
         requireReplayWindow(paymentRequestVersion(), version, preparedAt,
                 "Saved payment cannot be safely replayed; reconciliation required");
         return submit(command);
     }
 
     @Override public ProviderResult recoverRefund(RefundCommand command, String version, Instant preparedAt, String providerId) {
+        return withinBudget(() -> recoverRefundNow(command, version, preparedAt, providerId));
+    }
+    private ProviderResult recoverRefundNow(RefundCommand command, String version, Instant preparedAt, String providerId) {
         if (providerId != null) return lookupRefund(command.idempotencyKey(), providerId);
         requireReplayWindow(refundRequestVersion(), version, preparedAt,
                 "Saved refund cannot be safely replayed; reconciliation required");
@@ -113,6 +148,9 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     @Override public ProviderResult recoverPayment(ProviderCommand command, String version, Instant preparedAt, String providerId) {
+        return withinBudget(() -> recoverPaymentNow(command, version, preparedAt, providerId));
+    }
+    private ProviderResult recoverPaymentNow(ProviderCommand command, String version, Instant preparedAt, String providerId) {
         if (providerId != null) return lookup(command.idempotencyKey(), providerId);
         ProviderResult replay;
         try {
@@ -133,7 +171,8 @@ public final class StripeBillingProvider implements BillingProvider {
         }
     }
 
-    @Override public ProviderResult submit(ProviderCommand command) {
+    @Override public ProviderResult submit(ProviderCommand command) { return withinBudget(() -> submitNow(command)); }
+    private ProviderResult submitNow(ProviderCommand command) {
         try {
             ProviderValidation.payment(command);
             if (command.amountMinor() < 50) throw new IllegalArgumentException("Stripe USD payments must be at least 50 cents");
@@ -171,6 +210,9 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     @Override public ProviderResult lookup(String idempotencyKey, String providerId) {
+        return withinBudget(() -> lookupNow(idempotencyKey, providerId));
+    }
+    private ProviderResult lookupNow(String idempotencyKey, String providerId) {
         ProviderValidation.key(idempotencyKey);
         if (!validId(providerId, "cs_test_")) return unknown(providerId);
         JSONObject session = request("GET", "/v1/checkout/sessions/" + providerId, null, null);
@@ -184,7 +226,8 @@ public final class StripeBillingProvider implements BillingProvider {
         }
     }
 
-    @Override public ProviderResult refund(RefundCommand command) {
+    @Override public ProviderResult refund(RefundCommand command) { return withinBudget(() -> refundNow(command)); }
+    private ProviderResult refundNow(RefundCommand command) {
         try {
             ProviderValidation.refund(command);
             if (!validId(command.providerPaymentId(), "cs_test_")) throw new IllegalArgumentException("A Stripe test Checkout Session is required");
@@ -228,6 +271,9 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     @Override public ProviderResult verifyPaymentReference(ProviderCommand expected, String providerId) {
+        return withinBudget(() -> verifyPaymentReferenceNow(expected, providerId));
+    }
+    private ProviderResult verifyPaymentReferenceNow(ProviderCommand expected, String providerId) {
         ProviderValidation.payment(expected);
         if (!validId(providerId, "cs_test_")) return unknown(providerId);
         JSONObject session = request("GET", "/v1/checkout/sessions/" + providerId, null, null);
@@ -246,6 +292,9 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     @Override public ProviderResult verifyRefundReference(RefundCommand expected, String providerId) {
+        return withinBudget(() -> verifyRefundReferenceNow(expected, providerId));
+    }
+    private ProviderResult verifyRefundReferenceNow(RefundCommand expected, String providerId) {
         ProviderValidation.refund(expected);
         if (!validId(providerId, "re_") || !validId(expected.providerPaymentId(), "cs_test_")) return unknown(providerId);
         JSONObject refund = request("GET", "/v1/refunds/" + providerId, null, null);
@@ -273,17 +322,26 @@ public final class StripeBillingProvider implements BillingProvider {
         }
     }
 
-    /** Pages read when searching. With the 10-second request timeout this keeps a release check inside its 120-second lease. */
+    /** Pages read when searching. OPERATION_BUDGET, not this count, bounds the total time. */
     static final int MAX_LIST_PAGES = 8;
 
     @Override public ProviderResult closePayment(ProviderCommand saved, String version, Instant preparedAt, String providerId) {
+        return withinBudget(() -> closePaymentNow(saved, version, preparedAt, providerId));
+    }
+    private ProviderResult closePaymentNow(ProviderCommand saved, String version, Instant preparedAt, String providerId) {
         ProviderValidation.payment(saved);
         JSONObject session;
         if (providerId != null) {
+            // A lookup by ID on another account fails, so reaching the session proves it is the original account.
             if (!validId(providerId, "cs_test_")) return unknown(providerId);
             session = request("GET", "/v1/checkout/sessions/" + providerId, null, null);
             validateOwnSession(session, saved, providerId);
         } else {
+            // An empty search proves nothing about an account this key may not reach. Search only with the
+            // credentials and API version that sent the original request; the same key is the same account.
+            if (!paymentRequestVersion().equals(version)) {
+                throw new ProviderUncertainException("Stripe credentials changed since this payment was sent; a search here cannot prove the original account has no payment");
+            }
             List<JSONObject> found = findSessions(saved, preparedAt);
             if (found.isEmpty()) return absent(null, "Stripe has no Checkout Session for this payment");
             if (found.size() > 1) return unknown(null);
@@ -340,6 +398,10 @@ public final class StripeBillingProvider implements BillingProvider {
 
     /** Stripe cannot look a refund up by idempotency key, but it lists a payment's refunds: find ours by its refund ID. */
     @Override public ProviderResult findRefund(RefundCommand saved, String providerId) {
+        return withinBudget(() -> findRefundNow(saved, providerId));
+    }
+    // The original payment is read by its session ID first: on another account that read fails, so this stays account-safe.
+    private ProviderResult findRefundNow(RefundCommand saved, String providerId) {
         ProviderValidation.refund(saved);
         if (providerId != null) return lookupRefund(saved.idempotencyKey(), providerId);
         if (!validId(saved.providerPaymentId(), "cs_test_")) return unknown(null);
@@ -374,6 +436,9 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     @Override public ProviderResult lookupRefund(String idempotencyKey, String providerId) {
+        return withinBudget(() -> lookupRefundNow(idempotencyKey, providerId));
+    }
+    private ProviderResult lookupRefundNow(String idempotencyKey, String providerId) {
         ProviderValidation.key(idempotencyKey);
         // Stripe does not offer a GET lookup by idempotency key. Never blindly POST to discover it.
         if (!validId(providerId, "re_")) return unknown(providerId);
@@ -515,7 +580,7 @@ public final class StripeBillingProvider implements BillingProvider {
     private JSONObject request(String method, String path, String key, Map<String, String> form) {
         if (secretKey.isEmpty()) throw new ProviderUncertainException("Stripe test provider is not configured");
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(API + path))
-                .timeout(REQUEST_TIMEOUT).header("Authorization", "Bearer " + secretKey)
+                .timeout(remainingBudget()).header("Authorization", "Bearer " + secretKey)
                 .header("Stripe-Version", API_VERSION).header("Accept", "application/json");
         if ("POST".equals(method)) {
             builder.header("Idempotency-Key", key).header("Content-Type", "application/x-www-form-urlencoded")
@@ -580,7 +645,8 @@ public final class StripeBillingProvider implements BillingProvider {
         @Override public Response send(HttpRequest request) throws IOException, InterruptedException {
             CompletableFuture<HttpResponse<String>> pending = client.sendAsync(request, info -> new LimitedBody());
             try {
-                HttpResponse<String> response = pending.get(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                // The request carries the operation's remaining budget, never more than REQUEST_TIMEOUT.
+                HttpResponse<String> response = pending.get(request.timeout().orElse(REQUEST_TIMEOUT).toMillis(), TimeUnit.MILLISECONDS);
                 return new Response(response.statusCode(), response.body());
             } catch (TimeoutException ex) {
                 pending.cancel(true);

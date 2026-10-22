@@ -1,5 +1,34 @@
 # Verification of the extracted repository
 
+## Release identity and provider time budget — 23 October 2026
+
+A Codex review of the 22 October work found three gaps by reading the code. Each new test
+failed first, then passed.
+
+- **Release could trust the wrong Stripe account (gap A).** Without a saved session ID, the
+  release check searched whatever account the current key reached, so an empty search after
+  a change to another account was taken as proof. The search now runs only with the
+  credentials and API version that sent the original request (`closePayment` compares the
+  saved request version); otherwise it stays uncertain and nothing is released. A known
+  session ID is still checked by reading it, which fails on another account. After a
+  same-account key rotation, staff attach the session reference instead.
+- **Release did not check the provider type (gap B).** `approveRelease` now refuses unless
+  the configured provider is the payment's original provider.
+- **One operation could outlast its lease (gap C).** A refund recovery whose replay got a
+  saved Stripe 500 could make 12 requests of up to 10 s each, about 120 s, as long as the
+  lease. Every public Stripe operation now has a 60-second budget (`OPERATION_BUDGET`),
+  shared by nested calls. Each request's timeout is cut to the time left, and no request
+  is sent once the budget is used. Tests with a simulated 10-second Stripe show both
+  fallback searches stopping after 6 requests (12 and 8 before).
+
+The full Java suite passed **372 tests, with zero failures, errors or skips**
+(367 before, plus five new tests). The test log contained no `sk_test_`, `whsec_` or
+`Bearer` text. Simulator and a fake Stripe transport; no live Stripe call.
+
+Correction to the section below: the lease is 120 s, but "the slowest provider sequence is
+about 40 s" stopped being true when the saved-500 search was added. The operation budget
+above is what now keeps provider work inside the lease.
+
 ## Release proof, late evidence, transaction guard and remaining review risks — 22 October 2026
 
 Remaining risks from the 21 October review, fixed in order of money impact. Every new test

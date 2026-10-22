@@ -197,6 +197,69 @@ class StripeBillingProviderTest {
         assertThat(result.providerId()).isEqualTo(REF);
     }
 
+    // Gap A: an empty search proves nothing about an account the current key may not reach.
+    @Test void releaseSearchIsRefusedWhenTheCredentialsChangedSinceThePaymentWasSent() {
+        var other = new StripeBillingProvider("sk_test_differentAccount", transport);
+        transport.reply(list(false));
+        transport.reply(list(false));
+        // A request sent with other credentials, or with no recorded version at all, cannot be searched for here.
+        for (String version : new String[]{other.paymentRequestVersion(), null}) {
+            assertThatThrownBy(() -> provider.closePayment(command("CARD", 12345), version, Instant.now(), null))
+                    .isInstanceOf(ProviderUncertainException.class);
+        }
+        assertThat(transport.requests).isEmpty();
+    }
+
+    @Test void releaseByKnownSessionStillWorksAfterACredentialChange() {
+        // A lookup by ID on the wrong account fails, so reaching the session proves it is the right account.
+        var other = new StripeBillingProvider("sk_test_differentAccount", transport);
+        transport.reply(session(null, "unpaid", "open"));
+        transport.reply(session(null, "unpaid", "expired"));
+        assertThat(provider.closePayment(command("CARD", 12345), other.paymentRequestVersion(), Instant.now(), SESSION).state())
+                .isEqualTo("ABSENT");
+    }
+
+    // Gap C: one provider operation, including its searches, stays inside a budget well under the 120-second lease.
+    @Test void releaseSearchStopsWhenTheOperationBudgetIsUsed() {
+        var clock = new MutableClock(Instant.parse("2026-10-21T08:00:00Z"));
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, clock);
+        transport.onSend = () -> clock.advance(Duration.ofSeconds(10));
+        for (int page = 0; page < 8; page++) transport.reply(list(true, otherSession("cs_test_slow" + page)));
+        assertThatThrownBy(() -> adapter.closePayment(command("CARD", 12345), adapter.paymentRequestVersion(), clock.instant(), null))
+                .isInstanceOf(ProviderUncertainException.class);
+        assertThat(StripeBillingProvider.OPERATION_BUDGET).isEqualTo(Duration.ofSeconds(60));
+        assertThat(transport.requests).hasSize(6);
+        // Each request may only wait for the time the operation has left.
+        assertThat(transport.requests.get(5).timeout()).hasValue(Duration.ofSeconds(10));
+    }
+
+    @Test void refundRecoveryFallbackSearchStopsWhenTheOperationBudgetIsUsed() {
+        var clock = new MutableClock(Instant.parse("2026-10-21T08:00:00Z"));
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, clock);
+        transport.onSend = () -> clock.advance(Duration.ofSeconds(10));
+        transport.reply(session(PI, "paid", "complete"));
+        transport.reply(paymentIntent("succeeded", 12345));
+        transport.responses.add(new StripeBillingProvider.Response(500, "{}"));
+        transport.reply(session(PI, "paid", "complete"));
+        for (int page = 0; page < 8; page++) {
+            transport.reply(list(true, refund("succeeded").put("id", "re_slow" + page)
+                    .put("metadata", metadata(REFUND_KEY).put("refundId", UUID.randomUUID().toString()))));
+        }
+        assertThatThrownBy(() -> adapter.recoverRefund(refundCommand(), adapter.refundRequestVersion(), clock.instant().minusSeconds(60), null))
+                .isInstanceOf(ProviderUncertainException.class);
+        assertThat(transport.requests).hasSize(6);
+    }
+
+    /** A clock the test moves forward, to act out slow provider responses without waiting. */
+    static final class MutableClock extends Clock {
+        private Instant now;
+        MutableClock(Instant start) { now = start; }
+        void advance(Duration step) { now = now.plus(step); }
+        @Override public Instant instant() { return now; }
+        @Override public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+        @Override public Clock withZone(java.time.ZoneId zone) { return this; }
+    }
+
     static JSONObject list(boolean hasMore, JSONObject... items) {
         return new JSONObject().put("object", "list").put("has_more", hasMore).put("data", List.of(items));
     }
@@ -650,9 +713,11 @@ class StripeBillingProviderTest {
         final Deque<StripeBillingProvider.Response> responses = new ArrayDeque<>();
         IOException failure;
         int failOnRequest = -1; // 1-based: the request reaches the provider, its response is lost
+        Runnable onSend = () -> {}; // for example, advance a test clock as if Stripe were slow
         void reply(JSONObject json) { responses.add(new StripeBillingProvider.Response(200, json.toString())); }
         @Override public StripeBillingProvider.Response send(HttpRequest request) throws IOException {
             requests.add(request);
+            onSend.run();
             if (failure != null) throw failure;
             if (requests.size() == failOnRequest) throw new IOException("Response lost after acceptance");
             return responses.removeFirst();
