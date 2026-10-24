@@ -69,16 +69,36 @@ public class BillingController {
     @PostMapping("/finance/cases/{caseId}/close") public Object closeCase(Authentication auth,@PathVariable UUID caseId,@RequestBody CaseNote request) {
         return cases.close(user(auth),caseId,request.note());
     }
+    @PostMapping("/finance/cases/{caseId}/notes") public Object addCaseNote(Authentication auth,@PathVariable UUID caseId,@RequestBody CaseNote request) {
+        return cases.addNote(user(auth),caseId,request.note());
+    }
+    @PostMapping("/finance/cases/{caseId}/external-confirmation") public Object recordExternalConfirmation(Authentication auth,@PathVariable UUID caseId,
+            @RequestBody BillingCaseService.ExternalConfirmation request) {
+        return cases.recordExternalConfirmation(user(auth),caseId,request);
+    }
     @GetMapping("/finance/payments") public Object financePayments(Authentication auth) {
         String user=user(auth); refunds.requireAnyStaff(user);
-        return db.rows("""
+        var rows=db.rows("""
             SELECT i.id,i.account_id,a.merchant_id,a.name AS account_name,i.provider,i.amount_minor,i.refunded_minor,i.currency,i.status,i.method,i.created_at,
+            EXISTS(SELECT 1 FROM billing.cases c WHERE c.intent_id=i.id AND c.reason='REFUND_EVIDENCE_CONFLICT' AND c.status='OPEN') AS refund_conflict,
             i.amount_minor-COALESCE((SELECT SUM(r.amount_minor) FROM billing.refunds r WHERE r.intent_id=i.id AND r.status NOT IN ('FAILED','REJECTED','RELEASED')),0) AS available_refund_minor,
             (i.method='CARD' AND i.status='CAPTURED' AND EXISTS(SELECT 1 FROM billing.staff p WHERE p.merchant_id=a.merchant_id AND p.user_id=? AND p.role='FINANCE')) AS can_request_refund
             FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id
             WHERE EXISTS(SELECT 1 FROM billing.staff s WHERE s.user_id=? AND s.merchant_id=a.merchant_id AND s.role IN ('FINANCE','REFUND_APPROVER'))
             ORDER BY i.created_at DESC LIMIT 200
             """,user,user);
+        for(var row:rows) if(Boolean.TRUE.equals(row.remove("refundConflict"))) {
+            row.put("availableRefundMinor",0L);
+            row.put("canRequestRefund",false);
+        }
+        return rows;
+    }
+    @GetMapping("/finance/payments/{intent}/provider-evidence") public Object providerEvidence(Authentication auth,@PathVariable UUID intent) {
+        String user=user(auth);
+        // Never expose diagnostics through customer payment/timeline endpoints.
+        if(!db.exists("SELECT 1 FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id JOIN billing.staff s ON s.merchant_id=a.merchant_id WHERE i.id=? AND s.user_id=? AND s.role IN ('OPS','FINANCE','REFUND_APPROVER')",intent,user))
+            throw BillingProblem.missing();
+        return db.rows("SELECT id,refund_id,diagnostics::text AS diagnostics,created_at FROM billing.provider_evidence WHERE intent_id=? ORDER BY created_at DESC,id DESC LIMIT 50",intent);
     }
     @GetMapping("/finance/refunds") public Object refunds(Authentication auth) {return refunds.list(user(auth));}
     @PostMapping("/finance/intents/{intent}/refunds") public Object refund(Authentication auth,@PathVariable UUID intent,

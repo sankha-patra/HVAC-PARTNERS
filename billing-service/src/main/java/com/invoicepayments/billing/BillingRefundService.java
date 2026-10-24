@@ -1,8 +1,10 @@
 package com.invoicepayments.billing;
 
 import com.invoicepayments.billing.provider.*;
+import org.json.JSONObject;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
+import java.time.Instant;
 import java.util.*;
 import static com.invoicepayments.billing.BillingStore.*;
 
@@ -16,13 +18,16 @@ public class BillingRefundService {
         requireAnyStaff(user);
         return db.rows("""
             SELECT r.id,r.intent_id,i.provider,r.amount_minor,r.reason,r.requested_by,r.approved_by,r.status,r.created_at,
-            (r.status='REQUESTED' AND r.requested_by<>? AND EXISTS(SELECT 1 FROM billing.staff p WHERE p.merchant_id=a.merchant_id AND p.user_id=? AND p.role='REFUND_APPROVER')) AS can_approve,
-            (r.status='REQUESTED' AND ((r.requested_by=? AND EXISTS(SELECT 1 FROM billing.staff f WHERE f.merchant_id=a.merchant_id AND f.user_id=? AND f.role='FINANCE'))
-              OR EXISTS(SELECT 1 FROM billing.staff q WHERE q.merchant_id=a.merchant_id AND q.user_id=? AND q.role='REFUND_APPROVER'))) AS can_reject
+            (r.status='REQUESTED' AND r.requested_by<>? AND EXISTS(SELECT 1 FROM billing.staff p WHERE p.merchant_id=a.merchant_id AND p.user_id=? AND p.role='REFUND_APPROVER')
+              AND NOT EXISTS(SELECT 1 FROM billing.cases c WHERE c.intent_id=i.id AND c.reason='REFUND_EVIDENCE_CONFLICT' AND c.status='OPEN')) AS can_approve,
+            ((r.status='REQUESTED' AND ((r.requested_by=? AND EXISTS(SELECT 1 FROM billing.staff f WHERE f.merchant_id=a.merchant_id AND f.user_id=? AND f.role='FINANCE'))
+              OR EXISTS(SELECT 1 FROM billing.staff q WHERE q.merchant_id=a.merchant_id AND q.user_id=? AND q.role='REFUND_APPROVER')))
+              OR (r.status='APPROVED' AND r.original_request IS NULL AND r.submitted_at IS NULL AND r.provider_id IS NULL AND r.requested_by<>?
+                AND EXISTS(SELECT 1 FROM billing.staff q WHERE q.merchant_id=a.merchant_id AND q.user_id=? AND q.role='REFUND_APPROVER'))) AS can_reject
             FROM billing.refunds r JOIN billing.intents i ON i.id=r.intent_id JOIN billing.accounts a ON a.id=i.account_id
             WHERE EXISTS(SELECT 1 FROM billing.staff s WHERE s.merchant_id=a.merchant_id AND s.user_id=? AND s.role IN ('FINANCE','REFUND_APPROVER'))
             ORDER BY r.created_at DESC LIMIT 200
-            """,user,user,user,user,user,user);
+            """,user,user,user,user,user,user,user,user);
     }
     public Map<String,Object> request(String user,UUID intent,String key,long minor,String reason) {
         BillingService.validateKey(key);
@@ -35,6 +40,7 @@ public class BillingRefundService {
                 if(!fingerprint.equals(existing.get(0).get("requestHash"))) throw BillingProblem.conflict("Refund key belongs to a different request");
                 return existing.get(0);
             }
+            requireNoRefundConflict(intent);
             if(!payments.hasCapture(intent) || !"CARD".equals(payment.get("method")) || !"CAPTURED".equals(payment.get("status")))
                 throw BillingProblem.conflict("This workflow supports refunds of captured card payments; ACH returns use their own workflow");
             long committed=db.rows("SELECT COALESCE(SUM(amount_minor),0) AS total FROM billing.refunds WHERE intent_id=? AND status NOT IN ('FAILED','REJECTED','RELEASED')",intent)
@@ -54,14 +60,15 @@ public class BillingRefundService {
             var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
             if(user.equals(row.get("requestedBy"))) throw new BillingProblem(403,"SEPARATION_OF_DUTIES","The requester cannot approve their own refund");
             if(!"REQUESTED".equals(row.get("status"))) return null;
+            requireNoRefundConflict(intent);
             db.update("UPDATE billing.refunds SET status='APPROVED',approved_by=?,approved_at=NOW(),updated_at=NOW() WHERE id=?",user,refund);
             db.event(intent,"REFUND_APPROVED","A different authorized employee approved the refund"); return null;
         });
         submitApproved(refund); return raw(refund);
     }
     /**
-     * A refund that still awaits approval can be rejected by an approver, or withdrawn by its requester.
-     * No money moves and its amount becomes available again. The database keeps the rejection final.
+     * A requested refund can be rejected or withdrawn. An approver can also reject an approved refund
+     * that has never been prepared for provider submission. No money moves; rejection stays final.
      */
     public Map<String,Object> reject(String user,UUID refund,String note) {
         String reason=note==null?"":note.trim();
@@ -70,13 +77,21 @@ public class BillingRefundService {
         return db.tx(() -> {
             var payment=payments.locked(intent); UUID merchant=merchant(payment);
             var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
-            boolean requester=user.equals(row.get("requestedBy"))
-                && db.exists("SELECT 1 FROM billing.staff WHERE user_id=? AND merchant_id=? AND role='FINANCE'",user,merchant);
-            if(!requester) payments.staff(user,merchant,"REFUND_APPROVER");
-            if("REJECTED".equals(row.get("status"))) return row;
-            if(!"REQUESTED".equals(row.get("status"))) throw BillingProblem.conflict("Only a refund that still awaits approval can be rejected");
-            db.update("UPDATE billing.refunds SET status='REJECTED',rejected_by=?,rejected_at=NOW(),rejection_note=?,updated_at=NOW() WHERE id=?",user,reason,refund);
-            db.event(intent,"REFUND_REJECTED","Refund request rejected before approval; no money moved and its amount is available again");
+            boolean unsentApproval="APPROVED".equals(text(row,"status")) && row.get("originalRequest")==null
+                && row.get("submittedAt")==null && row.get("providerId")==null;
+            if(unsentApproval) {
+                payments.staff(user,merchant,"REFUND_APPROVER");
+                if(user.equals(row.get("requestedBy"))) throw new BillingProblem(403,"SEPARATION_OF_DUTIES","A different authorized approver must reject an approved refund");
+            } else {
+                boolean requester=user.equals(row.get("requestedBy"))
+                    && db.exists("SELECT 1 FROM billing.staff WHERE user_id=? AND merchant_id=? AND role='FINANCE'",user,merchant);
+                if(!requester) payments.staff(user,merchant,"REFUND_APPROVER");
+                if("REJECTED".equals(row.get("status"))) return row;
+                if(!"REQUESTED".equals(row.get("status"))) throw BillingProblem.conflict("Only a requested refund or an approved refund that was never prepared for sending can be rejected");
+            }
+            db.update("UPDATE billing.refunds SET status='REJECTED',rejected_by=?,rejected_at=NOW(),rejection_note=?,lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",user,reason,refund);
+            db.event(intent,"REFUND_REJECTED",unsentApproval?"Approved refund rejected before provider submission; the original approval is retained and its amount is available again"
+                :"Refund request rejected before approval; no money moved and its amount is available again");
             return raw(refund);
         });
     }
@@ -88,6 +103,7 @@ public class BillingRefundService {
             payments.requireProvider(payment);
             var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
             if(!"APPROVED".equals(row.get("status"))) return null;
+            requireNoRefundConflict(intent);
             if(text(payment,"providerId")==null) throw BillingProblem.conflict("The original provider payment reference is missing; reconcile it before refunding");
             RefundCommand command=new RefundCommand(refund.toString(),intent.toString(),text(payment,"providerId"),operationKey(refund),amount(row,"amountMinor"),"USD");
             // Save the exact request, its provider format and its age before provider I/O.
@@ -98,21 +114,39 @@ public class BillingRefundService {
                 WHERE id=?
                 """,token,command.toJson(),provider.refundRequestVersion(),refund);
             db.event(intent,"REFUND_SUBMITTING","Refund submission prepared; provider acceptance is not yet known");
-            return db.one("SELECT original_request FROM billing.refunds WHERE id=?",refund);
+            return db.one("SELECT original_request,lease_until FROM billing.refunds WHERE id=?",refund);
         });
         if(work==null) return;
         ProviderResult result;
-        try { result=provider.refund(RefundCommand.fromJson(text(work,"originalRequest"))); }
+        try(var budget=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
+            result=provider.refund(RefundCommand.fromJson(text(work,"originalRequest")));
+        }
         catch(ProviderRejectedException rejected) {
-            // Only an APPROVED refund reaches this call, so no earlier attempt used this key.
-            log.warn("Provider rejected the refund before acting; its amount is available again refundId={} intentId={} reason={}",refund,intent,rejected.getMessage());
-            result=new ProviderResult(null,"FAILED",null,"Provider rejected the request before creating a refund");
+            log.warn("Provider rejected this refund request; checking current ownership before recording it refundId={} intentId={}",refund,intent,rejected);
+            recordInitialRejection(refund,token,rejected);
+            return;
         }
         catch(RuntimeException failure) {
             log.warn("Refund submission outcome uncertain; recovery will reuse the saved request refundId={} intentId={}",refund,intent,failure);
-            result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request");
+            result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request",BillingProviderEvidence.from(failure));
         }
         record(refund,token,result);
+    }
+    /** A rejected request is not evidence that another worker's refund failed. */
+    private void recordInitialRejection(UUID refund,UUID token,ProviderRejectedException rejected) {
+        UUID intent=id(raw(refund).get("intentId"));
+        db.tx(() -> {
+            payments.locked(intent);
+            var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
+            BillingProviderEvidence.record(db,intent,refund,rejected.diagnostics());
+            if(!token.toString().equals(text(row,"leaseToken")) || !"SUBMITTING".equals(text(row,"status")) || row.get("providerId")!=null) {
+                db.event(intent,"REFUND_REQUEST_REJECTION_IGNORED","An earlier request rejection did not replace the refund's current provider evidence");
+                return null;
+            }
+            // Token replacement fences another sender; mere expiry without a takeover does not invalidate this rejection.
+            record(refund,token,new ProviderResult(null,"FAILED",null,"The initial refund request was rejected before an operation was created"));
+            return null;
+        });
     }
     static String operationKey(UUID refund) { return "refund_"+refund; }
     static final Set<String> RECORDABLE=Set.of("REFUNDED","FAILED","PROCESSING","UNKNOWN","REQUIRES_ACTION");
@@ -148,9 +182,17 @@ public class BillingRefundService {
         });
     }
     public void record(UUID refund,UUID fence,ProviderResult result) {
+        record(refund,fence,result,null);
+    }
+    /** The inbox supplies its durable provider/event identity so redelivery cannot reopen a reviewed conflict. */
+    public void record(UUID refund,UUID fence,ProviderResult result,String evidenceKey) {
+        record(refund,fence,result,evidenceKey,false);
+    }
+    private void record(UUID refund,UUID fence,ProviderResult result,String evidenceKey,boolean reconciledFailure) {
         UUID intent=id(raw(refund).get("intentId"));
         db.tx(() -> {
             var payment=payments.locked(intent); var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
+            BillingProviderEvidence.record(db,intent,refund,result.diagnostics());
             boolean owner=fence==null || fence.toString().equals(text(row,"leaseToken"));
             // A superseded worker's uncertain answer is dropped; a refund the provider made or definitively failed is still recorded.
             if(!owner && !Set.of("REFUNDED","FAILED").contains(result.state())) return null;
@@ -162,12 +204,13 @@ public class BillingRefundService {
                 if("FAILED".equals(result.state())) db.escalate(intent,refund,"REFUND_LATER_FAILED",refund.toString(),"The provider again reported that this refund failed");
                 return null;
             }
-            // A provider failure is final, and provider events can arrive out of order: older pending or
-            // success evidence never reopens it. A staff release is not provider evidence, so a late success still posts.
+            // Arrival order does not establish which contradictory terminal result is current.
+            // Preserve the evidence and hold further refunds until a fresh provider verification resolves it.
             String status=text(row,"status");
             if(Set.of("FAILED","RELEASED").contains(status) && Set.of("PROCESSING","UNKNOWN","REQUIRES_ACTION").contains(result.state())) return null;
-            if("FAILED".equals(status) && "REFUNDED".equals(result.state())) {
-                db.event(intent,"REFUND_EVIDENCE_IGNORED","Older success evidence arrived after the provider confirmed this refund failed; no money was posted");
+            if("FAILED".equals(status) && "REFUNDED".equals(result.state()) && !reconciledFailure) {
+                if(row.get("approvedBy")==null) throw BillingProblem.conflict("Provider evidence has no independently approved refund");
+                preserveConflict(intent,refund,row,result,fence,evidenceKey,owner);
                 return null;
             }
             if(row.get("approvedBy")==null) throw BillingProblem.conflict("Provider evidence has no independently approved refund");
@@ -196,12 +239,59 @@ public class BillingRefundService {
             // Only the lease owner returns the lease; a superseded worker leaves the current owner's lease alone.
             if(owner) db.update("UPDATE billing.refunds SET status=?,provider_id=COALESCE(provider_id,?),lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",state,result.providerId(),refund);
             else db.update("UPDATE billing.refunds SET status=?,provider_id=COALESCE(provider_id,?),updated_at=NOW() WHERE id=?",state,result.providerId(),refund);
+            // A failed provider object needs finance follow-up. Initial request/config rejection has no provider object.
+            if("FAILED".equals(state) && result.providerId()!=null && (!"FAILED".equals(status) || row.get("providerId")==null)) {
+                db.escalate(intent,refund,"REFUND_FAILED",refund.toString(),"The provider confirmed this refund failed; review how the customer will receive their refund");
+                db.event(intent,"REFUND_FAILED","The provider confirmed this refund failed; finance review is required");
+            }
             // Provider evidence that ends the uncertainty also closes the stuck-refund cases it explains.
             if(!"UNKNOWN".equals(state))
                 db.resolveCases(refund.toString(),"REFUND_UNRESOLVED","REFUND_REPLAY_UNSAFE","system","PROVIDER_EVIDENCE","AUTO_RESOLVED",
                     "Provider evidence recorded refund status "+state);
             return null;
         });
+    }
+    private void preserveConflict(UUID intent,UUID refund,Map<String,Object> row,ProviderResult result,UUID fence,String evidenceKey,boolean owner) {
+        String reference=result.providerId()!=null?result.providerId():text(row,"providerId");
+        if(reference==null) throw BillingProblem.conflict("Conflicting refund evidence has no provider reference");
+        String identity=hash(evidenceKey!=null?evidenceKey:"provider-result:"+reference+":"+result.state()+":"+Objects.toString(fence,"direct"));
+        if(db.exists("""
+            SELECT 1 FROM billing.case_actions a JOIN billing.cases c ON c.id=a.case_id
+            WHERE c.refund_id=? AND c.reason='REFUND_EVIDENCE_CONFLICT'
+              AND a.action='CONTRADICTORY_PROVIDER_EVIDENCE' AND a.evidence->>'evidenceKeyHash'=?
+            """,refund,identity)) return;
+        db.escalate(intent,refund,"REFUND_EVIDENCE_CONFLICT",refund.toString(),"Refund success conflicts with the recorded failure; further refunds are held until verified reconciliation");
+        UUID caseId=id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_EVIDENCE_CONFLICT' AND reference=?",refund.toString()).get("id"));
+        db.caseAction(caseId,"CONTRADICTORY_PROVIDER_EVIDENCE","system","Success evidence retained without assuming it is newer than the recorded failure",
+            new JSONObject().put("providerReference",reference).put("providerState",result.state()).put("evidenceKeyHash",identity).toString());
+        db.update("UPDATE billing.refunds SET provider_id=COALESCE(provider_id,?),updated_at=NOW() WHERE id=?",reference,refund);
+        if(owner) db.update("UPDATE billing.refunds SET lease_token=NULL,lease_until=NULL WHERE id=?",refund);
+        db.event(intent,"REFUND_EVIDENCE_CONFLICT","Conflicting refund results require verified finance reconciliation; further refunds are held");
+    }
+    boolean hasRefundConflict(UUID intent) {
+        return db.exists("SELECT 1 FROM billing.cases WHERE intent_id=? AND reason='REFUND_EVIDENCE_CONFLICT' AND status='OPEN'",intent);
+    }
+    void requireNoRefundConflict(UUID intent) {
+        if(hasRefundConflict(intent)) throw BillingProblem.conflict("Conflicting refund evidence must be reconciled with the provider before another refund can be requested or sent");
+    }
+    /** Called only by the approver's fresh provider-reference reconciliation, with payment/refund/case locks held. */
+    String reconcileVerifiedFailure(UUID refund,ProviderResult verified) {
+        UUID intent=id(raw(refund).get("intentId"));
+        var payment=payments.locked(intent);
+        var row=db.one("SELECT * FROM billing.refunds WHERE id=? FOR UPDATE",refund);
+        if(!"FAILED".equals(text(row,"status")) || row.get("approvedBy")==null)
+            throw BillingProblem.conflict("The refund changed during reconciliation; refresh the case");
+        if(verified.providerId()==null || !verified.providerId().equals(text(row,"providerId")) || !Set.of("REFUNDED","FAILED").contains(verified.state()))
+            throw BillingProblem.conflict("The provider has not confirmed the original refund's final outcome");
+        if("FAILED".equals(verified.state())) return null;
+        if(!payments.hasCapture(intent) || amount(row,"amountMinor")>amount(payment,"amountMinor")-amount(payment,"refundedMinor"))
+            return "The provider confirmed the refund, but the recorded capture cannot cover it. Finance reconciliation is required; the evidence and refund hold remain.";
+        long committed=amount(db.one("SELECT COALESCE(SUM(amount_minor),0) AS total FROM billing.refunds WHERE intent_id=? AND id<>? AND status NOT IN ('FAILED','REJECTED','RELEASED')",intent,refund),"total");
+        if(amount(row,"amountMinor")>amount(payment,"amountMinor")-committed)
+            return "The provider confirmed the refund, but other refund requests already use its capacity. Review those requests; no money record was overwritten and the refund hold remains.";
+        // The case transaction already saved the diagnostics, including checks that could not yet post money.
+        record(refund,null,new ProviderResult(verified.providerId(),verified.state(),verified.checkoutUrl(),verified.message()),"staff-verified:"+refund,true);
+        return null;
     }
     Map<String,Object> raw(UUID refund) { return db.one("SELECT * FROM billing.refunds WHERE id=?",refund); }
     UUID merchant(Map<String,Object> intent) { return id(db.one("SELECT merchant_id FROM billing.accounts WHERE id=?",id(intent.get("accountId"))).get("merchantId")); }

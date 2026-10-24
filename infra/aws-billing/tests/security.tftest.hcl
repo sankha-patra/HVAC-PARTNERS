@@ -164,3 +164,21 @@ run "application_has_bounded_identity_and_access" {
     error_message = "Provider ownership must be explicitly pinned and both identity/billing cookies must be secure."
   }
 }
+
+run "application_support_can_monitor_but_never_read_data_or_change_anything" {
+  command = plan
+  assert {
+    condition = alltrue([for statement in jsondecode(aws_iam_policy.application_support_read_only.policy).Statement :
+    statement.Effect == "Deny" || alltrue([for action in statement.Action : can(regex("^(logs|cloudwatch):(Describe|Get|List|Filter|StartQuery|StopQuery)", action))])])
+    error_message = "Application support may only read logs, metrics and alarms."
+  }
+  assert {
+    condition = alltrue([for blocked in ["secretsmanager:GetSecretValue", "ecs:ExecuteCommand", "rds-db:connect", "s3:GetObject", "ssm:StartSession", "iam:*"] :
+    anytrue([for statement in jsondecode(aws_iam_policy.application_support_read_only.policy).Statement : statement.Effect == "Deny" && contains(statement.Action, blocked)])])
+    error_message = "Secrets, database logins, container shells, stored files and access control must be explicitly denied."
+  }
+  assert {
+    condition     = output.application_support_policies.view_only == "arn:aws:iam::aws:policy/job-function/ViewOnlyAccess"
+    error_message = "Use the view-only job function, never ReadOnlyAccess, which can read stored data."
+  }
+}

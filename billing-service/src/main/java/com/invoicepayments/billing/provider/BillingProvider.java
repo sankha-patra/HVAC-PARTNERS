@@ -15,6 +15,10 @@ public interface BillingProvider {
     default ProviderResult recoverPayment(ProviderCommand command, String version, Instant preparedAt, String providerId) {
         return lookup(command.idempotencyKey(), providerId);
     }
+    /** Read-only discovery when replay is forbidden. An empty or ambiguous search proves no final outcome. */
+    default ProviderResult discoverPayment(ProviderCommand saved, String version, Instant preparedAt) {
+        return new ProviderResult(null, "UNKNOWN", null, "Provider cannot safely discover this payment");
+    }
     ProviderResult lookup(String idempotencyKey, String providerId);
     /** A staff-supplied reference is untrusted until all expected financial fields match. */
     default ProviderResult verifyPaymentReference(ProviderCommand expected, String providerId) {

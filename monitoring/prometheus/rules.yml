@@ -20,6 +20,8 @@ groups:
         for: 2m
         labels:
           severity: critical
+          responder: app-team
+          decision: none
           environment: local
         annotations:
           summary: "Cannot scrape {{ $labels.service }}"
@@ -29,6 +31,8 @@ groups:
         for: 5m
         labels:
           severity: warning
+          responder: app-team
+          decision: none
           environment: local
         annotations:
           summary: "HTTP 5xx exceed 5% for {{ $labels.service }}"
@@ -38,6 +42,8 @@ groups:
         for: 5m
         labels:
           severity: warning
+          responder: app-team
+          decision: none
           environment: local
         annotations:
           summary: "HTTP p95 exceeds two seconds for {{ $labels.service }}"
@@ -47,6 +53,8 @@ groups:
         for: 2m
         labels:
           severity: warning
+          responder: app-team
+          decision: none
           environment: local
         annotations:
           summary: "Requests are waiting for database connections in {{ $labels.service }}"

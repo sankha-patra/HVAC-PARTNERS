@@ -49,7 +49,8 @@ public class BillingInbox {
             if(!refund.isBlank()) {
                 UUID refundId=id(refund); var requested=refunds.raw(refundId);
                 if(!intent.toString().equals(requested.get("intentId")) || amount(requested,"amountMinor")!=event.getLong("amountMinor")) throw BillingProblem.conflict("Refund evidence does not match the approved operation");
-                refunds.record(refundId,null,new ProviderResult(event.getString("providerId"),state,null,"Authenticated provider event"));
+                // Each authenticated event keeps its own evidence key, so two events about one refund stay distinct.
+                refunds.record(refundId,null,new ProviderResult(event.getString("providerId"),state,null,"Authenticated provider event"),provider+":"+eventId);
             } else {
                 if(amount(payment,"amountMinor")!=event.getLong("amountMinor")) throw BillingProblem.conflict("Payment amount mismatch");
                 if(!db.exists("SELECT 1 FROM billing.attempts WHERE intent_id=?",intent)) throw BillingProblem.conflict("No submitted operation matches this event");
@@ -67,17 +68,26 @@ public class BillingInbox {
             if(outcome!=null) logFailure(provider,eventId,outcome,failure);
         }
     }
-    /** After this many temporary failures in a row, the event is shown to finance as unmatched. */
+    /** The tenth failed attempt is logged at WARN again; engineering's alert watches the event's age. */
     static final int TEMPORARY_RETRIES=10;
-    private record Failure(long attempts,boolean temporary,boolean firstReport) {}
-    /** A temporary failure keeps the event queued without a case; any other failure makes it UNMATCHED for finance review. */
+    /** Temporary failures back off from 10 seconds, doubling to this cap. */
+    static final int TEMPORARY_RETRY_CAP_SECONDS=300;
+    /** Existing persisted marker for a technical processing failure; BillingMetrics counts these for engineering. */
+    static final String TEMPORARY_ERROR="Temporary failure; will retry";
+    private record Failure(long attempts,boolean temporary,boolean warn) {}
+    /**
+     * Database failures and unexpected application errors stay queued for engineering, however often they repeat.
+     * Only explicit evidence validation/matching failures become UNMATCHED for finance review.
+     * Both keep retrying with backoff until the evidence applies or the underlying problem is corrected.
+     */
     private Failure recordFailure(String provider,String eventId,RuntimeException failure) {
         var rows=db.rows("SELECT state,attempts,payload::text AS payload,merchant_id FROM billing.webhook_inbox WHERE provider=? AND event_id=? AND state<>'PROCESSED' FOR UPDATE",provider,eventId);
         if(rows.isEmpty()) return null;
         var row=rows.get(0); long attempts=amount(row,"attempts")+1;
-        if(isTransient(failure) && attempts<TEMPORARY_RETRIES) {
-            db.update("UPDATE billing.webhook_inbox SET attempts=?,next_attempt_at=NOW()+INTERVAL '10 seconds',last_error='Temporary failure; will retry' WHERE provider=? AND event_id=?",attempts,provider,eventId);
-            return new Failure(attempts,true,attempts==1);
+        if(isTransient(failure) || !(failure instanceof BillingProblem problem) || problem.status()>=500) {
+            long delay=Math.min(TEMPORARY_RETRY_CAP_SECONDS,10L<<Math.min(attempts-1,5));
+            db.update("UPDATE billing.webhook_inbox SET attempts=?,next_attempt_at=NOW()+(? * INTERVAL '1 second'),last_error=? WHERE provider=? AND event_id=?",attempts,delay,TEMPORARY_ERROR,provider,eventId);
+            return new Failure(attempts,true,attempts==1 || attempts==TEMPORARY_RETRIES);
         }
         // Back off from 30 seconds, doubling to at most an hour: unmatched evidence waits for people, not for a tighter loop.
         long delay=Math.min(3600,30L<<Math.min(attempts-1,7));
@@ -87,12 +97,15 @@ public class BillingInbox {
         } catch(BillingProblem ignored) { /* Unknown events remain durably visible in the finance inbox. */ }
         return new Failure(attempts,false,!"UNMATCHED".equals(row.get("state")));
     }
-    /** The first report of a failure is a warning; repeats on retry are DEBUG. Expected evidence mismatches need no stack trace. */
+    /**
+     * The first report of a failure is a warning, and so is the TEMPORARY_RETRIES-th failed attempt;
+     * other repeats on retry are DEBUG. Expected evidence mismatches need no stack trace.
+     */
     private static void logFailure(String provider,String eventId,Failure outcome,RuntimeException failure) {
         String reason=failure.getClass().getSimpleName()+": "+failure.getMessage();
         Object[] args=failure instanceof BillingProblem ? new Object[]{provider,eventId,outcome.attempts(),reason} : new Object[]{provider,eventId,outcome.attempts(),reason,failure};
-        String message=outcome.temporary() ? "Webhook event hit a temporary failure; will retry provider={} eventId={} attempts={} reason={}"
+        String message=outcome.temporary() ? "Webhook processing hit a technical failure; will retry with backoff for engineering review provider={} eventId={} attempts={} reason={}"
             : "Webhook event kept for retry and finance review provider={} eventId={} attempts={} reason={}";
-        if(outcome.firstReport()) log.warn(message,args); else log.debug(message,args);
+        if(outcome.warn()) log.warn(message,args); else log.debug(message,args);
     }
 }

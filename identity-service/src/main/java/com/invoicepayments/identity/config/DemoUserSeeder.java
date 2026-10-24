@@ -26,6 +26,7 @@ public class DemoUserSeeder implements CommandLineRunner {
         seedIfMissing("admin", "admin@invoice-payments.test", "Finance Operator", "ADMIN", "admin123");
         seedIfMissing("reviewer", "reviewer@invoice-payments.test", "Refund Reviewer", "USER", "reviewer123");
         seedIfMissing("other", "other@invoice-payments.test", "Other Customer", "USER", "other123");
+        seedIfMissing("support", "support@invoice-payments.test", "Application Support", "USER", "support123");
     }
 
     private void seedIfMissing(String username, String email, String displayName, String role, String rawPassword) {

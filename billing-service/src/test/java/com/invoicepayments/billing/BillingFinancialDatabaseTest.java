@@ -655,7 +655,10 @@ class BillingFinancialDatabaseTest {
         assertThat(count("billing.journals")).isEqualTo(1); assertInvoice(INVOICE, 10000, 0);
         assertThat(count("billing.outbox WHERE type='PAYMENT_REFUNDED'")).isZero();
         assertThat(db.one("SELECT state FROM billing.webhook_inbox WHERE event_id='evt_older_success'").get("state")).isEqualTo("PROCESSED");
-        assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='REFUND_EVIDENCE_IGNORED'", intent)).isTrue();
+        // Arrival order cannot say which result is current: finance gets a case and further refunds are held.
+        assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='REFUND_EVIDENCE_CONFLICT'", intent)).isTrue();
+        assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='REFUND_EVIDENCE_CONFLICT' AND refund_id=? AND status='OPEN'", refund)).isTrue();
+        assertProblem(409, () -> requestedRefund(intent, 100));
     }
 
     @Test void refundEvidenceWithoutIndependentApprovalCannotMoveMoney() {
@@ -1327,21 +1330,21 @@ class BillingFinancialDatabaseTest {
         UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
         String reference = text(db.one("SELECT provider_id FROM billing.provider_operations WHERE intent_id=?::uuid", stuck.intent().toString()), "providerId");
         String note = "Found the payment in the provider dashboard by intent metadata";
-        assertThatThrownBy(() -> stuck.cases().verifyProviderReference("operator", caseId, "sim_pay_wrong_reference", note))
+        assertThatThrownBy(() -> stuck.cases().verifyProviderReference(FINANCE, caseId, "sim_pay_wrong_reference", note))
                 .isInstanceOfSatisfying(BillingProblem.class, ex -> assertThat(ex.code()).isEqualTo("PROVIDER_REFERENCE_NOT_VERIFIED"));
         assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("UNKNOWN");
         assertThat(count("billing.case_actions")).isZero();
         assertProblem(403, () -> stuck.cases().verifyProviderReference(APPROVER, caseId, reference, note));
         assertProblem(404, () -> stuck.cases().verifyProviderReference("other-finance", caseId, reference, note));
         assertProblem(404, () -> stuck.cases().verifyProviderReference(PAYER, caseId, reference, note));
-        var resolved = stuck.cases().verifyProviderReference("operator", caseId, reference, note);
-        assertThat(resolved).containsEntry("status", "RESOLVED").containsEntry("resolvedBy", "operator")
+        var resolved = stuck.cases().verifyProviderReference(FINANCE, caseId, reference, note);
+        assertThat(resolved).containsEntry("status", "RESOLVED").containsEntry("resolvedBy", FINANCE)
                 .containsEntry("resolution", "STAFF_VERIFIED_PROVIDER_REFERENCE");
         assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("CAPTURED");
         assertInvoice(INVOICE, 10000, 0); assertThat(count("billing.journals")).isEqualTo(1);
         assertThat(db.one("SELECT action,actor FROM billing.case_actions WHERE case_id=?", caseId))
-                .containsEntry("action", "VERIFIED_PROVIDER_REFERENCE").containsEntry("actor", "operator");
-        assertProblem(409, () -> stuck.cases().verifyProviderReference("operator", caseId, reference, note));
+                .containsEntry("action", "VERIFIED_PROVIDER_REFERENCE").containsEntry("actor", FINANCE);
+        assertProblem(409, () -> stuck.cases().verifyProviderReference(FINANCE, caseId, reference, note));
         assertThat(count("billing.journals")).isEqualTo(1);
     }
 
@@ -1352,7 +1355,7 @@ class BillingFinancialDatabaseTest {
         assertProblem(400, () -> stuck.cases().requestRelease(FINANCE, caseId, "too short"));
         assertProblem(409, () -> stuck.cases().approveRelease(APPROVER, caseId));
         stuck.cases().requestRelease(FINANCE, caseId, note);
-        assertProblem(409, () -> stuck.cases().requestRelease("operator", caseId, note));
+        assertProblem(409, () -> stuck.cases().requestRelease(FINANCE, caseId, note));
         assertProblem(403, () -> stuck.cases().approveRelease(FINANCE, caseId));
         assertProblem(403, () -> stuck.cases().approveRelease("operator", caseId));
         assertInvoice(INVOICE, 0, 10000);
@@ -1381,7 +1384,7 @@ class BillingFinancialDatabaseTest {
         assertThat(db.one("SELECT status,release_requested_by FROM billing.cases WHERE id=?", caseId))
                 .containsEntry("status", "OPEN").containsEntry("releaseRequestedBy", null);
         assertInvoice(INVOICE, 0, 10000);
-        stuck.cases().requestRelease("operator", caseId, "ACH report checked; no payment exists");
+        stuck.cases().requestRelease(FINANCE, caseId, "ACH report checked; no payment exists");
         assertThat(stuck.cases().history(FINANCE, caseId)).extracting(row -> row.get("action"))
                 .containsExactlyInAnyOrder("REQUESTED_RELEASE", "REJECTED_RELEASE", "REQUESTED_RELEASE");
     }
@@ -1389,24 +1392,245 @@ class BillingFinancialDatabaseTest {
     @Test void unresolvedCasesCannotBeClosedButReviewedCasesCloseWithAnAuditNote() {
         var stuck = stuckPayment(false);
         UUID stuckCase = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
-        assertProblem(409, () -> stuck.cases().close("operator", stuckCase, "Looked at it and it seems fine"));
+        assertProblem(409, () -> stuck.cases().close(FINANCE, stuckCase, "Looked at it and it seems fine"));
         UUID paid = capturedInvoice(INVOICE_TWO);
         db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
         UUID review = caseId("DISPUTE_REQUIRES_REVIEW", paid);
         var cases = new BillingCaseService(db, payments, refunds, provider);
-        assertProblem(400, () -> cases.close("operator", review, "  "));
+        assertProblem(400, () -> cases.close(FINANCE, review, "  "));
         assertProblem(404, () -> cases.close(PAYER, review, "Customer dispute reviewed with the bank"));
-        var closed = cases.close("operator", review, "Dispute evidence submitted through the provider dashboard");
+        var closed = cases.close(FINANCE, review, "Dispute evidence submitted through the provider dashboard");
         assertThat(closed).containsEntry("status", "RESOLVED").containsEntry("resolution", "CLOSED_AFTER_REVIEW");
-        assertProblem(409, () -> cases.close("operator", review, "Dispute evidence submitted through the provider dashboard"));
+        assertProblem(409, () -> cases.close(FINANCE, review, "Dispute evidence submitted through the provider dashboard"));
         assertThat(cases.history("operator", review)).hasSize(1).first()
-                .satisfies(row -> assertThat(row).containsEntry("action", "CLOSED_AFTER_REVIEW").containsEntry("actor", "operator"));
-        var listed = cases.list("operator");
+                .satisfies(row -> assertThat(row).containsEntry("action", "CLOSED_AFTER_REVIEW").containsEntry("actor", FINANCE));
+        var listed = cases.list(FINANCE);
         assertThat(listed).filteredOn(row -> stuckCase.toString().equals(row.get("id"))).singleElement()
                 .satisfies(row -> assertThat(row).containsEntry("canVerifyReference", true).containsEntry("canRequestRelease", true)
                         .containsEntry("canClose", false).containsEntry("canApproveRelease", false));
         assertThat(cases.list(APPROVER)).filteredOn(row -> stuckCase.toString().equals(row.get("id"))).singleElement()
                 .satisfies(row -> assertThat(row).containsEntry("canVerifyReference", false).containsEntry("canApproveRelease", false));
+    }
+
+    // ----- A rejected request describes that request only, never an operation another worker created -----
+
+    @Test void aStaleRequestRejectionCannotFailAPaymentAnotherWorkerAlreadyCreated() {
+        UUID intent = created("CARD");
+        BillingProvider revokedAfterTakeover = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) {
+                // While this request was paused, recovery took over the lease and created the Checkout page.
+                jdbc.update("UPDATE billing.intents SET lease_token=?,status='REQUIRES_ACTION',provider_id='sim_pay_created_by_recovery' WHERE id=?",
+                        UUID.randomUUID(), intent);
+                throw new ProviderRejectedException("Stripe rejected this operation (HTTP 401); it was not performed");
+            }
+        };
+        var service = service(revokedAfterTakeover, MERCHANT);
+        service.submit(PAYER, intent);
+        assertThat(service.raw(intent)).containsEntry("status", "REQUIRES_ACTION").containsEntry("providerId", "sim_pay_created_by_recovery");
+        assertInvoice(INVOICE, 0, 10000);
+        assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='STALE_REQUEST_REJECTION'", intent)).isTrue();
+        assertThat(db.exists("SELECT 1 FROM billing.outbox WHERE aggregate_id=? AND type='PAYMENT_FAILED'", intent)).isFalse();
+    }
+
+    @Test void aStaleRequestRejectionCannotFailARefundAnotherWorkerAlreadyCreated() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        BillingProvider revokedAfterTakeover = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) {
+                jdbc.update("UPDATE billing.refunds SET lease_token=?,status='PROCESSING',provider_id='sim_ref_created_by_recovery' WHERE id=?",
+                        UUID.randomUUID(), refund);
+                throw new ProviderRejectedException("Stripe rejected this operation (HTTP 401); it was not performed");
+            }
+        };
+        var service = service(revokedAfterTakeover, MERCHANT);
+        var refundService = new BillingRefundService(db, service, revokedAfterTakeover);
+        refundService.approve(APPROVER, refund);
+        assertThat(refundService.raw(refund)).containsEntry("status", "PROCESSING").containsEntry("providerId", "sim_ref_created_by_recovery");
+        assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='REFUND_REQUEST_REJECTION_IGNORED'", intent)).isTrue();
+        // The held amount is not freed for another refund.
+        assertProblem(409, () -> requestedRefund(intent, 9600));
+    }
+
+    @Test void aReleaseCheckThatFindsAFailedPaymentReportsTheReleaseItCaused() {
+        releaseCheck.set(() -> new ProviderResult("sim_pay_failed_session", "FAILED", null, "Session expired unpaid"));
+        var stuck = searchableStuckPayment(1);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().requestRelease(FINANCE, caseId, "Provider dashboard shows the session expired unpaid");
+        assertThat(stuck.cases().approveRelease(APPROVER, caseId)).containsEntry("status", "RESOLVED");
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("FAILED");
+        assertInvoice(INVOICE, 0, 0);
+    }
+
+    @Test void aLongTechnicalProblemNeverTurnsAWebhookIntoFinanceWork() {
+        UUID intent = submitted("CARD");
+        inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_long_outage", providerId(intent), intent.toString(), "CAPTURED", 10000, "USD", null));
+        injectTransientFault("CAPTURED");
+        for (int attempt = 0; attempt < 12; attempt++) inbox.process("SIMULATOR", "evt_long_outage");
+        assertThat(db.one("SELECT state,attempts,last_error FROM billing.webhook_inbox WHERE event_id='evt_long_outage'"))
+                .containsEntry("state", "NEW").containsEntry("attempts", 12).containsEntry("lastError", BillingInbox.TEMPORARY_ERROR);
+        assertThat(jdbc.queryForObject("SELECT EXTRACT(EPOCH FROM next_attempt_at-NOW()) FROM billing.webhook_inbox WHERE event_id='evt_long_outage'", Double.class))
+                .isBetween(290.0, 301.0);
+        assertThat(count("billing.cases")).isZero();
+        removeTransientFault(); inbox.process("SIMULATOR", "evt_long_outage");
+        assertThat(payments.raw(intent).get("status")).isEqualTo("CAPTURED");
+    }
+
+    // ----- Ownership: the application team flags and explains; Carrier finance decides -----
+
+    @Test void applicationTeamCanFlagACaseButOnlyCarrierFinanceCanDecideIt() {
+        var stuck = stuckPayment(false);
+        UUID stuckCase = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        UUID paid = capturedInvoice(INVOICE_TWO);
+        db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
+        UUID review = caseId("DISPUTE_REQUIRES_REVIEW", paid);
+        String note = "Stripe request timed out twice; provider evidence attached for finance";
+        assertProblem(403, () -> stuck.cases().verifyProviderReference("operator", stuckCase, "sim_pay_any_reference", note));
+        assertProblem(403, () -> stuck.cases().requestRelease("operator", stuckCase, note));
+        assertProblem(403, () -> stuck.cases().close("operator", review, "Dispute evidence submitted through the provider dashboard"));
+        assertProblem(403, () -> stuck.cases().recordExternalConfirmation("operator", stuckCase, confirmation(java.time.Instant.now())));
+        assertProblem(400, () -> stuck.cases().addNote("operator", stuckCase, "short"));
+        assertProblem(404, () -> stuck.cases().addNote(PAYER, stuckCase, note));
+        assertThat(stuck.cases().addNote("operator", stuckCase, note)).containsEntry("status", "OPEN");
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("UNKNOWN");
+        assertInvoice(INVOICE, 0, 10000);
+        assertThat(stuck.cases().history(FINANCE, stuckCase)).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("action", "ADDED_NOTE").containsEntry("actor", "operator").containsEntry("note", note));
+        assertThat(stuck.cases().list("operator")).filteredOn(row -> stuckCase.toString().equals(row.get("id"))).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("canAddNote", true).containsEntry("canVerifyReference", false)
+                        .containsEntry("canRequestRelease", false).containsEntry("canRecordExternalConfirmation", false)
+                        .containsEntry("canApproveRelease", false).containsEntry("canClose", false));
+        assertThat(stuck.cases().list("operator")).filteredOn(row -> review.toString().equals(row.get("id"))).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("canClose", false).containsEntry("canAddNote", true));
+        assertThat(stuck.cases().list(FINANCE)).filteredOn(row -> review.toString().equals(row.get("id"))).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("canClose", true).containsEntry("canAddNote", true));
+    }
+
+    // ----- Release on recorded Stripe confirmation, when Stripe's own search finds nothing -----
+
+    @Test void anEmptySearchAloneNeverReleasesAStuckPayment() {
+        releaseCheck.set(this::emptySearch);
+        var stuck = searchableStuckPayment(49);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().requestRelease(FINANCE, caseId, "Provider dashboard has no payment for this intent");
+        assertThatThrownBy(() -> stuck.cases().approveRelease(APPROVER, caseId))
+                .isInstanceOfSatisfying(BillingProblem.class, ex -> assertThat(ex.code()).isEqualTo("PROVIDER_ABSENCE_NOT_CONFIRMED"));
+        assertInvoice(INVOICE, 0, 10000);
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("UNKNOWN");
+        assertThat(db.one("SELECT status FROM billing.cases WHERE id=?", caseId)).containsEntry("status", "OPEN");
+    }
+
+    @Test void stripeConfirmationNeedsCarrierFinanceTheWaitingPeriodAndValidEvidence() {
+        releaseCheck.set(this::emptySearch);
+        var stuck = searchableStuckPayment(47);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        java.time.Instant checked = java.time.Instant.now().minusSeconds(300);
+        assertProblem(409, () -> stuck.cases().recordExternalConfirmation(FINANCE, caseId, confirmation(checked)));
+        preparedHoursAgo(stuck.intent(), 49);
+        assertProblem(403, () -> stuck.cases().recordExternalConfirmation("operator", caseId, confirmation(checked)));
+        assertProblem(403, () -> stuck.cases().recordExternalConfirmation(APPROVER, caseId, confirmation(checked)));
+        assertProblem(404, () -> stuck.cases().recordExternalConfirmation("other-finance", caseId, confirmation(checked)));
+        var valid = confirmation(checked);
+        for (var invalid : List.of(
+                withField(valid, "source", "EMAIL"),
+                withField(valid, "source", "STRIPE_SUPPORT"),
+                withField(valid, "account", " "),
+                withField(valid, "searched", "Card 4242 4242 4242 4242 had no payment in the Dashboard"),
+                withField(valid, "result", "nothing"),
+                withField(valid, "checkedAt", "yesterday"),
+                withField(valid, "checkedAt", java.time.Instant.now().plusSeconds(3600).toString()),
+                withField(valid, "checkedAt", java.time.Instant.now().minus(java.time.Duration.ofDays(8)).toString()),
+                withField(valid, "checkedAt", java.time.Instant.now().minus(java.time.Duration.ofHours(2)).toString()),
+                withField(valid, "evidenceSha256", "not-a-digest"),
+                withField(valid, "note", "short"))) {
+            assertProblem(400, () -> stuck.cases().recordExternalConfirmation(FINANCE, caseId, invalid));
+        }
+        assertThat(count("billing.case_actions")).isZero();
+        assertThat(db.one("SELECT release_requested_by FROM billing.cases WHERE id=?", caseId)).containsEntry("releaseRequestedBy", null);
+        assertInvoice(INVOICE, 0, 10000);
+        var support = withField(withField(valid, "source", "STRIPE_SUPPORT"), "ticket", "SUP-12345");
+        assertThat(stuck.cases().recordExternalConfirmation(FINANCE, caseId, support)).containsEntry("releaseRequestedBy", FINANCE);
+    }
+
+    @Test void aDifferentApproverReleasesAfterAFreshEmptySearchAndLateMoneyBecomesUnappliedCash() {
+        releaseCheck.set(this::emptySearch);
+        var stuck = searchableStuckPayment(49);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        var pending = stuck.cases().recordExternalConfirmation(FINANCE, caseId, confirmation(java.time.Instant.now().minusSeconds(300)));
+        assertThat(pending).containsEntry("status", "OPEN").containsEntry("releaseRequestedBy", FINANCE);
+        assertProblem(409, () -> stuck.cases().recordExternalConfirmation(FINANCE, caseId, confirmation(java.time.Instant.now().minusSeconds(60))));
+        assertProblem(409, () -> stuck.cases().requestRelease(FINANCE, caseId, "A second request while one is pending"));
+        assertProblem(403, () -> stuck.cases().approveRelease(FINANCE, caseId));
+        assertProblem(403, () -> stuck.cases().approveRelease("operator", caseId));
+        assertThat(stuck.cases().list(APPROVER)).filteredOn(row -> caseId.toString().equals(row.get("id"))).singleElement()
+                .satisfies(row -> {
+                    assertThat(row).containsEntry("canApproveRelease", true);
+                    assertThat(String.valueOf(row.get("externalConfirmation"))).contains("STRIPE_DASHBOARD").contains("acct_1ExampleOriginal");
+                });
+        assertInvoice(INVOICE, 0, 10000);
+        var released = stuck.cases().approveRelease(APPROVER, caseId);
+        assertThat(released).containsEntry("status", "RESOLVED").containsEntry("resolution", "RELEASED_EXTERNAL_CONFIRMATION");
+        assertThat(stuck.service().raw(stuck.intent()).get("status")).isEqualTo("FAILED");
+        assertInvoice(INVOICE, 0, 0);
+        assertThat(db.rows("SELECT action FROM billing.case_actions WHERE case_id=? ORDER BY created_at,id", caseId)).extracting(row -> row.get("action"))
+                .containsExactly("RECORDED_EXTERNAL_CONFIRMATION", "APPROVED_EXTERNAL_RELEASE");
+        var evidence = new JSONObject(text(db.one("SELECT evidence::text AS evidence FROM billing.case_actions WHERE case_id=? AND action='RECORDED_EXTERNAL_CONFIRMATION'", caseId), "evidence"));
+        assertThat(evidence.getString("source")).isEqualTo("STRIPE_DASHBOARD");
+        assertThat(evidence.getString("account")).isEqualTo("acct_1ExampleOriginal");
+        assertThat(evidence.getString("evidenceSha256")).isEqualTo("ab".repeat(32));
+        stuck.service().recordResult(stuck.intent(), null, new ProviderResult("sim_pay_late", "CAPTURED", null, "Late signed webhook"));
+        assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='LATE_CAPTURE_UNAPPLIED' AND intent_id=?", stuck.intent())).isTrue();
+        assertThat(db.exists("SELECT 1 FROM billing.ledger_entries WHERE account='UNAPPLIED_CASH'")).isTrue();
+    }
+
+    @Test void stripeConfirmationCannotOverrideAnOperationTheFreshCheckFinds() {
+        releaseCheck.set(this::emptySearch);
+        var stuck = searchableStuckPayment(49);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().recordExternalConfirmation(FINANCE, caseId, confirmation(java.time.Instant.now().minusSeconds(300)));
+        releaseCheck.set(() -> new ProviderResult("sim_pay_found_later", "REQUIRES_ACTION", null, "Session found"));
+        assertThatThrownBy(() -> stuck.cases().approveRelease(APPROVER, caseId))
+                .isInstanceOfSatisfying(BillingProblem.class, ex -> assertThat(ex.code()).isEqualTo("PROVIDER_HAS_OPERATION"));
+        assertInvoice(INVOICE, 0, 10000);
+        assertThat(stuck.service().raw(stuck.intent()).get("providerId")).isEqualTo("sim_pay_found_later");
+        // The provider's own evidence settles the case; the staff confirmation is not used.
+        assertThat(db.one("SELECT status,resolution FROM billing.cases WHERE id=?", caseId))
+                .containsEntry("status", "RESOLVED").containsEntry("resolution", "PROVIDER_EVIDENCE");
+    }
+
+    @Test void noAnswerAtApprovalKeepsTheConfirmationPendingUntilAFreshCheckCompletes() {
+        releaseCheck.set(this::emptySearch);
+        var stuck = searchableStuckPayment(49);
+        UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
+        stuck.cases().recordExternalConfirmation(FINANCE, caseId, confirmation(java.time.Instant.now().minusSeconds(300)));
+        releaseCheck.set(() -> { throw new ProviderUncertainException("Stripe did not answer"); });
+        assertThatThrownBy(() -> stuck.cases().approveRelease(APPROVER, caseId))
+                .isInstanceOfSatisfying(BillingProblem.class, ex -> assertThat(ex.code()).isEqualTo("PROVIDER_ABSENCE_NOT_CONFIRMED"));
+        assertInvoice(INVOICE, 0, 10000);
+        assertThat(db.one("SELECT release_requested_by FROM billing.cases WHERE id=?", caseId)).containsEntry("releaseRequestedBy", FINANCE);
+        releaseCheck.set(() -> new ProviderResult(null, "UNKNOWN", null, "Credentials changed", null, ProviderResult.CREDENTIALS_CHANGED));
+        assertThat(stuck.cases().approveRelease(APPROVER, caseId)).containsEntry("resolution", "RELEASED_EXTERNAL_CONFIRMATION");
+        assertInvoice(INVOICE, 0, 0);
+    }
+
+    @Test void stripeConfirmationReleasesAStuckRefundTheSearchCannotFind() {
+        UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
+        BillingProvider lost = new DelegateProvider(provider) {
+            @Override public ProviderResult refund(RefundCommand command) { throw new ProviderUncertainException("No response"); }
+            @Override public ProviderResult recoverRefund(RefundCommand c, String v, java.time.Instant p, String id) {
+                throw new ProviderReplayUnsafeException("Replay window elapsed");
+            }
+            @Override public ProviderResult findRefund(RefundCommand saved, String id) { return emptySearch(); }
+        };
+        var service = service(lost, MERCHANT); var refundService = new BillingRefundService(db, service, lost);
+        refundService.approve(APPROVER, refund);
+        var worker = new BillingRecovery(db, service, refundService, lost);
+        dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
+        UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
+        var cases = new BillingCaseService(db, service, refundService, lost);
+        cases.recordExternalConfirmation(FINANCE, caseId, withField(confirmation(java.time.Instant.now()),
+                "searched", "Searched refunds on the original PaymentIntent for this amount"));
+        assertThat(cases.approveRelease("second-checker", caseId)).containsEntry("resolution", "RELEASED_EXTERNAL_CONFIRMATION");
+        assertThat(refundService.raw(refund).get("status")).isEqualTo("RELEASED");
+        assertThat(db.exists("SELECT 1 FROM billing.journals WHERE effect_key=?", "refund:" + refund)).isFalse();
     }
 
     @Test void providerEvidenceAutoResolvesAStuckCaseAndARecurrenceReopensIt() {
@@ -1436,7 +1660,7 @@ class BillingFinancialDatabaseTest {
         UUID paid = capturedInvoice(INVOICE);
         db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
         db.caseFor(paid, "ACH_RETURN", paid.toString());
-        new BillingCaseService(db, payments, refunds, provider).close("operator", caseId("DISPUTE_REQUIRES_REVIEW", paid), "Dispute evidence submitted to the provider");
+        new BillingCaseService(db, payments, refunds, provider).close(FINANCE, caseId("DISPUTE_REQUIRES_REVIEW", paid), "Dispute evidence submitted to the provider");
         assertThatThrownBy(() -> db.update("UPDATE billing.case_actions SET actor='someone-else'")).isInstanceOf(org.springframework.dao.DataAccessException.class);
         assertThatThrownBy(() -> db.update("DELETE FROM billing.case_actions")).isInstanceOf(org.springframework.dao.DataAccessException.class);
         assertThatThrownBy(() -> db.update("UPDATE billing.cases SET status='RESOLVED' WHERE id=?", caseId("ACH_RETURN", paid)))
@@ -1632,7 +1856,7 @@ class BillingFinancialDatabaseTest {
         var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, contradictory), contradictory);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         UUID mismatch = caseId("RECOVERY_EVIDENCE_MISMATCH", intent);
-        new BillingCaseService(db, service, refunds, contradictory).close("operator", mismatch, "Checked the provider dashboard; looked like a one-off");
+        new BillingCaseService(db, service, refunds, contradictory).close(FINANCE, mismatch, "Checked the provider dashboard; looked like a one-off");
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(db.one("SELECT status FROM billing.cases WHERE id=?", mismatch).get("status")).isEqualTo("OPEN");
         assertThat(db.rows("SELECT action FROM billing.case_actions WHERE case_id=? ORDER BY created_at,id", mismatch)).extracting(row -> row.get("action"))
@@ -1919,7 +2143,7 @@ class BillingFinancialDatabaseTest {
         UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
         String reference = text(db.one("SELECT provider_id FROM billing.provider_operations WHERE operation_kind='REFUND'"), "providerId");
         new BillingCaseService(db, service, refundService, lossy)
-                .verifyProviderReference("operator", caseId, reference, "Found the refund in the provider dashboard");
+                .verifyProviderReference(FINANCE, caseId, reference, "Found the refund in the provider dashboard");
         assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
         assertThat(count("billing.journals")).isEqualTo(2); assertInvoice(INVOICE, 9500, 0);
         assertThat(refundOperations()).isEqualTo(1);
@@ -1969,6 +2193,54 @@ class BillingFinancialDatabaseTest {
         }
     }
 
+    /** What the release check of {@link #searchableStuckPayment} answers; tests change it between steps. */
+    final java.util.concurrent.atomic.AtomicReference<java.util.function.Supplier<ProviderResult>> releaseCheck = new java.util.concurrent.atomic.AtomicReference<>();
+    ProviderResult emptySearch() {
+        return new ProviderResult(null, "UNKNOWN", null, "No matching operation was found", null, ProviderResult.SEARCH_EMPTY);
+    }
+    /** A stuck payment, prepared this many hours ago, whose release check asks {@link #releaseCheck}. */
+    Stuck searchableStuckPayment(int preparedHoursAgo) {
+        BillingProvider searchable = new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new ProviderUncertainException("Response lost"); }
+            @Override public ProviderResult lookup(String key, String id) {
+                return id == null ? new ProviderResult(null, "UNKNOWN", null, "No reference") : new ProviderResult(id, "REQUIRES_ACTION", null, "Found");
+            }
+            @Override public ProviderResult recoverPayment(ProviderCommand c, String v, java.time.Instant p, String id) {
+                if (id != null) return lookup(c.idempotencyKey(), id);
+                throw new ProviderReplayUnsafeException();
+            }
+            @Override public ProviderResult closePayment(ProviderCommand saved, String version, java.time.Instant preparedAt, String id) {
+                return releaseCheck.get().get();
+            }
+        };
+        var service = service(searchable, MERCHANT); var refundService = new BillingRefundService(db, service, searchable);
+        UUID intent = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        service.submit(PAYER, intent);
+        var worker = new BillingRecovery(db, service, refundService, searchable);
+        due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
+        assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
+        preparedHoursAgo(intent, preparedHoursAgo);
+        return new Stuck(intent, service, new BillingCaseService(db, service, refundService, searchable));
+    }
+    /** The attempt's creation time is immutable in production; only this test helper moves it, to stand in for elapsed time. */
+    void preparedHoursAgo(UUID intent, int hours) {
+        jdbc.execute("ALTER TABLE billing.attempts DISABLE TRIGGER preserve_payment_submission");
+        try { jdbc.update("UPDATE billing.attempts SET created_at=NOW()-(? * INTERVAL '1 hour') WHERE intent_id=?", hours, intent); }
+        finally { jdbc.execute("ALTER TABLE billing.attempts ENABLE TRIGGER preserve_payment_submission"); }
+    }
+    BillingCaseService.ExternalConfirmation confirmation(java.time.Instant checkedAt) {
+        return new BillingCaseService.ExternalConfirmation("STRIPE_DASHBOARD", "acct_1ExampleOriginal",
+                "Searched Checkout Sessions and payments by our payment ID, amount and date",
+                "No matching Checkout Session, PaymentIntent or charge", null, checkedAt.toString(), "ab".repeat(32),
+                "Carrier finance checked the original Stripe account in the Dashboard");
+    }
+    static BillingCaseService.ExternalConfirmation withField(BillingCaseService.ExternalConfirmation c, String field, String value) {
+        return new BillingCaseService.ExternalConfirmation(
+                field.equals("source") ? value : c.source(), field.equals("account") ? value : c.account(),
+                field.equals("searched") ? value : c.searched(), field.equals("result") ? value : c.result(),
+                field.equals("ticket") ? value : c.ticket(), field.equals("checkedAt") ? value : c.checkedAt(),
+                field.equals("evidenceSha256") ? value : c.evidenceSha256(), field.equals("note") ? value : c.note());
+    }
     record Stuck(UUID intent, BillingService service, BillingCaseService cases) {}
     /** Response lost and the replay window gone: like Stripe, the provider cannot be searched by key. */
     Stuck stuckPayment(boolean providerAccepted) {

@@ -71,31 +71,62 @@ factory tests cover default, billing, local-observability and production setting
 including conflicting input configuration. Idempotence applies to a producer
 session; it does not deduplicate application retries across owners or manual replay.
 
-## Stuck payment alert
+## Who acts on an alert
 
-`billing_payments_stuck` counts overdue unresolved payments under the local policy:
+Every alert has two routing labels. `responder: app-team` means the application team (the
+service provider) sees it first, triages it and fixes its own defects. `decision` names the
+client (Carrier) team that decides, or `none` for technical alerts: `carrier-finance`,
+`carrier-treasury` or `carrier-business`. The application team never makes those decisions;
+it hands the case over with evidence. `severity: critical` pages the app team's on-call,
+`warning` notifies its channel without paging, and `info` goes only to a queue.
+`monitoring/alertmanager/alertmanager.example.yml` is an unmounted template showing this
+routing; it delivers nothing until real receivers are configured on a private network.
 
-| State | Age since creation |
-| --- | --- |
-| UNKNOWN, SUBMITTING | over 15 minutes |
-| REQUIRES_ACTION | over 24 hours |
-| PROCESSING | over 7 days |
+## Stuck payment alerts
 
-`BillingPaymentStuck` fires when this count remains positive for two minutes and
-resolves when it becomes zero. Created/captured/failed/returned/refunded payments
-are excluded. Recovery retries cannot reset the timer. These are local operational
-thresholds, not a measured Stripe SLA. Review provider evidence and the finance
-queue; do not create an unverified replacement charge. Prometheus firing alone
-is not evidence of an external notification receiver.
+Ages are measured from payment creation, so recovery retries cannot reset them. The combined
+`billing_payments_stuck` gauge is kept for dashboards; each alert reads its own gauge:
 
-## Stuck refund and release alerts
+| Alert | Gauge and state | Age | Decision |
+| --- | --- | --- | --- |
+| `BillingPaymentStuck` | `billing_payments_stuck_technical`: UNKNOWN, SUBMITTING | over 15 minutes | none (app team) |
+| `BillingPaymentActionOverdue` (info) | `billing_payments_action_overdue`: REQUIRES_ACTION | over 24 hours | carrier-business |
+| `BillingPaymentProcessingOverdue` | `billing_payments_processing_overdue`: PROCESSING | over 7 days | carrier-treasury |
 
-`billing_refunds_stuck` counts approved refunds not submitted within 15 minutes, uncertain
-or submitting refunds older than 15 minutes from submission, and provider-pending refunds
-older than seven days. Ages come from immutable approval and submission times, so retries
-cannot hide a refund. `BillingRefundStuck` fires after two minutes.
-`BillingReleaseAwaitingApproval` fires when a requested release has waited 30 minutes for a
-second approver. Both are local demonstration thresholds, not provider SLAs.
+A payment still waiting for the payer after 24 hours usually means recovery missed the
+outcome, because hosted Checkout sessions expire after 24 hours by default. Processing age
+alone is never a failure: never fail, reverse or replace a payment without verified provider
+evidence. These are local thresholds, not a measured Stripe SLA. Prometheus firing alone is
+not evidence of an external notification receiver.
+
+## Stuck refund, webhook and release alerts
+
+- `BillingRefundStuck` reads `billing_refunds_stuck_technical`: approved refunds not sent, or
+  sent with no answer, after 15 minutes from approval or submission (app team).
+- `BillingRefundProcessingOverdue` reads `billing_refunds_processing_overdue`: provider-pending
+  for over seven days (carrier-treasury). A pending or failed refund never triggers another one.
+- `BillingWebhookRetrying` fires when a saved provider event has kept failing for a technical
+  reason for 10 minutes (app team). Temporary failures retry with backoff capped at five
+  minutes and never become finance work, however often they repeat.
+- `BillingWebhookNeedsMatching` fires only for verified evidence that disagrees with our
+  records (carrier-finance).
+- `BillingReleaseAwaitingApproval` fires when a release has waited 30 minutes for a second
+  Carrier approver (carrier-finance).
+
+## Provider alerts
+
+They read `billing_provider_requests_total{outcome,category,operation}` and the
+`billing_provider_request_seconds` histogram, plus two gauges set by the Stripe adapter.
+All go to the app team. Card declines happen inside hosted Checkout and never reach them.
+
+- `BillingProviderCredentialsRejected` (critical): Stripe refused our key or permissions.
+  The cause is usually ours (a revoked, rotated or wrong key).
+- `BillingProviderRequestsInvalid`: Stripe refused a request as invalid.
+- `BillingProviderThrottled`: requests were rate limited. Check our own load and contention
+  on one Stripe object before blaming Stripe.
+- `BillingProviderOutcomeUncertain`: over 20% of calls ended without a clear answer, with at
+  least 10 calls in five minutes.
+- `BillingProviderLatencyHigh`: the 95th percentile is above 5 seconds.
 
 ## Verification
 

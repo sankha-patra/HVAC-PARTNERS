@@ -7,18 +7,24 @@ $stamp=[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $directory=Join-Path $root ".tmp-notes/container-tests/$stamp"
 New-Item -ItemType Directory -Force -Path $directory | Out-Null
 $exitCode=1
+# Windows PowerShell 5.1 turns a native command's stderr into a terminating error under 'Stop', and Docker
+# writes its progress to stderr. Native calls therefore run under 'Continue' and are judged by exit code.
+function Invoke-Native([scriptblock]$Command){
+    $previous=$ErrorActionPreference; $ErrorActionPreference='Continue'
+    try{& $Command}finally{$ErrorActionPreference=$previous}
+}
 try{
     $up=@('up','--abort-on-container-exit','--exit-code-from','tests')
     if(!$SkipBuild){$up+='--build'}
-    & docker @compose @up *> (Join-Path $directory 'test.log')
+    Invoke-Native {& docker @compose @up *> (Join-Path $directory 'test.log')}
     $exitCode=$LASTEXITCODE
-    $id=(& docker @compose ps -a -q tests).Trim()
+    $id=([string](Invoke-Native {& docker @compose ps -a -q tests 2>$null})).Trim()
     if($id -notmatch '^[a-f0-9]{12,64}$'){throw 'Expected exactly one verification container'}
     foreach($module in @('identity-service','billing-service')){
-        & docker cp "${id}:/source/$module/target/surefire-reports" (Join-Path $directory $module)
+        Invoke-Native {& docker cp "${id}:/source/$module/target/surefire-reports" (Join-Path $directory $module) *> $null}
         if($LASTEXITCODE -ne 0){throw "Could not collect $module test evidence"}
     }
-    & docker cp "${id}:/source/billing-service/target/billing-lab-report.json" (Join-Path $directory 'billing-lab-report.json')
+    Invoke-Native {& docker cp "${id}:/source/billing-service/target/billing-lab-report.json" (Join-Path $directory 'billing-lab-report.json') *> $null}
     if($LASTEXITCODE -ne 0 -and $exitCode -eq 0){throw 'Missing synthetic lab report'}
     if($exitCode -ne 0){throw "Container tests failed; inspect $directory/test.log"}
     $totals=@{tests=0;failures=0;errors=0;skipped=0}
@@ -31,5 +37,5 @@ try{
     Write-Host "PASS: $($totals.tests) Java tests; no failures, errors or skips. Evidence: $directory"
 }finally{
     # This fixed project contains only disposable test containers, not application volumes.
-    & docker @compose down --remove-orphans *> (Join-Path $directory 'cleanup.log')
+    Invoke-Native {& docker @compose down --remove-orphans *> (Join-Path $directory 'cleanup.log')}
 }

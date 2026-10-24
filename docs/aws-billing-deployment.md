@@ -6,6 +6,8 @@ The reference uses CloudFront with a private S3 frontend origin and an HTTPS ALB
 
 The database configuration is private PostgreSQL 17 RDS MultiAZ with encryption, verified client TLS and retained backups. Kafka uses three MSK brokers and IAM/TLS. Application credentials come from supplied Secrets Manager references. CloudWatch logs and alarms are declared; notification destinations must be supplied and tested separately. Local Prometheus/Grafana provisioning is not an AWS managed monitoring deployment.
 
+`support.tf` defines the application support team's production access: read-only monitoring of metrics, alarms, dashboards and the application's own log groups, with explicit denies for secret values, parameter decryption, stored files, database logins, container shells, Kafka data, access control and audit-trail changes. It assigns nothing. The client's identity team attaches it, together with the AWS managed `ViewOnlyAccess` job-function policy (not `ReadOnlyAccess`, which can read stored data), to its own single sign-on permission set and decides who receives it; the output `application_support_policies` lists both. Anything beyond reading is temporary access the client approves. Because log reading shows everything in a log, the application logs identifiers only, never keys or provider response bodies.
+
 Run syntax and mocked contract checks without AWS credentials:
 
 ```powershell

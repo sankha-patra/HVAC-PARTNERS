@@ -26,11 +26,23 @@ public class BillingStore {
         transaction.setTimeout(TRANSACTION_TIMEOUT_SECONDS);
     }
     public <T> T tx(Supplier<T> action) {
+        BillingExecutionBudget.requireTime();
         boolean outermost=!TransactionSynchronizationManager.isActualTransactionActive();
-        return transaction.execute(s -> {
+        java.time.Duration remaining=BillingExecutionBudget.remaining();
+        TransactionTemplate bounded=transaction;
+        if(outermost && remaining!=null) {
+            bounded=new TransactionTemplate(java.util.Objects.requireNonNull(transaction.getTransactionManager()));
+            bounded.setTimeout((int)Math.max(1,Math.min(TRANSACTION_TIMEOUT_SECONDS,remaining.toSeconds())));
+        }
+        return bounded.execute(s -> {
             // is_local=true works like SET LOCAL: the limits end with this transaction and never stay on a pooled connection.
-            if(outermost) jdbc.queryForList("SELECT set_config('lock_timeout',?,true),set_config('statement_timeout',?,true),set_config('idle_in_transaction_session_timeout',?,true)",
-                LOCK_TIMEOUT,STATEMENT_TIMEOUT,IDLE_IN_TRANSACTION_TIMEOUT);
+            if(outermost) {
+                BillingExecutionBudget.requireTime();
+                java.time.Duration left=BillingExecutionBudget.remaining();
+                long millis=left==null ? 10000 : Math.max(1,Math.min(10000,left.toMillis()));
+                jdbc.queryForList("SELECT set_config('lock_timeout',?,true),set_config('statement_timeout',?,true),set_config('idle_in_transaction_session_timeout',?,true)",
+                    Math.min(3000,millis)+"ms",millis+"ms",IDLE_IN_TRANSACTION_TIMEOUT);
+            }
             return action.get();
         });
     }

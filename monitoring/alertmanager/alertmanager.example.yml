@@ -1,0 +1,69 @@
+# TEMPLATE ONLY. Nothing mounts or starts this file, and it delivers no alert.
+# No real destination exists in this repository, so every receiver below is empty on purpose.
+#
+# Who gets what (labels set in monitoring/prometheus/*.yml):
+#   - Every alert goes to the application team (responder=app-team). We are the service provider:
+#     we monitor, fix our own defects, and flag anything that needs a business decision.
+#   - An alert with a decision label is also copied to that Carrier team's queue. Carrier decides
+#     (approve, reject, release, contact the bank or the paying company); the app team never does.
+#   - severity: critical pages the app team's on-call, warning goes to its channel, info to its queue.
+#
+# Deployment setup still needed before alerts reach anyone:
+#   1. Run Alertmanager only on the private monitoring network: no published host port and no
+#      public load balancer. Protect its web UI and API with TLS and basic auth through
+#      --web.config.file, or make it reachable only by Prometheus and operators on a VPN.
+#   2. Point Prometheus at it by adding this to monitoring/prometheus/billing.yml:
+#        alerting:
+#          alertmanagers:
+#            - static_configs:
+#                - targets: [alertmanager:9093]
+#   3. Give each receiver a real integration (pager, chat channel, ticket queue), agreed with Carrier
+#      for the carrier-* queues. Keep secrets out of this file: use the integration's *_file option
+#      where your Alertmanager version offers one (for example url_file for webhooks or api_url_file
+#      for Slack) and mount the secret.
+#   4. Check the result with: amtool check-config alertmanager.yml
+route:
+  receiver: app-team-channel
+  group_by: [alertname, decision, operation]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Copies to the deciding Carrier team. "continue" lets the app team's route below match as well.
+    - matchers: ['decision="carrier-finance"']
+      receiver: carrier-finance-queue
+      repeat_interval: 12h
+      continue: true
+    - matchers: ['decision="carrier-treasury"']
+      receiver: carrier-treasury-queue
+      repeat_interval: 24h
+      continue: true
+    - matchers: ['decision="carrier-business"']
+      receiver: carrier-business-queue
+      repeat_interval: 24h
+      continue: true
+    # The application team triages every alert.
+    - matchers: ['severity="critical"']
+      receiver: app-team-page
+      repeat_interval: 1h
+    - matchers: ['severity="info"']
+      receiver: app-team-queue
+      repeat_interval: 24h
+    - matchers: ['severity="warning"']
+      receiver: app-team-channel
+
+inhibit_rules:
+  # While the provider refuses our credentials, stuck payments and refunds follow from that one cause.
+  - source_matchers: ['alertname="BillingProviderCredentialsRejected"']
+    target_matchers: ['alertname=~"BillingPaymentStuck|BillingRefundStuck"']
+    equal: [environment]
+
+receivers:
+  # Application team (service provider)
+  - name: app-team-page      # on-call: provider credential failures, scrape loss
+  - name: app-team-channel   # technical uncertainty, retries, outbox, dead letters, provider health
+  - name: app-team-queue     # informational: users who have not finished paying
+  # Carrier teams (client): they make the decisions
+  - name: carrier-finance-queue    # evidence that disagrees with our records, releases awaiting a second approver
+  - name: carrier-treasury-queue   # bank debits and refunds still processing at the provider or bank
+  - name: carrier-business-queue   # paying companies that have not finished paying

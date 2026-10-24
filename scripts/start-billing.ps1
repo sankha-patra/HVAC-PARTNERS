@@ -28,5 +28,5 @@ if($LASTEXITCODE -ne 0) {throw 'Start Docker Desktop, then run this script again
 & docker @compose up -d --build
 if($LASTEXITCODE -ne 0) {throw 'Billing stack startup failed; inspect the Compose logs'}
 Write-Host 'Invoice payments: http://localhost:4400 | Grafana: http://localhost:3200'
-Write-Host 'Local users: demo/demo123, other/other123, admin/admin123, reviewer/reviewer123.'
+Write-Host 'Local users: demo/demo123, other/other123, admin/admin123 (Carrier finance), reviewer/reviewer123 (Carrier approver), support/support123 (application team).'
 Write-Host 'These explicitly enabled demo identities never run under the prod profile.'

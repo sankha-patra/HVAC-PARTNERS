@@ -23,9 +23,17 @@ export interface FinanceCase {
   resolution?: string | null; resolvedBy?: string | null; resolvedAt?: string | null;
   releaseRequestedBy?: string | null; releaseNote?: string | null; releaseRequestedAt?: string | null;
   canVerifyReference?: boolean; canRequestRelease?: boolean; canApproveRelease?: boolean; canClose?: boolean;
+  canAddNote?: boolean; canRecordExternalConfirmation?: boolean; externalConfirmation?: ExternalConfirmation | null;
+}
+/** What Carrier finance saw in the Stripe Dashboard or heard from Stripe support. */
+export interface ExternalConfirmation {
+  source: string; account: string; searched: string; result: string; ticket: string | null; checkedAt: string; evidenceSha256: string;
 }
 export interface CaseAction { action: string; actor: string; note?: string | null; evidence?: string | null; createdAt: string; }
-export type CaseCommand = 'verify' | 'request-release' | 'approve-release' | 'reject-release' | 'close';
+export interface ProviderEvidence {
+  id: number; refundId?: string; createdAt: string; diagnostics: string;
+}
+export type CaseCommand = 'verify' | 'request-release' | 'approve-release' | 'reject-release' | 'close' | 'note' | 'external-confirmation';
 export interface FinancePayment {
   id: string; accountId: string; merchantId: string; accountName: string; amountMinor: number; refundedMinor: number;
   availableRefundMinor: number; currency: string; status: string; method: PaymentMethod; createdAt: string;
@@ -91,7 +99,16 @@ export class BillingApi {
   closeCase(caseId: string, body: { note: string }) {
     return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/close`, body);
   }
+  addCaseNote(caseId: string, body: { note: string }) {
+    return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/notes`, body);
+  }
+  recordExternalConfirmation(caseId: string, body: ExternalConfirmation & { note: string }) {
+    return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/external-confirmation`, body);
+  }
   financePayments() { return this.http.get<FinancePayment[]>(`${this.base}/finance/payments`); }
+  providerEvidence(intentId: string) {
+    return this.http.get<ProviderEvidence[]>(`${this.base}/finance/payments/${encodeURIComponent(intentId)}/provider-evidence`);
+  }
   refunds() { return this.http.get<FinanceRefund[]>(`${this.base}/finance/refunds`); }
   requestRefund(intentId: string, body: { amountMinor: number; reason: string }, key: string) {
     return this.http.post<FinanceRefund>(`${this.base}/finance/intents/${encodeURIComponent(intentId)}/refunds`, body,

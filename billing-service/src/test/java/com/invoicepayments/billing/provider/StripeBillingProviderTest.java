@@ -60,7 +60,8 @@ class StripeBillingProviderTest {
     }
 
     @Test void achSelectsBankAccountAndDoesNotPretendPaymentSucceeded() {
-        transport.reply(session(null, "unpaid", "open"));
+        // Stripe reports the bank-debit method on an ACH session; the adapter checks it.
+        transport.reply(session(null, "unpaid", "open").put("payment_method_types", List.of("us_bank_account")));
         assertThat(provider.submit(command("ACH", 12345)).state()).isEqualTo("REQUIRES_ACTION");
         assertThat(form(transport.requests.get(0))).containsEntry("allowed_payment_method_types[0]", "us_bank_account");
     }
@@ -92,16 +93,43 @@ class StripeBillingProviderTest {
         assertThat(transport.requests).isEmpty();
     }
 
+    // A failed bank debit after a completed Checkout: the session stays complete and unpaid, so only the debit's own
+    // failed charge proves the payment failed.
+    @Test void failedAchDebitAfterCompletedCheckoutFailsOnlyWithItsFailedCharge() {
+        var ach = List.of("us_bank_account");
+        JSONObject completed = session(PI, "unpaid", "complete").put("payment_method_types", ach);
+        JSONObject retry = paymentIntent("requires_payment_method", 0).put("payment_method_types", ach).put("latest_charge", "ch_3TestFailed1");
+        JSONObject charge = new JSONObject().put("id", "ch_3TestFailed1").put("object", "charge").put("livemode", false)
+                .put("payment_intent", PI).put("status", "failed").put("paid", false).put("amount", 12345).put("currency", "usd")
+                .put("failure_code", "insufficient_funds").put("payment_method_details", new JSONObject().put("type", "us_bank_account"));
+        transport.reply(completed); transport.reply(retry); transport.reply(charge);
+        assertThat(provider.lookup(KEY, SESSION).state()).isEqualTo("FAILED");
+        // A debit that is still settling is not a failure, even though the session is complete and unpaid.
+        transport.reply(completed); transport.reply(retry); transport.reply(new JSONObject(charge.toString()).put("status", "pending"));
+        assertThat(provider.lookup(KEY, SESSION).state()).isEqualTo("UNKNOWN");
+        // A completed but unpaid card session is never treated as a failed bank debit.
+        transport.reply(session(PI, "unpaid", "complete")); transport.reply(paymentIntent("requires_payment_method", 0));
+        assertThat(provider.lookup(KEY, SESSION).state()).isEqualTo("UNKNOWN");
+    }
+
+    // The provider call gets only the time left on the worker's lease: an expired lease sends nothing.
+    @Test void anExpiredLeaseStopsTheProviderCallBeforeAnythingIsSent() {
+        try (var expired = com.invoicepayments.billing.BillingExecutionBudget.lease(Instant.now().minusSeconds(1))) {
+            assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderUncertainException.class)
+                    .isNotInstanceOf(ProviderRejectedException.class);
+        }
+        assertThat(transport.requests).isEmpty();
+    }
+
     @Test void onlyResponsesThatProveNothingHappenedAreRejections() {
         transport.responses.add(new StripeBillingProvider.Response(401, "{}"));
         assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderRejectedException.class);
         transport.responses.add(new StripeBillingProvider.Response(403, "{}"));
         assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderRejectedException.class);
-        transport.responses.add(new StripeBillingProvider.Response(400, "{\"error\":{\"type\":\"invalid_request_error\"}}"));
-        assertThatThrownBy(() -> provider.submit(command("CARD", 12345))).isInstanceOf(ProviderRejectedException.class)
-                .hasMessageContaining("HTTP 400");
-        // A reused key with other parameters, a conflict, a rate limit, a server error or an unreadable body prove nothing.
-        for (var response : List.of(new StripeBillingProvider.Response(400, "{\"error\":{\"type\":\"idempotency_error\"}}"),
+        // A broad invalid_request_error, a reused key with other parameters, a conflict, a rate limit, a server error
+        // or an unreadable body prove nothing about whether Stripe began executing the request.
+        for (var response : List.of(new StripeBillingProvider.Response(400, "{\"error\":{\"type\":\"invalid_request_error\"}}"),
+                new StripeBillingProvider.Response(400, "{\"error\":{\"type\":\"idempotency_error\"}}"),
                 new StripeBillingProvider.Response(400, "not json"), new StripeBillingProvider.Response(409, "{}"),
                 new StripeBillingProvider.Response(429, "{}"), new StripeBillingProvider.Response(500, "{}"))) {
             transport.responses.add(response);
@@ -136,7 +164,9 @@ class StripeBillingProviderTest {
         transport.reply(list(true, otherSession("cs_test_other1")));
         transport.reply(list(false));
         ProviderResult result = provider.closePayment(command("CARD", 12345), provider.paymentRequestVersion(), prepared, null);
-        assertThat(result.state()).isEqualTo("ABSENT");
+        // An empty search is not proof of absence; it only makes the case eligible for a recorded Stripe confirmation.
+        assertThat(result.state()).isEqualTo("UNKNOWN");
+        assertThat(result.finding()).isEqualTo(ProviderResult.SEARCH_EMPTY);
         assertThat(transport.requests.get(0).uri().getRawQuery())
                 .contains("created%5Bgte%5D=" + prepared.minusSeconds(300).getEpochSecond())
                 .contains("created%5Blte%5D=" + prepared.plus(Duration.ofHours(24)).getEpochSecond());
@@ -164,7 +194,9 @@ class StripeBillingProviderTest {
         assertThat(transport.requests.get(1).uri().getRawQuery()).contains("payment_intent=" + PI);
         transport.reply(session(PI, "paid", "complete"));
         transport.reply(list(false, refund("succeeded").put("id", "re_other").put("metadata", metadata(REFUND_KEY).put("refundId", UUID.randomUUID().toString()))));
-        assertThat(provider.findRefund(refundCommand(), null).state()).isEqualTo("ABSENT");
+        assertThat(provider.findRefund(refundCommand(), null))
+                .satisfies(found -> assertThat(found.state()).isEqualTo("UNKNOWN"))
+                .satisfies(found -> assertThat(found.finding()).isEqualTo(ProviderResult.SEARCH_EMPTY));
     }
 
     // Stripe saves a first server error with its idempotency key and repeats it on every replay: search instead.
@@ -204,8 +236,9 @@ class StripeBillingProviderTest {
         transport.reply(list(false));
         // A request sent with other credentials, or with no recorded version at all, cannot be searched for here.
         for (String version : new String[]{other.paymentRequestVersion(), null}) {
-            assertThatThrownBy(() -> provider.closePayment(command("CARD", 12345), version, Instant.now(), null))
-                    .isInstanceOf(ProviderUncertainException.class);
+            assertThat(provider.closePayment(command("CARD", 12345), version, Instant.now(), null))
+                    .satisfies(found -> assertThat(found.state()).isEqualTo("UNKNOWN"))
+                    .satisfies(found -> assertThat(found.finding()).isEqualTo(ProviderResult.CREDENTIALS_CHANGED));
         }
         assertThat(transport.requests).isEmpty();
     }

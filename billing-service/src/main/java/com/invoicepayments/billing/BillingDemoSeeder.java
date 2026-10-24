@@ -22,7 +22,8 @@ public class BillingDemoSeeder implements ApplicationRunner {
             db.update("INSERT INTO billing.memberships(account_id,user_id,role) SELECT ?,id::text,'PAYER' FROM identity.app_users WHERE username='demo' ON CONFLICT DO NOTHING",primary);
             db.update("INSERT INTO billing.memberships(account_id,user_id,role) SELECT ?,id::text,'PAYER' FROM identity.app_users WHERE username='other' ON CONFLICT DO NOTHING",other);
             db.update("INSERT INTO billing.staff(merchant_id,user_id,role) SELECT ?,id::text,'FINANCE' FROM identity.app_users WHERE username='admin' ON CONFLICT DO NOTHING",merchant);
-            db.update("INSERT INTO billing.staff(merchant_id,user_id,role) SELECT ?,id::text,'OPS' FROM identity.app_users WHERE username='admin' ON CONFLICT DO NOTHING",merchant);
+            // The application team (service provider) gets OPS only: it reads and annotates cases but never decides.
+            db.update("INSERT INTO billing.staff(merchant_id,user_id,role) SELECT ?,id::text,'OPS' FROM identity.app_users WHERE username='support' ON CONFLICT DO NOTHING",merchant);
             db.update("INSERT INTO billing.staff(merchant_id,user_id,role) SELECT ?,id::text,'REFUND_APPROVER' FROM identity.app_users WHERE username='reviewer' ON CONFLICT DO NOTHING",merchant);
             for(int i=1;i<=4;i++) db.update("INSERT INTO billing.invoices(id,account_id,number,currency,total_minor,due_date) VALUES(?,?,?,'USD',?,CURRENT_DATE+?) ON CONFLICT DO NOTHING",
                 UUID.fromString("30000000-0000-0000-0000-00000000000"+i),i==4?other:primary,"DEMO-INV-10"+i,new long[]{0,112550,87525,14000,22500}[i],i*7);

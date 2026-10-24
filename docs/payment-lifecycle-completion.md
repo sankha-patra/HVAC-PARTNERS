@@ -20,11 +20,18 @@ an entry to `billing.case_actions`, which the database refuses to update or dele
 
 | Action | Who | What happens |
 | --- | --- | --- |
-| Attach provider reference | FINANCE or OPS | The server asks the provider whether that reference belongs to this exact payment or refund. Only a verified answer is recorded, through the normal path: capture once, journal once. An unverified reference changes nothing |
-| Request, then approve, a release | Request: FINANCE or OPS. Approve: REFUND_APPROVER, and never the requester | Before releasing, the provider must prove nothing exists: an open Checkout Session is expired first, and a refund is looked up on the original payment. A refund that recovery can still replay cannot be released. If the provider has the operation, its status is recorded and nothing is released. For a payment the provider never received: reservations are released and the payment becomes FAILED. For a refund the provider never created: the refund becomes RELEASED (not FAILED) and its amount becomes available again. Late provider evidence is still recorded; a late capture becomes unapplied cash with its own case, never another invoice's money |
-| Close after review | FINANCE or OPS, with a note | Only for cases that describe something already settled (for example, a late capture booked as unapplied cash). Refused while the payment or refund is still unresolved |
+| Attach provider reference | FINANCE | The server asks the provider whether that reference belongs to this exact payment or refund. Only a verified answer is recorded, through the normal path: capture once, journal once. An unverified reference changes nothing |
+| Request, then approve, a release | Request: FINANCE. Approve: REFUND_APPROVER, and never the requester | Before releasing, the provider must prove nothing exists: an open Checkout Session is expired first, and a refund is looked up on the original payment. An empty search is never proof: it stays UNKNOWN and releases nothing. A refund that recovery can still replay cannot be released. If the provider has the operation, its status is recorded and nothing is released. For a payment the provider never received: reservations are released and the payment becomes FAILED. For a refund the provider never created: the refund becomes RELEASED (not FAILED) and its amount becomes available again. Late provider evidence is still recorded; a late capture becomes unapplied cash with its own case, never another invoice's money |
+| Release on a recorded Stripe confirmation | Record: FINANCE. Approve: a different REFUND_APPROVER | Only when Stripe's own search found nothing, or could not search the original account because the credentials changed. FINANCE records what Stripe showed in the Dashboard or support: source, original account, what was searched, the result, a support ticket if any, when it was checked and a SHA-256 of the saved evidence. A payment qualifies only 48 hours after it was first sent (the last resend is at 23 hours and a Checkout page expires 24 hours later). The check must be newer than 7 days and contain no card or bank account numbers. At approval the app checks Stripe again: if Stripe now finds the operation, its evidence is recorded and nothing is released; if it gives no answer, nothing is released. The resolution is `RELEASED_EXTERNAL_CONFIRMATION`. A capture that appears later still becomes unapplied cash with its own case |
+| Close after review | FINANCE, with a note | Only for cases that describe something already settled (for example, a late capture booked as unapplied cash). Refused while the payment or refund is still unresolved |
 
 Unknown cases and cases of another merchant both return 404.
+
+**Who decides.** FINANCE and REFUND_APPROVER are the client's (Carrier's) finance staff and make every decision.
+OPS is the application team, a service provider: it can read cases and staff-only provider evidence, add notes
+(`ADDED_NOTE`, which never changes money or status) and replay a failed technical message, but it cannot verify,
+request, approve, reject or close anything. Carrier's identity team assigns every role, including the application
+team's own accounts.
 
 ## Recovery validation and refund review repair
 
@@ -39,9 +46,11 @@ Unknown cases and cases of another merchant both return 404.
 - Refund `REVIEW` and unrecognised result states are rejected before terminal-state shortcuts.
   Webhook processing rolls back, retains the event as `UNMATCHED`, and creates one review case
   per event. Reprocessing the event does not change the refund, money or reserved capacity.
-- Stripe does not deliver events in order. A refund the provider confirmed FAILED is final:
-  an older "succeeded" event processed after it posts no money and writes a
-  `REFUND_EVIDENCE_IGNORED` timeline entry. A staff release is stored as RELEASED
+- Stripe does not deliver events in order, so arrival order cannot say which of two
+  contradictory refund results is current. A "succeeded" event for a refund recorded as FAILED
+  posts no money, opens a `REFUND_EVIDENCE_CONFLICT` case and holds further refunds on that
+  payment until a REFUND_APPROVER verifies the original refund with Stripe. A refund the
+  provider confirms FAILED opens a `REFUND_FAILED` case for finance. A staff release is stored as RELEASED
   (`V14`), so a late provider success for a released refund is still recorded.
 - Existing transaction boundaries remain: provider calls happen outside a transaction;
   accepted evidence, financial effects and case audit commit together. Caller transactions

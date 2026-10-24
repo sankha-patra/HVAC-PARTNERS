@@ -232,7 +232,7 @@ class BillingCaseReferenceDatabaseTest {
     }
 
     private Map<String, Object> verify(BillingCaseService service, Unresolved operation) {
-        return service.verifyProviderReference("operator", operation.caseId(), operation.reference(), NOTE);
+        return service.verifyProviderReference(BillingFinancialDatabaseTest.FINANCE, operation.caseId(), operation.reference(), NOTE);
     }
 
     private void assertUnchangedAndOpen(Map<String, String> before, Unresolved operation) {

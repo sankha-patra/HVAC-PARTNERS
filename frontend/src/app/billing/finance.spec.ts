@@ -287,6 +287,64 @@ describe('Finance cases', () => {
     expect(component.caseError()).toContain('different authorized employee');
   });
 
+  it('lets the application team add a note but offers it no decision', () => {
+    initialize();
+    const supportView: FinanceCase = { ...stuckCase, canVerifyReference: false, canRequestRelease: false, canAddNote: true };
+    component.beginCaseAction(supportView, 'verify');
+    expect(component.activeCase()).toBeNull();
+    component.beginCaseAction(supportView, 'external-confirmation');
+    expect(component.activeCase()).toBeNull();
+    component.beginCaseAction(supportView, 'note');
+    component.caseNote = 'Stripe timed out twice; see provider evidence for request IDs';
+    component.submitCaseAction();
+    const request = http.expectOne(`${base}/cases/case-a/notes`);
+    expect(request.request.body).toEqual({ note: 'Stripe timed out twice; see provider evidence for request IDs' });
+    request.flush({ ...stuckCase });
+    refreshAfterCaseAction();
+    expect(component.caseMessage()).toContain('Note added');
+  });
+
+  it('records a Stripe confirmation with every field and keeps card numbers out', () => {
+    initialize();
+    const eligible: FinanceCase = { ...stuckCase, canRecordExternalConfirmation: true };
+    component.beginCaseAction(eligible, 'external-confirmation');
+    component.confirmation = { source: 'STRIPE_DASHBOARD', account: 'acct_1ExampleOriginal',
+      searched: 'Card 4242 4242 4242 4242 searched in the Dashboard', result: 'No matching Checkout Session or payment',
+      ticket: '', checkedAt: '2026-10-24T10:00', evidenceSha256: 'ab'.repeat(32) };
+    component.caseNote = 'Carrier finance checked the original account in the Dashboard';
+    component.submitCaseAction();
+    http.expectNone(`${base}/cases/case-a/external-confirmation`);
+    expect(component.caseError()).toContain('card or bank account numbers');
+    component.confirmation.searched = 'Searched sessions and payments by payment ID and date';
+    component.confirmation.source = 'STRIPE_SUPPORT';
+    component.submitCaseAction();
+    http.expectNone(`${base}/cases/case-a/external-confirmation`);
+    expect(component.caseError()).toContain('support ticket');
+    component.confirmation.ticket = 'SUP-12345';
+    component.submitCaseAction();
+    const request = http.expectOne(`${base}/cases/case-a/external-confirmation`);
+    expect(request.request.body).toEqual({ source: 'STRIPE_SUPPORT', account: 'acct_1ExampleOriginal',
+      searched: 'Searched sessions and payments by payment ID and date', result: 'No matching Checkout Session or payment',
+      ticket: 'SUP-12345', checkedAt: new Date('2026-10-24T10:00').toISOString(), evidenceSha256: 'ab'.repeat(32),
+      note: 'Carrier finance checked the original account in the Dashboard' });
+    request.flush({ ...stuckCase, releaseRequestedBy: 'finance-user' });
+    refreshAfterCaseAction();
+    expect(component.caseMessage()).toContain('different authorized approver');
+  });
+
+  it('shows the approver what Stripe confirmed and explains an expired confirmation', () => {
+    initialize();
+    const pending: FinanceCase = { ...stuckCase, canApproveRelease: true, releaseRequestedBy: 'finance-maker',
+      externalConfirmation: { source: 'STRIPE_DASHBOARD', account: 'acct_1ExampleOriginal', searched: 'Sessions by payment ID',
+        result: 'No matching session', ticket: null, checkedAt: '2026-10-24T10:00:00Z', evidenceSha256: 'ab'.repeat(32) } };
+    expect(component.confirmationSummary(pending)).toContain('acct_1ExampleOriginal');
+    expect(component.confirmationSummary(pending)).toContain('Stripe Dashboard');
+    component.beginCaseAction(pending, 'approve-release');
+    component.submitCaseAction();
+    http.expectOne(`${base}/cases/case-a/release-approval`).flush({ code: 'STRIPE_CONFIRMATION_EXPIRED' }, { status: 409, statusText: 'Conflict' });
+    expect(component.caseError()).toContain('more than 7 days old');
+  });
+
   it('fails closed on a corrupt stored refund record', () => {
     sessionStorage.setItem('invoice-payments.billing.refund.v1:finance-user', '{invalid');
     initialize(); draft(); component.sendRefundRequest();

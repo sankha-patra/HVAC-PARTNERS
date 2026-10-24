@@ -7,4 +7,5 @@ package com.invoicepayments.billing.provider;
  */
 public final class ProviderRejectedException extends ProviderUncertainException {
     public ProviderRejectedException(String message) { super(message); }
+    public ProviderRejectedException(String message, ProviderDiagnostics diagnostics) { super(message, null, diagnostics); }
 }

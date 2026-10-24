@@ -58,6 +58,9 @@ class IdentityApplicationDatabaseTest {
         assertEquals(HttpStatus.OK,login("reviewer","reviewer123").getStatusCode());
         assertEquals(HttpStatus.OK,login("other","other123").getStatusCode());
     }
+    @Test void applicationSupportHasItsOwnSignIn() {
+        assertEquals(HttpStatus.OK,login("support","support123").getStatusCode());
+    }
     @Test void logoutExpiresTheAuthenticationCookie() {
         var response=http.postForEntity("/api/v1/auth/logout",null,String.class);
         assertEquals(HttpStatus.NO_CONTENT,response.getStatusCode());

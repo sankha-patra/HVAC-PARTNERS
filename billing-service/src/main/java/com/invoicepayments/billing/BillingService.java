@@ -125,24 +125,40 @@ public class BillingService {
             db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status,original_request,request_version) VALUES(?,?,?,?,'SUBMITTING',?::jsonb,?)",
                 UUID.randomUUID(),intent,provider.name(),operationKey(intent),command.toJson(),provider.paymentRequestVersion());
             db.event(intent,"SUBMITTING","Payment submission prepared; provider acceptance is not yet known");
-            return db.one("SELECT original_request,request_version,created_at FROM billing.attempts WHERE intent_id=?",intent);
+            return db.one("SELECT a.original_request,a.request_version,a.created_at,i.lease_until FROM billing.attempts a JOIN billing.intents i ON i.id=a.intent_id WHERE a.intent_id=?",intent);
         });
         if(work==null) return get(user,intent);
         ProviderResult result;
-        try {
+        try (var ignored=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
             result=provider.submitSaved(ProviderCommand.fromJson(text(work,"originalRequest")),
                 text(work,"requestVersion"),Instant.parse(text(work,"createdAt")));
         } catch(ProviderRejectedException rejected) {
-            // TX-A made this the first attempt with this key, and the provider refused it before acting.
-            log.warn("Provider rejected the payment before acting; releasing invoices intentId={} reason={}",intent,rejected.getMessage());
-            result=new ProviderResult(null,"FAILED",null,"Provider rejected the request before creating a payment");
+            log.warn("Initial payment request rejected; checking current ownership before recording intentId={} reason={}",intent,rejected.getMessage());
+            recordInitialRejection(intent,token,rejected);
+            return get(user,intent);
         } catch(RuntimeException failure) {
             // Identifiers and the exception only: provider exceptions carry no credential or response body.
             log.warn("Payment submission outcome uncertain; recovery will reconcile intentId={}",intent,failure);
-            result=new ProviderResult(null,"UNKNOWN",null,"Provider outcome is uncertain; recovery will query the original operation");
+            result=new ProviderResult(null,"UNKNOWN",null,"Payment outcome is unconfirmed; recovery will check the original operation",BillingProviderEvidence.from(failure));
         }
         recordResult(intent,token,result);
         return get(user,intent);
+    }
+    /** Rejection describes this request, not a provider operation another worker may have created. */
+    private void recordInitialRejection(UUID intent,UUID token,ProviderRejectedException rejected) {
+        db.tx(() -> {
+            var row=locked(intent);
+            BillingProviderEvidence.record(db,intent,null,rejected.diagnostics());
+            if(!token.toString().equals(text(row,"leaseToken")) || !"SUBMITTING".equals(row.get("status"))
+                || row.get("providerId")!=null) {
+                db.event(intent,"STALE_REQUEST_REJECTION","A superseded submission was rejected; the current payment outcome was preserved");
+                return null;
+            }
+            // Expiry alone does not invalidate this proof: no replacement owner claimed the row and
+            // no provider operation has been recorded. The row lock prevents a simultaneous claim.
+            recordResult(intent,token,new ProviderResult(null,"FAILED",null,"The initial request was rejected before a payment was created"));
+            return null;
+        });
     }
     public Map<String,Object> simulate(String user,UUID intent,String outcome) {
         requireNoTransaction();
@@ -160,6 +176,7 @@ public class BillingService {
     public void recordResult(UUID intent,UUID fence,ProviderResult result) {
         db.tx(() -> {
             var row=locked(intent);
+            BillingProviderEvidence.record(db,intent,null,result.diagnostics());
             boolean owner=fence==null || fence.toString().equals(text(row,"leaseToken"));
             // A superseded worker's uncertain answer is dropped. A definitive one is always booked: capture, failure and
             // return are idempotent, and a capture after a release becomes unapplied cash with its own case.
@@ -204,7 +221,7 @@ public class BillingService {
         if(db.update("UPDATE billing.intents SET lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds' WHERE id=? AND (lease_until IS NULL OR lease_until<NOW())",token,intent)==0)
             throw BillingProblem.conflict("Recovery is checking this payment with the provider right now. Try the release again in two minutes");
         return db.one("""
-            SELECT i.id AS intent_id,i.amount_minor,i.currency,i.method,i.provider_id,i.created_at,a.original_request,a.request_version,a.created_at AS prepared_at
+            SELECT i.id AS intent_id,i.amount_minor,i.currency,i.method,i.provider_id,i.created_at,i.lease_until,a.original_request,a.request_version,a.created_at AS prepared_at
             FROM billing.intents i LEFT JOIN billing.attempts a ON a.intent_id=i.id WHERE i.id=?
             """,intent);
     }

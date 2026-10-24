@@ -8,7 +8,14 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { Subject, takeUntil } from 'rxjs';
 import { AuthService } from '../shared/auth.service';
-import { BillingApi, CaseAction, CaseCommand, FinanceCase, FinancePayment, FinanceRefund } from './billing-api';
+import { BillingApi, CaseAction, CaseCommand, ExternalConfirmation, FinanceCase, FinancePayment, FinanceRefund, ProviderEvidence } from './billing-api';
+
+/** The Stripe-confirmation form as typed; the ticket stays a string until it is sent. */
+interface ConfirmationDraft {
+  source: string; account: string; searched: string; result: string; ticket: string; checkedAt: string; evidenceSha256: string;
+}
+/** 13 to 19 digits, optionally grouped: looks like a card or bank account number, which must never be stored here. */
+const ACCOUNT_DIGITS = /(?:\d[ -]?){12,18}\d/;
 
 interface SavedRefundRequest {
   intentId: string; key: string; amountMinor: number; reason: string;
@@ -76,7 +83,19 @@ interface SavedRefundRequest {
               <td>{{ payment.amountMinor / 100 | currency:payment.currency }}</td><td>{{ payment.refundedMinor / 100 | currency:payment.currency }}</td>
               <td>{{ payment.availableRefundMinor / 100 | currency:payment.currency }}</td><td>{{ payment.method }} · {{ payment.status }}<p class="muted">{{ payment.provider || 'Provider not reported' }}</p></td><td>
               @if (payment.canRequestRefund === true) { <button mat-button (click)="beginRefund(payment.id)" [disabled]="actionBusy() || !!refundRequest() || !!storageError()">Request refund</button> }
-              @else { <span class="muted">No refund action available</span> }</td></tr> }
+              @else { <span class="muted">No refund action available</span> }
+              <button mat-button (click)="showProviderEvidence(payment.id)">Provider evidence</button></td></tr>
+              @if (evidenceFor() === payment.id) { <tr><td colspan="6">
+                <p class="muted">Restricted support evidence. Do not copy fraud or risk codes into customer messages.</p>
+                @if (evidenceLoading()) { <p>Loading provider evidence...</p> }
+                @if (evidenceError()) { <p role="alert">{{ evidenceError() }}</p> }
+                @if (!evidenceLoading() && !evidenceError() && !providerEvidence().length) { <p>No provider diagnostics have been recorded.</p> }
+                @for (entry of providerEvidence(); track entry.id) {
+                  <p class="reference">{{ entry.createdAt | date:'medium' }}@if (entry.refundId) { · Refund {{ entry.refundId }} }</p>
+                  <p class="reference">{{ evidenceSummary(entry) }}</p>
+                }
+              </td></tr> }
+            }
           </tbody></table></div> }
         }
       </mat-card-content></mat-card>
@@ -107,6 +126,7 @@ interface SavedRefundRequest {
       <mat-card class="panel"><mat-card-content>
         <div class="section-heading"><h2>Cases requiring review</h2><button mat-stroked-button (click)="load()" [disabled]="loading() || actionBusy()">Refresh cases</button></div>
         <p class="muted">Resolving a case never marks a payment paid. Attach a provider reference that the server verifies with the provider, or request a release that a different approver confirms. Every action is recorded.</p>
+        <p class="muted">Carrier finance takes every decision here. The application team can add notes with technical findings, but cannot verify, release, approve or close a case.</p>
         @if (caseError()) { <p class="notice error" role="alert">{{ caseError() }}</p> }
         @if (caseMessage()) { <p class="notice" role="status">{{ caseMessage() }}</p> }
         @if (activeCase(); as item) {
@@ -114,6 +134,33 @@ interface SavedRefundRequest {
             <h3>{{ caseTitle() }}</h3>
             <p class="reference">Case {{ item.id }} · {{ item.reason }} · payment {{ item.intentId }}@if (item.refundId) { · refund {{ item.refundId }} }</p>
             @if (item.releaseNote) { <p>Release requested by {{ item.releaseRequestedBy }}: {{ item.releaseNote }}</p> }
+            @if (item.externalConfirmation) { <p>Stripe confirmation: {{ confirmationSummary(item) }}</p> }
+            @if (caseCommand() === 'external-confirmation') {
+              <p class="muted">Use this only when Stripe's own search found nothing. Record what Carrier finance checked in Stripe. A different approver confirms after the app checks Stripe again.</p>
+              <mat-form-field appearance="outline"><mat-label>Where Stripe confirmed it</mat-label>
+                <select matNativeControl [(ngModel)]="confirmation.source" [disabled]="actionBusy()">
+                  <option value="STRIPE_DASHBOARD">Stripe Dashboard</option><option value="STRIPE_SUPPORT">Stripe support</option>
+                </select>
+              </mat-form-field>
+              <mat-form-field appearance="outline"><mat-label>Original Stripe account (acct_ ID or name)</mat-label>
+                <input matInput [(ngModel)]="confirmation.account" maxlength="100" autocomplete="off" [disabled]="actionBusy()">
+              </mat-form-field>
+              <mat-form-field appearance="outline" class="refund-reason"><mat-label>What was searched</mat-label>
+                <textarea matInput [(ngModel)]="confirmation.searched" maxlength="500" rows="2" [disabled]="actionBusy()"></textarea>
+              </mat-form-field>
+              <mat-form-field appearance="outline" class="refund-reason"><mat-label>What Stripe showed</mat-label>
+                <textarea matInput [(ngModel)]="confirmation.result" maxlength="500" rows="2" [disabled]="actionBusy()"></textarea>
+              </mat-form-field>
+              <mat-form-field appearance="outline"><mat-label>Support ticket (Stripe support only)</mat-label>
+                <input matInput [(ngModel)]="confirmation.ticket" maxlength="100" autocomplete="off" [disabled]="actionBusy()">
+              </mat-form-field>
+              <mat-form-field appearance="outline"><mat-label>When Stripe was checked</mat-label>
+                <input matInput type="datetime-local" [(ngModel)]="confirmation.checkedAt" [disabled]="actionBusy()">
+              </mat-form-field>
+              <mat-form-field appearance="outline"><mat-label>SHA-256 of the saved evidence file</mat-label>
+                <input matInput [(ngModel)]="confirmation.evidenceSha256" maxlength="64" autocomplete="off" [disabled]="actionBusy()">
+              </mat-form-field>
+            }
             @if (caseCommand() === 'verify') {
               <mat-form-field appearance="outline"><mat-label>Provider reference</mat-label>
                 <input matInput [(ngModel)]="caseReference" maxlength="255" autocomplete="off" [disabled]="actionBusy()">
@@ -138,13 +185,15 @@ interface SavedRefundRequest {
                   <td class="reason-cell">{{ item.status }}@if (item.resolution) { <p class="muted">{{ item.resolution }} · {{ item.resolvedBy }}</p> }@if (item.releaseRequestedBy && item.status === 'OPEN') { <p class="muted">Release awaiting approval</p> }</td>
                   <td>{{ item.createdAt | date:'medium' }}</td>
                   <td><div class="case-actions">
-                    @if (item.canVerifyReference) { <button mat-button (click)="beginCaseAction(item, 'verify')" [disabled]="actionBusy()">Attach provider reference</button> }
+                    @if (item.canVerifyReference) { <button mat-button (click)="beginCaseAction(item, 'verify')" [disabled]="actionBusy()">{{ item.reason === 'REFUND_EVIDENCE_CONFLICT' ? 'Verify refund outcome' : 'Attach provider reference' }}</button> }
                     @if (item.canRequestRelease) { <button mat-button (click)="beginCaseAction(item, 'request-release')" [disabled]="actionBusy()">Request release</button> }
                     @if (item.canApproveRelease) {
                       <button mat-stroked-button (click)="beginCaseAction(item, 'approve-release')" [disabled]="actionBusy()">Approve release</button>
                       <button mat-button (click)="beginCaseAction(item, 'reject-release')" [disabled]="actionBusy()">Reject</button>
                     }
+                    @if (item.canRecordExternalConfirmation) { <button mat-button (click)="beginCaseAction(item, 'external-confirmation')" [disabled]="actionBusy()">Record Stripe confirmation</button> }
                     @if (item.canClose) { <button mat-button (click)="beginCaseAction(item, 'close')" [disabled]="actionBusy()">Close after review</button> }
+                    @if (item.canAddNote) { <button mat-button (click)="beginCaseAction(item, 'note')" [disabled]="actionBusy()">Add note</button> }
                     @if (item.reason !== 'UNMATCHED_WEBHOOK') { <button mat-button (click)="showHistory(item)" [disabled]="actionBusy()">History</button> }
                   </div></td></tr>
                 @if (historyFor() === item.id) {
@@ -161,6 +210,10 @@ interface SavedRefundRequest {
   `
 })
 export class FinanceComponent implements OnInit, OnDestroy {
+  readonly evidenceFor = signal<string | null>(null);
+  readonly providerEvidence = signal<ProviderEvidence[]>([]);
+  readonly evidenceLoading = signal(false);
+  readonly evidenceError = signal('');
   private readonly api = inject(BillingApi);
   private readonly auth = inject(AuthService);
   private readonly destroyed = new Subject<void>();
@@ -196,15 +249,19 @@ export class FinanceComponent implements OnInit, OnDestroy {
   refundRejectionNote = '';
   caseNote = '';
   caseReference = '';
+  confirmation: ConfirmationDraft = this.emptyConfirmation();
 
   beginCaseAction(item: FinanceCase, command: CaseCommand) {
     if (this.actionBusy()) return;
     const allowed = command === 'verify' ? item.canVerifyReference
       : command === 'request-release' ? item.canRequestRelease
-      : command === 'close' ? item.canClose : item.canApproveRelease;
+      : command === 'close' ? item.canClose
+      : command === 'note' ? item.canAddNote
+      : command === 'external-confirmation' ? item.canRecordExternalConfirmation : item.canApproveRelease;
     if (allowed !== true) return;
     this.activeCase.set(item); this.caseCommand.set(command);
-    this.caseNote = ''; this.caseReference = ''; this.caseError.set(''); this.caseMessage.set('');
+    this.caseNote = ''; this.caseReference = ''; this.confirmation = this.emptyConfirmation();
+    this.caseError.set(''); this.caseMessage.set('');
   }
 
   cancelCaseAction() {
@@ -222,7 +279,16 @@ export class FinanceComponent implements OnInit, OnDestroy {
     if (command === 'verify' && !/^[A-Za-z0-9_-]{3,255}$/.test(reference)) {
       this.caseError.set('Enter the provider reference exactly as the provider shows it.'); return;
     }
+    let confirmation: (ExternalConfirmation & { note: string }) | null = null;
+    if (command === 'external-confirmation') {
+      confirmation = this.confirmationRequest(note);
+      if (!confirmation) return;
+    } else if (command === 'note' && ACCOUNT_DIGITS.test(note)) {
+      this.caseError.set('Remove card or bank account numbers; record only what was searched and what was found.'); return;
+    }
     const request = command === 'verify' ? this.api.verifyCaseReference(item.id, { reference, note })
+      : command === 'note' ? this.api.addCaseNote(item.id, { note })
+      : command === 'external-confirmation' && confirmation ? this.api.recordExternalConfirmation(item.id, confirmation)
       : command === 'request-release' ? this.api.requestCaseRelease(item.id, { note })
       : command === 'approve-release' ? this.api.approveCaseRelease(item.id)
       : command === 'reject-release' ? this.api.rejectCaseRelease(item.id, { note })
@@ -241,9 +307,13 @@ export class FinanceComponent implements OnInit, OnDestroy {
         this.caseError.set(failure.error?.code === 'PROVIDER_REFERENCE_NOT_VERIFIED'
           ? 'The provider did not confirm this reference for this operation. Nothing was changed.'
           : failure.error?.code === 'PROVIDER_HAS_OPERATION'
-          ? 'The provider has this operation, so nothing was released. Its recorded status was updated; refresh cases.'
+          ? 'The provider has this operation, so nothing was released. Its verified status was recorded; refresh payment and refund balances.'
+          : failure.error?.code === 'REFUND_RECONCILIATION_PENDING'
+          ? 'The provider evidence was saved, but the refund still needs reconciliation. Further refunds remain blocked; review the case history.'
+          : failure.error?.code === 'STRIPE_CONFIRMATION_EXPIRED'
+          ? 'The Stripe confirmation is more than 7 days old. Reject the request so finance can check Stripe again.'
           : failure.error?.code === 'PROVIDER_ABSENCE_NOT_CONFIRMED'
-          ? 'The provider could not confirm that nothing exists, so nothing was released. Try again later or attach the provider reference.'
+          ? 'The provider could not confirm that nothing exists, so nothing was released and the reservation remains. If Stripe\'s own search found nothing, Carrier finance can record a Stripe confirmation; an empty search alone is never permission to issue a replacement.'
           : failure.status === 403 ? 'This action needs a different authorized employee or role.'
           : failure.status === 409 ? 'The case changed since it was loaded. Refresh cases before acting again.'
           : failure.status === 400 ? 'The server rejected the input. Check the reference and the note.'
@@ -263,10 +333,12 @@ export class FinanceComponent implements OnInit, OnDestroy {
 
   caseTitle() {
     switch (this.caseCommand()) {
-      case 'verify': return 'Attach a provider reference';
+      case 'verify': return this.activeCase()?.reason === 'REFUND_EVIDENCE_CONFLICT' ? 'Verify the conflicting refund with the provider' : 'Attach a provider reference';
       case 'request-release': return 'Request a release (a different approver must confirm)';
       case 'approve-release': return 'Approve the release';
       case 'reject-release': return 'Reject the release request';
+      case 'note': return 'Add a note for Carrier finance';
+      case 'external-confirmation': return 'Record what Stripe confirmed (a different approver must confirm)';
       default: return 'Close after review';
     }
   }
@@ -277,6 +349,8 @@ export class FinanceComponent implements OnInit, OnDestroy {
       case 'request-release': return 'Request release';
       case 'approve-release': return 'Approve release';
       case 'reject-release': return 'Reject request';
+      case 'note': return 'Add note';
+      case 'external-confirmation': return 'Record confirmation';
       default: return 'Close case';
     }
   }
@@ -285,10 +359,59 @@ export class FinanceComponent implements OnInit, OnDestroy {
     switch (command) {
       case 'verify': return 'The provider confirmed the reference. Its recorded status now drives the operation, and the case is resolved.';
       case 'request-release': return 'Release requested. A different authorized approver must confirm it; the reservation stays until then.';
-      case 'approve-release': return 'Release approved and recorded. If the provider reports money later, it is still recorded for finance review.';
+      case 'approve-release': return 'The provider check and its outcome were recorded. Review the refreshed status and balances for the result.';
       case 'reject-release': return 'Release request rejected. The case stays open.';
+      case 'note': return 'Note added. It is in the case history; nothing else changed.';
+      case 'external-confirmation': return 'Stripe confirmation recorded. A different authorized approver must confirm the release after the app checks Stripe again.';
       default: return 'Case closed after review.';
     }
+  }
+
+  /** One line describing the Stripe confirmation behind a waiting release request. */
+  confirmationSummary(item: FinanceCase) {
+    const c = item.externalConfirmation;
+    if (!c) return '';
+    const checked = new Date(c.checkedAt);
+    return [c.source === 'STRIPE_SUPPORT' ? 'Stripe support' : 'Stripe Dashboard', c.account, `searched: ${c.searched}`,
+      `result: ${c.result}`, c.ticket ? `ticket ${c.ticket}` : '', isNaN(checked.getTime()) ? '' : `checked ${checked.toLocaleString()}`]
+      .filter(part => part).join(' · ');
+  }
+
+  private emptyConfirmation(): ConfirmationDraft {
+    return { source: 'STRIPE_DASHBOARD', account: '', searched: '', result: '', ticket: '', checkedAt: '', evidenceSha256: '' };
+  }
+
+  /** The confirmation exactly as the server expects it, or null after explaining what to fix. */
+  private confirmationRequest(note: string): (ExternalConfirmation & { note: string }) | null {
+    const c = this.confirmation;
+    const source = c.source; const account = c.account.trim(); const searched = c.searched.trim(); const result = c.result.trim();
+    const ticket = c.ticket.trim(); const digest = c.evidenceSha256.trim(); const checked = new Date(c.checkedAt);
+    const fail = (message: string) => { this.caseError.set(message); return null; };
+    if (source !== 'STRIPE_DASHBOARD' && source !== 'STRIPE_SUPPORT') return fail('Choose Stripe Dashboard or Stripe support as the source.');
+    if (account.length < 3) return fail('Name the original Stripe account: its acct_ ID or the account name shown in the Dashboard.');
+    if (searched.length < 10 || searched.length > 500 || result.length < 10 || result.length > 500)
+      return fail('Describe what was searched and what Stripe showed, in 10 to 500 characters each.');
+    if (source === 'STRIPE_SUPPORT' && !ticket) return fail('Enter the Stripe support ticket reference.');
+    if (!c.checkedAt || isNaN(checked.getTime())) return fail('Enter when Stripe was checked.');
+    if (!/^[a-fA-F0-9]{64}$/.test(digest)) return fail('Enter the SHA-256 digest of the saved evidence file (64 characters).');
+    if ([account, searched, result, ticket, note].some(text => ACCOUNT_DIGITS.test(text)))
+      return fail('Remove card or bank account numbers; record only what was searched and what was found.');
+    return { source, account, searched, result, ticket: ticket || null, checkedAt: checked.toISOString(), evidenceSha256: digest, note };
+  }
+
+  showProviderEvidence(intentId: string) {
+    this.evidenceFor.set(intentId); this.providerEvidence.set([]); this.evidenceError.set(''); this.evidenceLoading.set(true);
+    this.api.providerEvidence(intentId).pipe(takeUntil(this.destroyed)).subscribe({
+      next: rows => { if (this.evidenceFor() === intentId) { this.providerEvidence.set(rows); this.evidenceLoading.set(false); } },
+      error: () => { if (this.evidenceFor() === intentId) { this.evidenceError.set('Provider evidence could not be loaded.'); this.evidenceLoading.set(false); } }
+    });
+  }
+  evidenceSummary(entry: ProviderEvidence): string {
+    try {
+      const value = JSON.parse(entry.diagnostics) as Record<string, unknown>;
+      const fields: [string, string][] = [['requestId', 'Provider request'], ['httpStatus', 'HTTP status'], ['errorType', 'Type'], ['errorCode', 'Code'], ['declineCode', 'Decline'], ['rateLimitReason', 'Rate limit'], ['retryAfterSeconds', 'Retry after seconds'], ['shouldRetry', 'Retry advice']];
+      return fields.filter(([key]) => value[key] !== undefined && value[key] !== null).map(([key, label]) => `${label}: ${String(value[key])}`).join(' · ');
+    } catch { return 'Recorded evidence could not be displayed.'; }
   }
 
   ngOnInit() { this.restore(); this.load(); this.loadPayments(); this.loadRefunds(); }
@@ -437,12 +560,12 @@ export class FinanceComponent implements OnInit, OnDestroy {
         if (result.id !== id) { this.actionError.set('The rejection response could not be matched. Refresh refunds before taking another action.'); return; }
         this.rejectingRefund.set(null);
         this.refunds.update(rows => rows.map(row => row.id === id ? { ...row, ...result, canApprove: false, canReject: false } : row));
-        this.actionMessage.set('Refund request rejected. No money moved, and its amount is available to refund again.');
+        this.actionMessage.set('Refund request rejected before sending. No money moved, and its amount is available to refund again; refresh payment status before another refund.');
         this.loadRefunds(); this.loadPayments();
       },
       error: failure => {
         this.actionBusy.set(false);
-        this.actionError.set(failure.status === 403 ? 'Rejecting needs the requester or a refund approver for this merchant.'
+        this.actionError.set(failure.status === 403 ? 'A requested refund needs its requester or a refund approver. An approved, unsent refund needs a refund approver other than its requester.'
           : failure.status === 409 ? 'The refund changed since it was loaded. Refresh refunds before acting again.'
           : failure.status === 400 ? 'The server rejected the input. Record why the refund is rejected, in 10 to 1000 characters.'
           : 'The rejection has no confirmed response. Refresh refunds to see the recorded status.');

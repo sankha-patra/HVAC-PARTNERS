@@ -25,3 +25,10 @@ output "kafka_bootstrap_brokers_iam" {
 output "payment_task_role_arn" { value = try(aws_iam_role.task["billing"].arn, null) }
 output "log_group_names" { value = { for service, group in aws_cloudwatch_log_group.application : service => group.name } }
 # Intentionally no secret values, origin authentication header or task-definition JSON outputs.
+output "application_support_policies" {
+  description = "Attach both to Carrier's single sign-on permission set for application support. Carrier assigns the people."
+  value = {
+    monitoring = aws_iam_policy.application_support_read_only.arn
+    view_only  = "arn:${data.aws_partition.current.partition}:iam::aws:policy/job-function/ViewOnlyAccess"
+  }
+}

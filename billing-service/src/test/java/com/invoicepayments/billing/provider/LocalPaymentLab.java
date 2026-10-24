@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -203,11 +204,13 @@ public final class LocalPaymentLab implements AutoCloseable {
         boolean captured="CAPTURED".equals(row.get("state"));
         return new JSONObject().put("id",row.get("id")).put("object","checkout.session").put("livemode",false).put("mode","payment")
             .put("currency","usd").put("amount_total",row.get("minor")).put("payment_intent",row.get("pi"))
-            .put("payment_status",captured?"paid":"unpaid").put("status","complete").put("metadata",metadata(row));
+            .put("payment_status",captured?"paid":"unpaid").put("status","complete").put("metadata",metadata(row))
+            .put("payment_method_types",new JSONArray().put(row.get("method")));
     }
     private JSONObject paymentIntent(Map<String,Object> row){return new JSONObject().put("id",row.get("pi")).put("object","payment_intent")
         .put("livemode",false).put("currency","usd").put("amount",row.get("minor")).put("amount_received","CAPTURED".equals(row.get("state"))?row.get("minor"):0)
-        .put("status","CAPTURED".equals(row.get("state"))?"succeeded":"processing").put("metadata",metadata(row));}
+        .put("status","CAPTURED".equals(row.get("state"))?"succeeded":"processing").put("metadata",metadata(row))
+        .put("payment_method_types",new JSONArray().put(row.get("method")));}
     private JSONObject refund(Map<String,Object> row){return new JSONObject().put("id",row.get("id")).put("object","refund").put("status","succeeded")
         .put("payment_intent",row.get("pi")).put("currency","usd").put("amount",row.get("minor"))
         .put("metadata",metadata(row).put("refundId",row.get("refund_id")));}

@@ -1,5 +1,9 @@
 # New financial workflow owns only the versioned billing schema.
 spring:
+  datasource:
+    hikari:
+      # Pool waiting consumes the same request budget as SQL and provider work.
+      connection-timeout: 3000
   flyway:
     enabled: true
     default-schema: billing
@@ -41,6 +45,8 @@ logging:
     org.hibernate.orm.jdbc.bind: "OFF"
     org.hibernate.type.descriptor.sql.BasicBinder: "OFF"
 billing:
+  # Cooperative full-route budget; provider work leaves 5 seconds for recording/response.
+  request-budget: ${BILLING_REQUEST_BUDGET:25s}
   enabled: true
   provider: ${BILLING_PROVIDER:SIMULATOR}
   simulator-enabled: ${BILLING_SIMULATOR_ENABLED:false}
@@ -54,6 +60,9 @@ billing:
   events-topic: billing.events.v1
   kafka-enabled: ${BILLING_KAFKA_ENABLED:true}
   stripe:
+    # Divide the account's safe concurrency by the maximum deployed replica count.
+    max-concurrent: ${BILLING_STRIPE_MAX_CONCURRENT:8}
+    admission-wait: ${BILLING_STRIPE_ADMISSION_WAIT:100ms}
     secret-key: ${BILLING_STRIPE_SECRET_KEY:}
     webhook-secret: ${BILLING_STRIPE_WEBHOOK_SECRET:}
   provider-merchant-id: ${BILLING_PROVIDER_MERCHANT_ID:10000000-0000-0000-0000-000000000001}

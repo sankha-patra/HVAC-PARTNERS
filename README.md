@@ -10,7 +10,8 @@ Java 17 / Spring Boot, Angular, PostgreSQL, Kafka, Prometheus and Grafana. AWS i
 - **A timeout is UNKNOWN, never FAILED.** The invoice stays reserved and recovery reuses the original idempotency key: it reads by provider ID, or replays the saved request inside the provider's 23-hour window.
 - **Retries cannot pay twice.** The browser's key returns the same payment; a second key cannot reserve the same invoice; a second submit makes no second provider call.
 - **Refunds recover the same way,** with backoff, escalation and a stuck-refund alert. A different employee must approve every refund.
-- **Stuck cases are resolved, not overwritten.** Staff attach a provider reference that the provider verifies, or two different employees approve a release. Nothing can mark a payment paid. Every action is audited.
+- **Stuck cases are resolved, not overwritten.** Staff attach a provider reference that the provider verifies, or two different employees approve a release after the provider proves nothing exists. An empty provider search is never proof; it can lead to a release only with a recorded Stripe confirmation and a fresh check. Nothing can mark a payment paid. Every action is audited.
+- **The client decides; the application team supports.** FINANCE and REFUND_APPROVER (the client's finance staff) make every money decision. OPS (the application team) reads cases and evidence and adds notes, but cannot verify, release, approve or close anything. The client assigns all roles.
 - **Abandoned unsubmitted payments expire** after 30 minutes and release their invoices.
 
 ## Run locally
@@ -21,7 +22,7 @@ Install Docker Desktop with Compose and PowerShell. From this repository:
 ./scripts/start-billing.ps1
 ```
 
-This builds all services, generates fresh ignored local secrets, and starts PostgreSQL, three Kafka brokers, scheduled recovery workers and monitoring. Open http://localhost:4400; Grafana is http://localhost:3200. The Grafana password is in the ignored `.env.billing.local` file. Demo accounts: `demo/demo123`, `other/other123`, `admin/admin123`, `reviewer/reviewer123`. These fixtures are explicitly enabled only for the local profile.
+This builds all services, generates fresh ignored local secrets, and starts PostgreSQL, three Kafka brokers, scheduled recovery workers and monitoring. Open http://localhost:4400; Grafana is http://localhost:3200. The Grafana password is in the ignored `.env.billing.local` file. Demo accounts: `demo/demo123` (payer), `other/other123` (another customer), `admin/admin123` (finance), `reviewer/reviewer123` (refund approver), `support/support123` (application team, OPS only). These fixtures are explicitly enabled only for the local profile.
 
 For repeatable failure, restart, restoration and dashboard checks:
 

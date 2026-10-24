@@ -1,5 +1,52 @@
 # Verification of the extracted repository
 
+## Roles, Stripe-confirmation release and a tested Codex batch — 24 October 2026
+
+A Codex batch (stale-rejection guard, lease-bounded provider budget, admission limit, refund conflict
+cases, failed-ACH mapping, provider diagnostics, provider metrics) had not been tested. Its first full
+run found 13 failures out of 347 billing tests. The causes:
+
+- **Test fakes did not look like Stripe.** The adapter now checks `payment_method_types`, which Stripe
+  always returns; the simulation lab's fake and one unit fixture left it out, so payments never
+  captured there. The fakes were corrected, not the check.
+- **One regression.** The provider budget had moved to the system clock, so the tests proving that
+  searches stop inside 60 seconds could no longer drive it. It now uses a ticker: monotonic in
+  production, the test clock in tests.
+- **Tests encoding old rules.** An HTTP 400 is now uncertain rather than a rejection, an empty Stripe
+  search is no longer proof of absence, and a contradictory refund result opens a case. Those tests
+  were updated to the new rules.
+
+New this day:
+
+- **Who decides.** OPS (the application team) can read cases and evidence and add notes, but can no
+  longer verify a reference, request a release or close a case; FINANCE does. Demo user
+  `support/support123` holds OPS only.
+- **Release on a recorded Stripe confirmation** when Stripe's own search finds nothing (V20). Its
+  five tests and the role test failed first against placeholder code, then passed; a seventh, which
+  checks that an empty search alone releases nothing, passed already. The full run also caught a
+  real bug in it: a release check without a finding crashed instead of being refused.
+- **Tests for the Codex batch, written after its code:** a stale rejection cannot fail a payment or
+  refund that another worker created; a failed ACH debit after a completed Checkout fails only with
+  its failed charge; an expired lease sends nothing to Stripe; a release after a confirmed failure
+  reports success; a long database problem never turns a webhook into finance work.
+- **Alerts** carry `responder` and `decision` labels; the stuck alerts are split by who decides.
+- **AWS:** `support.tf` defines the application support team's read-only monitoring policy.
+
+Results:
+
+| Check | Result |
+| --- | --- |
+| Java suite (`scripts/verify-container-tests.ps1`, now working under Windows PowerShell 5.1) | **386 tests**, 0 failures, errors or skips (360 billing, 26 identity) |
+| Frontend unit tests and production build | 50 tests pass; build completes |
+| `promtool test rules` / `check rules` | all pass; 24 rules valid |
+| `amtool check-config` on the Alertmanager template | valid |
+| `terraform fmt`, `validate`, `test` (mocked) | pass; 3 runs |
+| `scripts/check-repository.ps1` | pass |
+
+Evidence: `.tmp-notes/container-tests/20261024T112234062Z/` (git-ignored). The test log contains no
+key, webhook secret or bearer token. Simulator and a fake Stripe transport only: no live Stripe call,
+no AWS deployment and no delivered alert.
+
 ## Release identity and provider time budget — 23 October 2026
 
 A Codex review of the 22 October work found three gaps by reading the code. Each new test

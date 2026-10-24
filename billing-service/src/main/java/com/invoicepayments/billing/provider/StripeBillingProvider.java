@@ -1,5 +1,9 @@
 package com.invoicepayments.billing.provider;
 
+import com.invoicepayments.billing.BillingExecutionBudget;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -20,12 +24,17 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
 import java.util.Objects;
+import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
+import java.util.concurrent.Semaphore;
+import java.util.function.LongSupplier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -41,24 +50,53 @@ public final class StripeBillingProvider implements BillingProvider {
     private final String secretKey;
     private final Transport transport;
     private final Clock clock;
-    /** End of the current operation's budget on this thread; calls nested inside one operation share it. */
-    private final ThreadLocal<Instant> deadline = new ThreadLocal<>();
+    private final MeterRegistry registry;
+    private final Semaphore admission;
+    private final Duration admissionWait;
+    private final Map<String, AtomicInteger> credentialsRejected = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> invalidRequests = new ConcurrentHashMap<>();
+    /** Nested recovery calls share one permit, one monotonic deadline and sanitized diagnostics. */
+    private final ThreadLocal<OperationContext> operationContext = new ThreadLocal<>();
+    /** Source of the operation deadline: monotonic in production, so a wall-clock jump cannot stretch it. */
+    private final LongSupplier ticker;
 
     public StripeBillingProvider(String secretKey) {
         this(secretKey, new JdkTransport());
+    }
+
+    public StripeBillingProvider(String secretKey, MeterRegistry registry, int maxConcurrent, Duration admissionWait) {
+        this(secretKey, new JdkTransport(), Clock.systemUTC(), registry, maxConcurrent, admissionWait);
     }
 
     StripeBillingProvider(String secretKey, Transport transport) {
         this(secretKey, transport, Clock.systemUTC());
     }
 
+    /** Tests drive the operation budget through this clock; production uses a monotonic ticker instead. */
     StripeBillingProvider(String secretKey, Transport transport, Clock clock) {
+        this(secretKey, transport, clock, null, 8, Duration.ofMillis(100), () -> TimeUnit.MILLISECONDS.toNanos(clock.millis()));
+    }
+
+    StripeBillingProvider(String secretKey, Transport transport, Clock clock, MeterRegistry registry,
+            int maxConcurrent, Duration admissionWait) {
+        this(secretKey, transport, clock, registry, maxConcurrent, admissionWait, System::nanoTime);
+    }
+
+    private StripeBillingProvider(String secretKey, Transport transport, Clock clock, MeterRegistry registry,
+            int maxConcurrent, Duration admissionWait, LongSupplier ticker) {
         this.secretKey = secretKey == null ? "" : secretKey.trim();
         if (!this.secretKey.isEmpty() && !this.secretKey.matches("sk_test_[A-Za-z0-9]+")) {
             throw new IllegalArgumentException("Only a Stripe test secret key is supported");
         }
         this.transport = Objects.requireNonNull(transport);
         this.clock = Objects.requireNonNull(clock);
+        if (maxConcurrent < 1 || maxConcurrent > 256) throw new IllegalArgumentException("Provider concurrency must be between 1 and 256");
+        if (admissionWait == null || admissionWait.isNegative() || admissionWait.compareTo(Duration.ofSeconds(5)) > 0)
+            throw new IllegalArgumentException("Provider admission wait must be between zero and five seconds");
+        this.registry = registry;
+        this.admission = new Semaphore(maxConcurrent, true);
+        this.admissionWait = admissionWait;
+        this.ticker = Objects.requireNonNull(ticker);
     }
 
     @Override public String name() { return "STRIPE"; }
@@ -78,24 +116,74 @@ public final class StripeBillingProvider implements BillingProvider {
      * from inside another operation keeps the outer deadline, so searches and fallbacks share one budget.
      */
     private ProviderResult withinBudget(java.util.function.Supplier<ProviderResult> operation) {
-        if (deadline.get() != null) return operation.get();
-        deadline.set(clock.instant().plus(OPERATION_BUDGET));
+        if (operationContext.get() != null) return operation.get();
+        long started = ticker.getAsLong(), measuredFrom = System.nanoTime();
+        long budget = OPERATION_BUDGET.toNanos();
+        Duration callerRemaining = BillingExecutionBudget.providerRemaining();
+        if (callerRemaining != null) budget = Math.min(budget, Math.max(0, callerRemaining.toNanos()));
+        OperationContext context = new OperationContext(started + budget);
+        operationContext.set(context);
+        boolean admitted = false;
         try {
-            return operation.get();
+            long left = remainingNanos();
+            if (left < Duration.ofMillis(500).toNanos()) throw budgetExhausted();
+            admitted = admission.tryAcquire(Math.min(admissionWait.toNanos(), left), TimeUnit.NANOSECONDS);
+            if (!admitted) {
+                context.diagnostics = new ProviderDiagnostics(null, null, null, "local_admission_limit", null, 1, true, "local-admission");
+                recordRequestMetric("admission", "rate_limited", "rate_limit", measuredFrom);
+                throw new ProviderUncertainException("Provider capacity is temporarily busy; the saved operation remains pending");
+            }
+            remainingBudget();
+            ProviderResult result = operation.get();
+            ProviderDiagnostics diagnostics = result.diagnostics() == null ? context.diagnostics : result.diagnostics();
+            if (context.replayForbidden) diagnostics = diagnostics == null
+                    ? new ProviderDiagnostics(null, null, null, null, null, null, false, null)
+                    : diagnostics.withRetryForbidden();
+            return diagnostics == result.diagnostics() ? result
+                    : new ProviderResult(result.providerId(), result.state(), result.checkoutUrl(), result.message(), diagnostics, result.finding());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new ProviderUncertainException("Provider admission was interrupted; the saved operation remains pending");
+        } catch (ProviderUncertainException ex) {
+            ex.attachDiagnostics(context.diagnostics);
+            if (context.replayForbidden) ex.forbidReplay();
+            throw ex;
+        } catch (RuntimeException invalidResponse) {
+            // Malformed fallback/search evidence must not discard an earlier no-retry instruction.
+            ProviderUncertainException uncertain = new ProviderUncertainException(
+                    "Provider response could not be verified; acceptance is unknown", null, context.diagnostics);
+            if (context.replayForbidden) uncertain.forbidReplay();
+            throw uncertain;
         } finally {
-            deadline.remove();
+            if (admitted) admission.release();
+            operationContext.remove();
         }
     }
 
     /** The timeout for the next request, cut to what the operation has left. Nothing new is sent once the budget is used. */
     private Duration remainingBudget() {
-        Instant end = deadline.get();
-        if (end == null) return REQUEST_TIMEOUT;
-        Duration left = Duration.between(clock.instant(), end);
-        if (left.compareTo(Duration.ofMillis(500)) < 0) {
-            throw new ProviderUncertainException("The provider operation used its time budget; its outcome stays uncertain");
-        }
+        Duration left = Duration.ofNanos(Math.max(0, remainingNanos()));
+        if (left.compareTo(Duration.ofMillis(500)) < 0) throw budgetExhausted();
         return left.compareTo(REQUEST_TIMEOUT) < 0 ? left : REQUEST_TIMEOUT;
+    }
+
+    private long remainingNanos() {
+        OperationContext context = operationContext.get();
+        long left = context == null ? REQUEST_TIMEOUT.toNanos() : context.deadlineNanos - ticker.getAsLong();
+        Duration callerRemaining = BillingExecutionBudget.providerRemaining();
+        return callerRemaining == null ? left : Math.min(left, Math.max(0, callerRemaining.toNanos()));
+    }
+
+    private static ProviderUncertainException budgetExhausted() {
+        return new ProviderUncertainException("The provider operation used its time budget; its outcome stays uncertain");
+    }
+
+    private static final class OperationContext {
+        final long deadlineNanos;
+        ProviderDiagnostics diagnostics;
+        ProviderDiagnostics lastResponseDiagnostics;
+        boolean replayForbidden;
+        OperationContext(long deadlineNanos) { this.deadlineNanos = deadlineNanos; }
     }
 
     @Override public ProviderResult submitSaved(ProviderCommand command, String version, Instant preparedAt) {
@@ -150,8 +238,16 @@ public final class StripeBillingProvider implements BillingProvider {
     @Override public ProviderResult recoverPayment(ProviderCommand command, String version, Instant preparedAt, String providerId) {
         return withinBudget(() -> recoverPaymentNow(command, version, preparedAt, providerId));
     }
+    @Override public ProviderResult discoverPayment(ProviderCommand saved, String version, Instant preparedAt) {
+        return withinBudget(() -> {
+            ProviderValidation.payment(saved);
+            if (!paymentRequestVersion().equals(version)) return unknown(null);
+            List<JSONObject> matches = findSessions(saved, preparedAt);
+            return matches.size() == 1 ? verifyPaymentReference(saved, matches.get(0).getString("id")) : unknown(null);
+        });
+    }
     private ProviderResult recoverPaymentNow(ProviderCommand command, String version, Instant preparedAt, String providerId) {
-        if (providerId != null) return lookup(command.idempotencyKey(), providerId);
+        if (providerId != null) return verifyPaymentReference(command, providerId);
         ProviderResult replay;
         try {
             replay = submitSaved(command, version, preparedAt);
@@ -159,11 +255,11 @@ public final class StripeBillingProvider implements BillingProvider {
             // A saved server error repeats for as long as the key lives: stop replaying and search for the session instead.
             List<JSONObject> found = findSessions(command, preparedAt);
             if (found.size() != 1) throw saved;
-            return lookup(command.idempotencyKey(), found.get(0).getString("id"));
+            return verifyPaymentReference(command, found.get(0).getString("id"));
         }
         // A replay returns the original response. Read current Checkout state before
         // applying evidence: the customer may have paid or the session may have expired.
-        try { return lookup(command.idempotencyKey(), replay.providerId()); }
+        try { return verifyPaymentReference(command, replay.providerId()); }
         catch (ProviderUncertainException ex) {
             // Persist the verified identity even if this read fails, so later recovery
             // can use GET after the safe POST window has elapsed.
@@ -200,7 +296,7 @@ public final class StripeBillingProvider implements BillingProvider {
             if (!command.intentId().equals(intentId(session)) || amount(session, "amount_total") != command.amountMinor()) {
                 throw new IllegalArgumentException();
             }
-            return sessionResult(session, command.idempotencyKey());
+            return sessionResult(session, command.idempotencyKey(), command.method());
         } catch (ProviderUncertainException ex) {
             // Session identity and amount were verified before fetching payment state.
             return unknown(session.getString("id"));
@@ -337,13 +433,17 @@ public final class StripeBillingProvider implements BillingProvider {
             session = request("GET", "/v1/checkout/sessions/" + providerId, null, null);
             validateOwnSession(session, saved, providerId);
         } else {
-            // An empty search proves nothing about an account this key may not reach. Search only with the
-            // credentials and API version that sent the original request; the same key is the same account.
+            // Search only the original account and request version. Even there, an empty list is not
+            // final evidence: provider incident reconciliation may expose an operation later.
             if (!paymentRequestVersion().equals(version)) {
-                throw new ProviderUncertainException("Stripe credentials changed since this payment was sent; a search here cannot prove the original account has no payment");
+                return new ProviderResult(null, "UNKNOWN", null,
+                        "Stripe credentials changed since this payment was sent; a search here cannot prove the original account has no payment",
+                        null, ProviderResult.CREDENTIALS_CHANGED);
             }
             List<JSONObject> found = findSessions(saved, preparedAt);
-            if (found.isEmpty()) return absent(null, "Stripe has no Checkout Session for this payment");
+            if (found.isEmpty()) return new ProviderResult(null, "UNKNOWN", null,
+                    "No matching Checkout Session was found; the original outcome still needs provider reconciliation",
+                    null, ProviderResult.SEARCH_EMPTY);
             if (found.size() > 1) return unknown(null);
             session = found.get(0);
         }
@@ -351,21 +451,22 @@ public final class StripeBillingProvider implements BillingProvider {
         if ("open".equals(session.getString("status"))) {
             try {
                 session = request("POST", "/v1/checkout/sessions/" + id + "/expire", "expire_" + saved.idempotencyKey(), Map.of());
-            } catch (ProviderRejectedException notOpen) {
-                // Stripe expires only open sessions: the customer finished meanwhile, so read what happened.
+            } catch (ProviderUncertainException notConfirmed) {
+                // A failed expiration response proves nothing. Read whether checkout completed or expiration succeeded.
                 session = request("GET", "/v1/checkout/sessions/" + id, null, null);
             }
             validateOwnSession(session, saved, id);
         }
         ProviderResult state = sessionResult(session, saved.idempotencyKey(), saved.method());
-        // Expired and unpaid is the only proof that no payment exists and none can be made.
-        return "expired".equals(session.getString("status")) && "FAILED".equals(state.state())
+        // Verify this specific session is expired and unpaid; list emptiness cannot establish absence.
+        return "expired".equals(session.getString("status")) && "unpaid".equals(session.optString("payment_status"))
+                && "FAILED".equals(state.state())
                 ? absent(id, "Stripe Checkout Session is expired and unpaid") : state;
     }
 
     /**
-     * Without a session ID, search every session created while a replay could have created this one: from just
-     * before preparation to the end of the 23-hour replay window, plus an hour for clock differences.
+     * Without a session ID, search the saved request's creation window, including a clock margin.
+     * A later provider reconciliation can fall outside that window, so no matches never proves absence.
      */
     private List<JSONObject> findSessions(ProviderCommand saved, Instant preparedAt) {
         if (preparedAt == null) throw new ProviderUncertainException("The payment's preparation time is unknown");
@@ -387,7 +488,7 @@ public final class StripeBillingProvider implements BillingProvider {
             if (!list.getBoolean("has_more")) return matches;
             if (!validId(after, "cs_test_")) throw new ProviderUncertainException("Stripe returned an unreadable session list");
         }
-        throw new ProviderUncertainException("Too many Checkout Sessions to prove that none belongs to this payment");
+        throw new ProviderUncertainException("The Checkout Session search was incomplete; the original outcome still needs provider reconciliation");
     }
 
     private static void validateOwnSession(JSONObject session, ProviderCommand saved, String id) {
@@ -396,7 +497,7 @@ public final class StripeBillingProvider implements BillingProvider {
                 || !saved.currency().equalsIgnoreCase(session.getString("currency"))) throw new IllegalArgumentException();
     }
 
-    /** Stripe cannot look a refund up by idempotency key, but it lists a payment's refunds: find ours by its refund ID. */
+    /** Find an existing refund by its local refund ID. An empty list cannot exclude later provider reconciliation. */
     @Override public ProviderResult findRefund(RefundCommand saved, String providerId) {
         return withinBudget(() -> findRefundNow(saved, providerId));
     }
@@ -425,10 +526,12 @@ public final class StripeBillingProvider implements BillingProvider {
                 }
                 return refundResult(candidate);
             }
-            if (!list.getBoolean("has_more")) return absent(null, "Stripe has no refund with this refund ID on the original payment");
+            if (!list.getBoolean("has_more")) return new ProviderResult(null, "UNKNOWN", null,
+                    "No matching refund was found; the original outcome still needs provider reconciliation",
+                    null, ProviderResult.SEARCH_EMPTY);
             if (!validId(after, "re_")) throw new ProviderUncertainException("Stripe returned an unreadable refund list");
         }
-        throw new ProviderUncertainException("Too many refunds on this payment to prove that none is this one");
+        throw new ProviderUncertainException("The refund search was incomplete; the original outcome still needs provider reconciliation");
     }
 
     private static ProviderResult absent(String id, String message) {
@@ -465,16 +568,60 @@ public final class StripeBillingProvider implements BillingProvider {
         }
         JSONObject intent = fetchPaymentIntent(session, key);
         if (expectedMethod != null) validatePaymentMethod(intent, expectedMethod);
+        rememberPaymentError(intent.optJSONObject("last_payment_error"));
         String state = switch (intent.getString("status")) {
             case "succeeded" -> amount(intent, "amount_received") == amount(session, "amount_total") ? "CAPTURED" : "UNKNOWN";
             case "processing", "requires_capture" -> "PROCESSING";
             case "requires_action", "requires_confirmation" -> "REQUIRES_ACTION";
-            case "requires_payment_method" -> "expired".equals(session.optString("status")) ? "FAILED" : "REQUIRES_ACTION";
+            case "requires_payment_method" -> {
+                if ("expired".equals(session.optString("status"))) yield "FAILED";
+                if ("complete".equals(session.optString("status"))) {
+                    yield failedCompletedAch(session, intent, expectedMethod) ? "FAILED" : "UNKNOWN";
+                }
+                yield "REQUIRES_ACTION";
+            }
             case "canceled" -> "FAILED";
             default -> "UNKNOWN";
         };
         return new ProviderResult(id, state, "REQUIRES_ACTION".equals(state) ? url : null,
                 "Stripe test payment " + state.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    /** Original failed debit only. A later ACH return after capture belongs to dispute/reconciliation handling. */
+    private boolean failedCompletedAch(JSONObject session, JSONObject intent, String expectedMethod) {
+        if (!"complete".equals(session.optString("status")) || !"unpaid".equals(session.optString("payment_status"))
+                || (expectedMethod != null && !"ACH".equals(expectedMethod)) || !exactZero(intent, "amount_received")) return false;
+        validatePaymentMethod(session, "ACH");
+        validatePaymentMethod(intent, "ACH");
+        JSONObject error = intent.optJSONObject("last_payment_error");
+        if (error != null && "card_error".equals(error.optString("type"))
+                && ProviderDiagnostics.safeCode(error.optString("code", null)) != null) {
+            JSONObject method = error.optJSONObject("payment_method");
+            if (method != null && "payment_method".equals(method.optString("object"))
+                    && validId(method.optString("id", null), "pm_") && "us_bank_account".equals(method.optString("type"))
+                    && Boolean.FALSE.equals(method.opt("livemode"))
+                    && (intent.isNull("payment_method") || method.getString("id").equals(intent.optString("payment_method")))
+                    && (error.isNull("charge") || error.optString("charge").equals(intent.optString("latest_charge")))) return true;
+        }
+        // The declared allowed method alone is not evidence that an ACH debit actually failed.
+        String chargeId = intent.optString("latest_charge", null);
+        if (!validId(chargeId, "ch_")) return false;
+        JSONObject charge = request("GET", "/v1/charges/" + chargeId, null, null);
+        JSONObject details = charge.optJSONObject("payment_method_details");
+        if (!chargeId.equals(charge.optString("id")) || !"charge".equals(charge.optString("object"))
+                || !Boolean.FALSE.equals(charge.opt("livemode"))
+                || !intent.getString("id").equals(charge.optString("payment_intent"))
+                || !"failed".equals(charge.optString("status")) || !Boolean.FALSE.equals(charge.opt("paid"))
+                || amount(charge, "amount") != amount(intent, "amount")
+                || !intent.getString("currency").equalsIgnoreCase(charge.getString("currency"))
+                || details == null || !"us_bank_account".equals(details.optString("type"))
+                || ProviderDiagnostics.safeCode(charge.optString("failure_code", null)) == null) return false;
+        rememberPaymentError(new JSONObject().put("code", charge.getString("failure_code")));
+        return true;
+    }
+
+    private static boolean exactZero(JSONObject object, String field) {
+        return object.opt(field) instanceof Number && object.getBigDecimal(field).signum() == 0;
     }
 
     private static void validatePaymentMethod(JSONObject object, String expectedMethod) {
@@ -494,7 +641,8 @@ public final class StripeBillingProvider implements BillingProvider {
                 || !session.getJSONObject("metadata").getString("idempotencyKey")
                     .equals(intent.getJSONObject("metadata").getString("idempotencyKey"))
                 || (key != null && !key.equals(intent.getJSONObject("metadata").getString("idempotencyKey")))
-                || amount(session, "amount_total") != amount(intent, "amount")) throw new IllegalArgumentException();
+                || amount(session, "amount_total") != amount(intent, "amount")
+                || !session.getString("currency").equalsIgnoreCase(intent.getString("currency"))) throw new IllegalArgumentException();
         return intent;
     }
 
@@ -587,41 +735,173 @@ public final class StripeBillingProvider implements BillingProvider {
                     .POST(HttpRequest.BodyPublishers.ofString(form.entrySet().stream()
                             .map(e -> encode(e.getKey()) + "=" + encode(e.getValue())).collect(Collectors.joining("&"))));
         } else builder.GET();
+        long started = System.nanoTime();
+        String operation = requestOperation(method, path);
+        String outcome = "uncertain", category = "other";
         try {
             Response response = transport.send(builder.build());
+            recordCredentialStatus(operation, response.status());
+            ProviderDiagnostics diagnostics = responseDiagnostics(response);
+            recordInvalidRequestStatus(operation, response.status(), diagnostics);
+            rememberDiagnostics(diagnostics);
+            category = responseCategory(response.status(), diagnostics);
             if (response.status() < 200 || response.status() >= 300) {
+                if (response.status() == 429) outcome = "rate_limited";
+                // HTTP request classification is separate from proof about a financial operation.
+                if (response.status() == 400 && "invalid_request_error".equals(diagnostics.errorType())) outcome = "rejected";
                 if (notPerformed(response)) {
-                    throw new ProviderRejectedException("Stripe rejected this operation (HTTP " + response.status() + "); it was not performed");
+                    outcome = "rejected";
+                    throw new ProviderRejectedException("Stripe rejected this operation (HTTP " + response.status() + "); it was not performed", diagnostics);
                 }
                 String message = "Stripe did not confirm this operation (HTTP " + response.status() + "); reconcile before retrying";
-                if (response.status() >= 500) throw new ServerError(message);
-                throw new ProviderUncertainException(message);
+                if (response.status() >= 500) throw new ServerError(message, diagnostics);
+                throw new ProviderUncertainException(message, null, diagnostics);
             }
-            return new JSONObject(response.body());
+            JSONObject body = new JSONObject(response.body());
+            outcome = "ok";
+            return body;
         } catch (InterruptedException ex) {
+            category = "network";
             Thread.currentThread().interrupt();
             throw new ProviderUncertainException("Stripe operation interrupted; acceptance is unknown");
         } catch (IOException ex) {
+            category = "network";
             throw new ProviderUncertainException("Stripe operation timed out or was unavailable; acceptance is unknown");
         } catch (ProviderUncertainException ex) {
             throw ex;
         } catch (RuntimeException ex) {
             throw new ProviderUncertainException("Stripe response could not be verified; acceptance is unknown");
+        } finally {
+            recordRequestMetric(operation, outcome, category, started);
         }
     }
 
+    private static String requestOperation(String method, String path) {
+        if (path.startsWith("/v1/checkout/sessions")) {
+            if (path.endsWith("/expire")) return "checkout_expire";
+            if ("POST".equals(method)) return "checkout_create";
+            return path.contains("?") ? "checkout_list" : "checkout_get";
+        }
+        if (path.startsWith("/v1/payment_intents/")) return "payment_intent_get";
+        if (path.startsWith("/v1/charges/")) return "charge_get";
+        if (path.startsWith("/v1/refunds")) {
+            if ("POST".equals(method)) return "refund_create";
+            return path.contains("?") ? "refund_list" : "refund_get";
+        }
+        return "other";
+    }
+
+    private static String responseCategory(int status, ProviderDiagnostics diagnostics) {
+        if (status == 401) return "authentication";
+        if (status == 403) return "permission";
+        if (status == 429) return "rate_limit";
+        if (status >= 500) return "server";
+        return "invalid_request_error".equals(diagnostics.errorType()) ? "invalid_request" : "other";
+    }
+
+    private void recordRequestMetric(String operation, String outcome, String category, long started) {
+        if (registry == null) return;
+        try {
+            String[] tags = {"operation", operation, "outcome", outcome, "category", category};
+            registry.counter("billing.provider.requests", tags).increment();
+            Timer.builder("billing.provider.request").tags(tags).publishPercentileHistogram()
+                    .register(registry).record(Math.max(0, System.nanoTime() - started), TimeUnit.NANOSECONDS);
+        } catch (RuntimeException ignored) {
+            // Monitoring failure must never change a payment result or trigger another financial request.
+        }
+    }
+
+    private void recordCredentialStatus(String operation, int status) {
+        if (registry == null) return;
+        try {
+            if (status == 401 || status == 403) {
+                AtomicInteger rejected = credentialsRejected.computeIfAbsent(operation, value -> {
+                    AtomicInteger state = new AtomicInteger(1);
+                    Gauge.builder("billing.provider.credentials.rejected", state, AtomicInteger::get)
+                            .tag("operation", value).register(registry);
+                    return state;
+                });
+                rejected.set(1);
+            } else if (status >= 200 && status < 300) {
+                AtomicInteger rejected = credentialsRejected.get(operation);
+                if (rejected != null) rejected.set(0);
+            }
+        } catch (RuntimeException ignored) {
+            // An unavailable meter registry must not change a financial outcome.
+        }
+    }
+
+    private void recordInvalidRequestStatus(String operation, int status, ProviderDiagnostics diagnostics) {
+        if (registry == null) return;
+        try {
+            if (status == 400 && "invalid_request_error".equals(diagnostics.errorType())) {
+                AtomicInteger invalid = invalidRequests.computeIfAbsent(operation, value -> {
+                    AtomicInteger state = new AtomicInteger(1);
+                    Gauge.builder("billing.provider.requests.invalid", state, AtomicInteger::get)
+                            .tag("operation", value).register(registry);
+                    return state;
+                });
+                invalid.set(1);
+            } else if (status >= 200 && status < 300) {
+                AtomicInteger invalid = invalidRequests.get(operation);
+                if (invalid != null) invalid.set(0);
+            }
+        } catch (RuntimeException ignored) {
+            // Monitoring failure must not change payment handling or permit a retry.
+        }
+    }
+
+    private static ProviderDiagnostics responseDiagnostics(Response response) {
+        JSONObject error = null;
+        try { error = new JSONObject(response.body()).optJSONObject("error"); }
+        catch (RuntimeException ignored) { /* Malformed bodies are never copied into diagnostics. */ }
+        return new ProviderDiagnostics(response.status(), response.header("Request-Id"),
+                error == null ? null : error.optString("type", null),
+                error == null ? null : error.optString("code", null),
+                error == null ? null : error.optString("decline_code", null),
+                retryAfterSeconds(response.header("Retry-After")),
+                retryHint(response.header("Stripe-Should-Retry")), response.header("Stripe-Rate-Limited-Reason"));
+    }
+
+    private static Integer retryAfterSeconds(String value) {
+        if (value == null || !value.matches("[0-9]{1,5}")) return null;
+        int seconds = Integer.parseInt(value);
+        return seconds <= 86400 ? seconds : null;
+    }
+
+    private static Boolean retryHint(String value) {
+        return "true".equalsIgnoreCase(value) ? Boolean.TRUE : "false".equalsIgnoreCase(value) ? Boolean.FALSE : null;
+    }
+
+    private void rememberDiagnostics(ProviderDiagnostics diagnostics) {
+        OperationContext context = operationContext.get();
+        if (context == null) return;
+        if (Boolean.FALSE.equals(diagnostics.shouldRetry())) context.replayForbidden = true;
+        context.lastResponseDiagnostics = diagnostics;
+        // Preserve actionable error/retry evidence if a subsequent recovery read succeeds.
+        if (context.diagnostics == null || diagnostics.httpStatus() != null && diagnostics.httpStatus() >= 400
+                || context.diagnostics.httpStatus() != null && context.diagnostics.httpStatus() < 400
+                    && context.diagnostics.errorCode() == null) context.diagnostics = diagnostics;
+    }
+
+    private void rememberPaymentError(JSONObject error) {
+        if (error == null) return;
+        OperationContext context = operationContext.get();
+        if (context == null) return;
+        ProviderDiagnostics previous = context.lastResponseDiagnostics;
+        context.diagnostics = new ProviderDiagnostics(previous == null ? null : previous.httpStatus(),
+                previous == null ? null : previous.requestId(), error.optString("type", null), error.optString("code", null),
+                error.optString("decline_code", null), previous == null ? null : previous.retryAfterSeconds(),
+                previous == null ? null : previous.shouldRetry(), previous == null ? null : previous.rateLimitReason());
+    }
+
     /**
-     * Stripe performs nothing on an authentication, permission or request-validation error. A key reused
-     * with other parameters (idempotency_error), a conflict, a rate limit or a server error proves nothing.
+     * Authentication and permission failures establish that this request was refused. A broad HTTP 400
+     * invalid_request_error does not establish that execution never began; keep its financial outcome uncertain.
+     * No response here proves what an earlier attempt using the same idempotency key did.
      */
     private static boolean notPerformed(Response response) {
-        if (response.status() == 401 || response.status() == 403) return true;
-        if (response.status() != 400) return false;
-        try {
-            return "invalid_request_error".equals(new JSONObject(response.body()).getJSONObject("error").optString("type"));
-        } catch (RuntimeException unreadable) {
-            return false;
-        }
+        return response.status() == 401 || response.status() == 403;
     }
 
     private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
@@ -632,12 +912,29 @@ public final class StripeBillingProvider implements BillingProvider {
     /** Stripe's idempotency layer saves a first server error and returns it again on every replay with that key. */
     static final class ServerError extends ProviderUncertainException {
         ServerError(String message) { super(message); }
+        ServerError(String message, ProviderDiagnostics diagnostics) { super(message, null, diagnostics); }
     }
 
     @FunctionalInterface interface Transport {
         Response send(HttpRequest request) throws IOException, InterruptedException;
     }
-    record Response(int status, String body) {}
+    record Response(int status, String body, Map<String, List<String>> headers) {
+        Response(int status, String body) { this(status, body, Map.of()); }
+        Response {
+            Map<String, List<String>> allowed = new LinkedHashMap<>();
+            if (headers != null) headers.forEach((name, values) -> {
+                String normalized = name.toLowerCase(Locale.ROOT);
+                if (List.of("request-id", "retry-after", "stripe-should-retry", "stripe-rate-limited-reason").contains(normalized)
+                        && values != null && !values.isEmpty() && values.get(0) != null && values.get(0).length() <= 128)
+                    allowed.put(normalized, List.of(values.get(0)));
+            });
+            headers = Map.copyOf(allowed);
+        }
+        String header(String name) {
+            List<String> values = headers.get(name.toLowerCase(Locale.ROOT));
+            return values == null ? null : values.get(0);
+        }
+    }
 
     private static final class JdkTransport implements Transport {
         private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3))
@@ -647,7 +944,7 @@ public final class StripeBillingProvider implements BillingProvider {
             try {
                 // The request carries the operation's remaining budget, never more than REQUEST_TIMEOUT.
                 HttpResponse<String> response = pending.get(request.timeout().orElse(REQUEST_TIMEOUT).toMillis(), TimeUnit.MILLISECONDS);
-                return new Response(response.statusCode(), response.body());
+                return new Response(response.statusCode(), response.body(), response.headers().map());
             } catch (TimeoutException ex) {
                 pending.cancel(true);
                 throw new IOException("Provider response timed out");

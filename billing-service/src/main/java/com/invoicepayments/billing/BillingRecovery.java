@@ -41,7 +41,7 @@ public class BillingRecovery {
         if(owned.isEmpty()) return;
         var work=owned.get(0);
         if(!provider.name().equals(work.get("provider"))) {db.tx(()->{db.escalate(intent,null,"ORIGINAL_PROVIDER_UNAVAILABLE",intent.toString(),"The original payment provider is still unavailable");return null;});return;}
-        try {
+        try (var ignored=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
             if(work.get("originalRequest")==null || work.get("providerId")!=null) {
                 result=provider.lookup(BillingService.operationKey(intent),text(work,"providerId"));
             } else {
@@ -49,7 +49,9 @@ public class BillingRecovery {
                 if(!intent.toString().equals(command.intentId()) || !BillingService.operationKey(intent).equals(command.idempotencyKey())
                     || amount(work,"amountMinor")!=command.amountMinor() || !work.get("currency").equals(command.currency())
                     || !work.get("method").equals(command.method())) throw new ProviderReplayUnsafeException();
-                result=provider.recoverPayment(command,text(work,"requestVersion"),Instant.parse(text(work,"preparedAt")),null);
+                result=BillingProviderEvidence.replayForbidden(db,intent,null)
+                    ? provider.discoverPayment(command,text(work,"requestVersion"),Instant.parse(text(work,"preparedAt")))
+                    : provider.recoverPayment(command,text(work,"requestVersion"),Instant.parse(text(work,"preparedAt")),null);
             }
         }
         catch(ProviderReplayUnsafeException failure) {
@@ -59,7 +61,7 @@ public class BillingRecovery {
         }
         catch(RuntimeException failure) {
             log.warn("Payment recovery outcome still uncertain intentId={}",intent,failure);
-            result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Original provider operation is not yet confirmed");
+            result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Original payment outcome is not yet confirmed",BillingProviderEvidence.from(failure));
         }
         try { payments.recordResult(intent,token,result); }
         catch(RuntimeException failure) {
@@ -70,13 +72,14 @@ public class BillingRecovery {
                 db.tx(() -> {db.escalate(intent,null,"RECOVERY_EVIDENCE_MISMATCH",intent.toString(),"Recovery again could not record provider evidence");return null;});
             }
         }
+        ProviderDiagnostics diagnostics=result.diagnostics();
         db.tx(() -> {
             // Backoff is per operation; stuck oldest records do not monopolize each batch.
-            long seconds=backoffSeconds(amount(work,"recoveryCount"));
+            long seconds=retryDelay(amount(work,"recoveryCount"),diagnostics);
             db.update("UPDATE billing.intents SET next_recovery_at=NOW()+(? * INTERVAL '1 second') WHERE id=? AND lease_token IS NULL AND status IN ('SUBMITTING','PROCESSING','UNKNOWN','REQUIRES_ACTION')",seconds,intent);
             // A legitimately processing ACH payment may take days. Escalate uncertainty,
             // rather than treating every asynchronous provider response as a failure.
-            if(amount(work,"recoveryCount")>=5 && db.exists("SELECT 1 FROM billing.intents WHERE id=? AND status IN ('UNKNOWN','SUBMITTING')",intent))
+            if(!technicalFailure(diagnostics) && amount(work,"recoveryCount")>=5 && db.exists("SELECT 1 FROM billing.intents WHERE id=? AND status IN ('UNKNOWN','SUBMITTING')",intent))
                 db.escalate(intent,null,"PAYMENT_UNRESOLVED",intent.toString(),"Payment outcome still unconfirmed after repeated recovery");
             return null;
         });
@@ -104,7 +107,7 @@ public class BillingRecovery {
         if(!provider.name().equals(work.get("paymentProvider"))) {db.tx(()->{db.escalate(intent,refund,"ORIGINAL_PROVIDER_UNAVAILABLE",refund.toString(),"The original payment provider is still unavailable");return null;});return;}
         if("APPROVED".equals(work.get("status"))) {refunds.submitApproved(refund);return;}
         String key=BillingRefundService.operationKey(refund); ProviderResult result;
-        try {
+        try (var ignored=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
             if(work.get("originalRequest")==null || work.get("providerId")!=null) {
                 result=provider.lookupRefund(key,text(work,"providerId"));
             } else {
@@ -113,7 +116,12 @@ public class BillingRecovery {
                     || amount(work,"amountMinor")!=command.amountMinor() || !"USD".equals(command.currency())
                     || !Objects.equals(text(work,"paymentProviderId"),command.providerPaymentId()))
                     throw new ProviderReplayUnsafeException("Saved refund does not match the approved refund; reconciliation required");
-                result=provider.recoverRefund(command,text(work,"requestVersion"),Instant.parse(text(work,"submittedAt")),null);
+                if(BillingProviderEvidence.replayForbidden(db,intent,refund)) {
+                    if(!Objects.equals(provider.refundRequestVersion(),text(work,"requestVersion")))
+                        throw new ProviderReplayUnsafeException("Provider configuration changed; original refund needs verification");
+                    result=provider.findRefund(command,null);
+                    if("ABSENT".equals(result.state())) result=new ProviderResult(null,"UNKNOWN",null,"No refund was found; the original request is not eligible for automatic replay",result.diagnostics());
+                } else result=provider.recoverRefund(command,text(work,"requestVersion"),Instant.parse(text(work,"submittedAt")),null);
             }
         }
         catch(ProviderReplayUnsafeException failure) {
@@ -123,7 +131,7 @@ public class BillingRecovery {
         }
         catch(RuntimeException failure) {
             log.warn("Refund recovery outcome still uncertain refundId={} intentId={}",refund,intent,failure);
-            result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Refund remains uncertain");
+            result=new ProviderResult(text(work,"providerId"),"UNKNOWN",null,"Refund remains uncertain",BillingProviderEvidence.from(failure));
         }
         try {refunds.record(refund,token,result);}
         catch(RuntimeException failure) {
@@ -134,10 +142,11 @@ public class BillingRecovery {
             }
         }
         long attempts=amount(work,"recoveryCount");
+        ProviderDiagnostics diagnostics=result.diagnostics();
         db.tx(() -> {
-            db.update("UPDATE billing.refunds SET next_recovery_at=NOW()+(? * INTERVAL '1 second') WHERE id=? AND lease_token IS NULL AND status IN ('SUBMITTING','PROCESSING','UNKNOWN')",backoffSeconds(attempts),refund);
+            db.update("UPDATE billing.refunds SET next_recovery_at=NOW()+(? * INTERVAL '1 second') WHERE id=? AND lease_token IS NULL AND status IN ('SUBMITTING','PROCESSING','UNKNOWN')",retryDelay(attempts,diagnostics),refund);
             // Pending refunds can legitimately take days; only an unknown outcome escalates by attempts.
-            if(attempts>=5 && db.exists("SELECT 1 FROM billing.refunds WHERE id=? AND status IN ('UNKNOWN','SUBMITTING')",refund))
+            if(!technicalFailure(diagnostics) && attempts>=5 && db.exists("SELECT 1 FROM billing.refunds WHERE id=? AND status IN ('UNKNOWN','SUBMITTING')",refund))
                 db.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund outcome still unconfirmed after repeated recovery");
             return null;
         });
@@ -147,5 +156,18 @@ public class BillingRecovery {
     static long backoffSeconds(long attempts) {
         long seconds=Math.min(1800,10L << Math.min(Math.max(attempts,1)-1,7));
         return seconds+java.util.concurrent.ThreadLocalRandom.current().nextLong(1,6);
+    }
+    private static long retryDelay(long attempts,ProviderDiagnostics diagnostics) {
+        long delay=backoffSeconds(attempts);
+        if(diagnostics!=null && diagnostics.retryAfterSeconds()!=null)
+            delay=Math.max(delay,Math.min(86400,Math.max(0,diagnostics.retryAfterSeconds())));
+        // A persistent credential/request problem needs an engineer, not rapid unchanged requests.
+        if(technicalFailure(diagnostics)) delay=Math.max(delay,300);
+        return delay;
+    }
+    private static boolean technicalFailure(ProviderDiagnostics diagnostics) {
+        if(diagnostics==null) return false;
+        return Objects.equals(diagnostics.httpStatus(),401) || Objects.equals(diagnostics.httpStatus(),403)
+            || "invalid_request_error".equals(diagnostics.errorType());
     }
 }

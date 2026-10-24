@@ -16,6 +16,7 @@ import java.util.Locale;
 @Configuration(proxyBeanMethods=false)
 @Profile("billing")
 public class BillingConfiguration {
+    @Bean JdbcTemplate billingJdbcTemplate(javax.sql.DataSource source) { return new BillingJdbcTemplate(source); }
     public BillingConfiguration(Environment env) {
         boolean production=env.acceptsProfiles(Profiles.of("prod"));
         validatePublicOrigin(env.getProperty("billing.public-url","http://localhost:4200"),production);
@@ -68,6 +69,7 @@ public class BillingConfiguration {
     }
     @Bean
     BillingProvider billingProvider(JdbcTemplate jdbc, PlatformTransactionManager manager, Environment env,
+        io.micrometer.core.instrument.MeterRegistry registry,
         @Value("${billing.provider:SIMULATOR}") String name,
         @Value("${billing.stripe.secret-key:}") String stripeKey) {
         boolean prod=env.acceptsProfiles(Profiles.of("prod"));
@@ -80,7 +82,12 @@ public class BillingConfiguration {
                 if(prod) throw new IllegalStateException("Production cannot use a simulated payment provider");
                 yield new SimulatorBillingProvider(jdbc,manager);
             }
-            case "STRIPE" -> new StripeBillingProvider(stripeKey);
+            case "STRIPE" -> {
+                if(stripeKey.isBlank()) throw new IllegalStateException("Selecting Stripe requires a non-empty test-mode API key");
+                yield new StripeBillingProvider(stripeKey,registry,
+                    env.getProperty("billing.stripe.max-concurrent",Integer.class,8),
+                    org.springframework.boot.convert.DurationStyle.detectAndParse(env.getProperty("billing.stripe.admission-wait","100ms")));
+            }
             default -> throw new IllegalStateException("Unknown billing provider");
         };
     }
