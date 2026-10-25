@@ -69,8 +69,8 @@ class BillingMskIamConfigurationTest {
         var producer = (DefaultKafkaProducerFactory<?, ?>) template.getProducerFactory();
         try {
             for (var config : List.of(producer.getConfigurationProperties(),
-                    configuration.billingKafkaListenerFactory(properties, template).getConsumerFactory().getConfigurationProperties(),
-                    configuration.billingDltListenerFactory(properties).getConsumerFactory().getConfigurationProperties())) {
+                    configuration.billingKafkaListenerFactory(properties, template, new io.micrometer.core.instrument.simple.SimpleMeterRegistry()).getConsumerFactory().getConfigurationProperties(),
+                    configuration.billingDltListenerFactory(properties, new io.micrometer.core.instrument.simple.SimpleMeterRegistry()).getConsumerFactory().getConfigurationProperties())) {
                 assertThat(config).containsEntry("security.protocol", "SASL_SSL")
                         .containsEntry("sasl.mechanism", "AWS_MSK_IAM")
                         .containsEntry("sasl.jaas.config", LOGIN + " required;")

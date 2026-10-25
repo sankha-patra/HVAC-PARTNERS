@@ -948,6 +948,17 @@ class BillingFinancialDatabaseTest {
                 "BANK-" + external, List.of(new BillingReconciliation.Line(intent, gross)));
     }
 
+    // Returns one scripted send result per call and repeats the last one. Needs no mocking agent.
+    static final class ScriptedKafka extends KafkaTemplate<String,byte[]> {
+        private final Deque<CompletableFuture<org.springframework.kafka.support.SendResult<String,byte[]>>> results=new ArrayDeque<>();
+        @SafeVarargs ScriptedKafka(CompletableFuture<org.springframework.kafka.support.SendResult<String,byte[]>>... results) {
+            super(new org.springframework.kafka.core.DefaultKafkaProducerFactory<>(Map.of()));
+            this.results.addAll(List.of(results));
+        }
+        @Override public CompletableFuture<org.springframework.kafka.support.SendResult<String,byte[]>> send(String topic,String key,byte[] data) {
+            return results.size()>1?results.poll():results.peek();
+        }
+    }
     BillingWorkers outboxWorker(KafkaTemplate<String,byte[]> kafka) {return outboxWorker(db,kafka);}
     BillingWorkers outboxWorker(BillingStore store,KafkaTemplate<String,byte[]> kafka) {
         var beans=new DefaultListableBeanFactory();
@@ -1120,10 +1131,31 @@ class BillingFinancialDatabaseTest {
         } finally {worker.close();}
     }
 
-    @Test @SuppressWarnings("unchecked") void transientFailureIsQuarantinedAtAttemptLimit() {
-        KafkaTemplate<String,byte[]> kafka=org.mockito.Mockito.mock(KafkaTemplate.class);
-        org.mockito.Mockito.when(kafka.send(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(byte[].class)))
-            .thenReturn(CompletableFuture.failedFuture(new TimeoutException("test outage")));
+    // A long broker outage is not the event's fault: the event waits, and no dead letter is created.
+    @Test void aLongBrokerOutageNeverTurnsAValidEventIntoADeadLetter() {
+        var kafka=new ScriptedKafka(CompletableFuture.failedFuture(new TimeoutException("send wait timed out")),
+            CompletableFuture.failedFuture(new org.apache.kafka.common.errors.TimeoutException("brokers unavailable")),
+            CompletableFuture.completedFuture(null));
+        UUID payment=created("CARD"),first=enqueue(payment),second=enqueue(payment);
+        db.update("UPDATE billing.outbox SET attempts=? WHERE id=?",BillingWorkers.MAX_OUTBOX_ATTEMPTS-1,first);
+        var worker=outboxWorker(kafka);
+        try {
+            for(int outage=0;outage<2;outage++) {
+                worker.publishOne(worker.claimOutbox(1).get(0));
+                assertThat(db.one("SELECT state,attempts FROM billing.outbox WHERE id=?",first))
+                    .containsEntry("state","NEW").containsEntry("attempts",BillingWorkers.MAX_OUTBOX_ATTEMPTS-1);
+                db.update("UPDATE billing.outbox SET next_attempt_at=NOW() WHERE id=?",first);
+            }
+            assertThat(count("billing.dead_letters")).isZero();
+            worker.publishOne(worker.claimOutbox(1).get(0));
+            assertThat(db.one("SELECT state FROM billing.outbox WHERE id=?",first).get("state")).isEqualTo("PUBLISHED");
+            assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(second);
+        } finally {worker.close();}
+    }
+
+    // An unexplained failure still uses the attempt budget, so a broken event cannot block its payment forever.
+    @Test void unexplainedFailureIsQuarantinedAtAttemptLimit() {
+        var kafka=new ScriptedKafka(CompletableFuture.failedFuture(new IllegalStateException("unexpected producer failure")));
         UUID payment=created("CARD"),first=enqueue(payment),second=enqueue(payment);
         db.update("UPDATE billing.outbox SET attempts=? WHERE id=?",BillingWorkers.MAX_OUTBOX_ATTEMPTS-1,first);
         var worker=outboxWorker(kafka);
@@ -1187,6 +1219,18 @@ class BillingFinancialDatabaseTest {
             acknowledge(worker,head);
             assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(secondId);
         } finally {commit.countDown();threads.shutdownNow();worker.close();}
+    }
+
+    // Counted from capture journals, so a restart, a repeated webhook or a second replica cannot change the count.
+    @Test void capturedPaymentCounterCountsUniqueCaptureJournalsByMethod() {
+        var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry(); try {
+            new BillingMetrics(jdbc,registry);
+            assertThat(registry.get("billing.payments.captured").tag("method","CARD").functionCounter().count()).isZero();
+            UUID paid=captured("CARD");
+            payments.recordResult(paid,null,new ProviderResult(providerId(paid),"CAPTURED",null,"Repeated signed evidence"));
+            assertThat(registry.get("billing.payments.captured").tag("method","CARD").functionCounter().count()).isEqualTo(1.0);
+            assertThat(registry.get("billing.payments.captured").tag("method","ACH").functionCounter().count()).isZero();
+        } finally { registry.close(); }
     }
 
     @ParameterizedTest @org.junit.jupiter.params.provider.CsvSource({
@@ -2285,6 +2329,152 @@ class BillingFinancialDatabaseTest {
     BillingRecovery worker(BillingProvider adapter) {
         var service = service(adapter, MERCHANT);
         return new BillingRecovery(db, service, new BillingRefundService(db, service, adapter), adapter);
+    }
+
+    // ---- Dry run: one $100.00 invoice (10000 cents) through each failure point. -------------------------
+    // Expected numbers are worked out by hand in docs/payment-dry-run.md; every step also prints the real rows
+    // (lines starting DRYRUN|) so that document can be checked against what the database actually holds.
+    // "held" is the invoice's reserved_minor; "left" = total - paid - held is what can still be paid.
+
+    @Test void dryRun1_happyPath() {
+        step("1 happy path", "0 before anything", null, 0, null, "none", 0, 0, 10000, 0, 0, 0);
+        UUID pay = id(payments.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        step("1 happy path", "1 payer presses Review payment", pay, 1, "CREATED", "RESERVED", 0, 10000, 0, 0, 0, 0);
+        payments.submit(PAYER, pay);
+        step("1 happy path", "2 payer presses Pay: request saved, then sent", pay, 1, "PROCESSING", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        provider.simulateResult(pay.toString(), "CAPTURED");
+        due(pay); recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        step("1 happy path", "3 payer paid; we record it", pay, 1, "CAPTURED", "POSTED", 10000, 0, 0, 1, 1, 1);
+        payments.recordResult(pay, null, new ProviderResult(providerId(pay), "CAPTURED", null, "Same news arrives again"));
+        step("1 happy path", "4 same news arrives again", pay, 1, "CAPTURED", "POSTED", 10000, 0, 0, 1, 1, 1);
+    }
+
+    @Test void dryRun2_crashWhileSavingTheFirstRow() {
+        String clientKey = key();
+        injectTransientFault("CREATED");
+        assertThatThrownBy(() -> payments.create(PAYER, ACCOUNT, clientKey, List.of(INVOICE), "CARD")).isInstanceOf(RuntimeException.class);
+        step("2 crash while saving", "1 save fails halfway: everything is undone", null, 0, null, "none", 0, 0, 10000, 0, 0, 0);
+        removeTransientFault();
+        UUID pay = id(payments.create(PAYER, ACCOUNT, clientKey, List.of(INVOICE), "CARD").get("id"));
+        step("2 crash while saving", "2 payer tries again with the same key", pay, 1, "CREATED", "RESERVED", 0, 10000, 0, 0, 0, 0);
+    }
+
+    @Test void dryRun3_payerLeavesBeforePressingPay() {
+        UUID first = id(payments.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        step("3 payer leaves", "1 Review payment, then the payer leaves", first, 1, "CREATED", "RESERVED", 0, 10000, 0, 0, 0, 0);
+        db.update("UPDATE billing.intents SET created_at=NOW()-INTERVAL '31 minutes' WHERE id=?", first);
+        assertThat(recovery.expireUnsubmitted(30, 20)).isEqualTo(1);
+        step("3 payer leaves", "2 after 30 minutes: cancelled, money no longer held", first, 1, "CANCELLED", "RELEASED", 0, 0, 10000, 0, 0, 0);
+        UUID second = id(payments.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        step("3 payer leaves", "3 payer comes back and starts again", second, 2, "CREATED", "RESERVED", 0, 10000, 0, 0, 0, 0);
+        assertThat(payments.raw(first).get("status")).isEqualTo("CANCELLED");
+    }
+
+    @Test void dryRun4_crashAfterSavingBeforeAskingStripe() {
+        BillingService crashing = service(new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) { throw new AssertionError("Server stopped before the network call"); }
+        }, MERCHANT);
+        String clientKey = key();
+        UUID pay = id(crashing.create(PAYER, ACCOUNT, clientKey, List.of(INVOICE), "CARD").get("id"));
+        assertThatThrownBy(() -> crashing.submit(PAYER, pay)).isInstanceOf(AssertionError.class);
+        step("4 crash before asking Stripe", "1 request saved, server dies before sending", pay, 1, "SUBMITTING", "RESERVED", 0, 10000, 0, 1, 0, 0);
+        payments.submit(PAYER, pay);
+        assertThat(payments.create(PAYER, ACCOUNT, clientKey, List.of(INVOICE), "CARD").get("id")).isEqualTo(pay.toString());
+        assertThatThrownBy(() -> payments.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD"))
+            .isInstanceOfSatisfying(BillingProblem.class, problem -> assertThat(problem.status()).isEqualTo(409));
+        step("4 crash before asking Stripe", "2 payer presses Pay again, or starts a new payment: nothing new", pay, 1, "SUBMITTING", "RESERVED", 0, 10000, 0, 1, 0, 0);
+        assertThat(recovery.claimPayments(5)).isEmpty();
+        step("4 crash before asking Stripe", "3 busy sign still valid: no worker may touch it", pay, 1, "SUBMITTING", "RESERVED", 0, 10000, 0, 1, 0, 0);
+        due(pay);
+        var claimed = recovery.claimPayments(5);
+        assertThat(claimed).hasSize(1);
+        assertThat(recovery.claimPayments(5)).isEmpty();
+        recovery.recoverPayment(claimed.get(0));
+        step("4 crash before asking Stripe", "4 sign ran out; one worker sends the saved request once", pay, 1, "PROCESSING", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        provider.simulateResult(pay.toString(), "CAPTURED");
+        due(pay); recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        step("4 crash before asking Stripe", "5 payer paid; we record it", pay, 1, "CAPTURED", "POSTED", 10000, 0, 0, 1, 1, 1);
+    }
+
+    @Test void dryRun5_stripeGotItButTheReplyWasLost() {
+        BillingService lossy = service(new DelegateProvider(provider) {
+            @Override public ProviderResult submit(ProviderCommand command) {
+                delegate.submit(command);
+                throw new ProviderUncertainException("Reply lost after Stripe accepted the request");
+            }
+        }, MERCHANT);
+        UUID pay = id(lossy.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        lossy.submit(PAYER, pay);
+        step("5 reply lost", "1 Stripe has it, we only saw a timeout", pay, 1, "UNKNOWN", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        lossy.submit(PAYER, pay);
+        step("5 reply lost", "2 payer presses Pay again: nothing is sent", pay, 1, "UNKNOWN", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        provider.simulateResult(pay.toString(), "CAPTURED");
+        due(pay); recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        step("5 reply lost", "3 worker asks with the same key: same payment, recorded once", pay, 1, "CAPTURED", "POSTED", 10000, 0, 0, 1, 1, 1);
+    }
+
+    @Test void dryRun6_crashWhileSavingStripesAnswer() {
+        UUID pay = id(payments.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        payments.submit(PAYER, pay);
+        provider.simulateResult(pay.toString(), "CAPTURED");
+        injectTransientFault("CAPTURED");
+        due(pay); recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        step("6 crash while saving the answer", "1 Stripe says paid; our save fails and is undone", pay, 1, "PROCESSING", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        removeTransientFault();
+        due(pay); recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        step("6 crash while saving the answer", "2 next worker run saves it once", pay, 1, "CAPTURED", "POSTED", 10000, 0, 0, 1, 1, 1);
+    }
+
+    @Test void dryRun7_paymentFails() {
+        UUID first = id(payments.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        payments.submit(PAYER, first);
+        provider.simulateResult(first.toString(), "FAILED");
+        due(first); recovery.recoverPayment(recovery.claimPayments(1).get(0));
+        step("7 payment fails", "1 Stripe confirms it failed: money no longer held", first, 1, "FAILED", "RELEASED", 0, 0, 10000, 1, 1, 0);
+        UUID second = id(payments.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        step("7 payment fails", "2 payer tries again: a new payment", second, 2, "CREATED", "RESERVED", 0, 10000, 0, 1, 1, 0);
+    }
+
+    @Test void dryRun8_busyOrFailingStripeIsRefusedBeforeAnythingIsSaved() {
+        BillingService busy = service(new DelegateProvider(provider) {
+            @Override public ProviderPermit admitNewPayment() { throw new ProviderBusyException("Too many payments are being sent right now"); }
+        }, MERCHANT);
+        UUID pay = id(busy.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        assertThatThrownBy(() -> busy.submit(PAYER, pay)).isInstanceOfSatisfying(BillingProblem.class, problem -> {
+            assertThat(problem.status()).isEqualTo(503);
+            assertThat(problem.code()).isEqualTo("PROVIDER_BUSY");
+            assertThat(problem.getMessage()).contains("Nothing was charged");
+        });
+        step("8 busy", "1 Pay refused before saving: still ready to pay", pay, 1, "CREATED", "RESERVED", 0, 10000, 0, 0, 0, 0);
+        payments.submit(PAYER, pay);
+        step("8 busy", "2 payer presses Pay again a minute later", pay, 1, "PROCESSING", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        // Checking a payment already on its way never waits for room: only new payments are refused.
+        assertThat(busy.submit(PAYER, pay).get("status")).isEqualTo("PROCESSING");
+    }
+
+    /** Checks one step against the hand-worked numbers, then prints the real rows. */
+    void step(String scenario, String step, UUID payment, long payments, String status, String allocation,
+              long paid, long held, long left, long attempts, long atStripe, long journals) {
+        var invoice = db.one("SELECT total_minor,paid_minor,reserved_minor FROM billing.invoices WHERE id=?", INVOICE);
+        long total = amount(invoice, "totalMinor"), actualPaid = amount(invoice, "paidMinor"), actualHeld = amount(invoice, "reservedMinor");
+        var row = payment == null ? null : db.one("SELECT status,provider_id,lease_until FROM billing.intents WHERE id=?", payment);
+        String actualStatus = row == null ? null : text(row, "status");
+        String actualAllocation = payment == null ? "none"
+            : String.join(",", db.rows("SELECT state FROM billing.allocations WHERE intent_id=?", payment).stream().map(r -> text(r, "state")).toList());
+        System.out.printf("DRYRUN|%s|%s|payments=%d|status=%s|stripeId=%s|busyUntil=%s|allocation=%s|total=%d|paid=%d|held=%d|left=%d|attempts=%d|atStripe=%d|journals=%d%n",
+            scenario, step, count("billing.intents"), actualStatus, row == null || row.get("providerId") == null ? "none" : "saved",
+            row == null || row.get("leaseUntil") == null ? "none" : "set", actualAllocation, total, actualPaid, actualHeld,
+            total - actualPaid - actualHeld, count("billing.attempts"), count("billing.provider_operations"), count("billing.journals"));
+        assertThat(total).as(step).isEqualTo(10000);
+        assertThat(count("billing.intents")).as(step + ": payment rows").isEqualTo(payments);
+        assertThat(actualStatus).as(step + ": status").isEqualTo(status);
+        assertThat(actualAllocation).as(step + ": held money").isEqualTo(allocation);
+        assertThat(actualPaid).as(step + ": paid").isEqualTo(paid);
+        assertThat(actualHeld).as(step + ": held").isEqualTo(held);
+        assertThat(total - actualPaid - actualHeld).as(step + ": left to pay").isEqualTo(left);
+        assertThat(count("billing.attempts")).as(step + ": saved Stripe requests").isEqualTo(attempts);
+        assertThat(count("billing.provider_operations")).as(step + ": payments Stripe knows about").isEqualTo(atStripe);
+        assertThat(count("billing.journals")).as(step + ": money records").isEqualTo(journals);
     }
 
     BillingService service(BillingProvider adapter, UUID merchant) {

@@ -18,7 +18,10 @@ public class BillingAdvice {
     public BillingAdvice(BillingStore db) { this.db=db; }
     @ExceptionHandler(BillingProblem.class) ResponseEntity<?> problem(BillingProblem failure,HttpServletRequest request) {
         if(failure.status()==403) recordDenied(failure,request);
-        return ResponseEntity.status(failure.status()).body(Map.of("code",failure.code(),"message",failure.getMessage()));
+        var response=ResponseEntity.status(failure.status());
+        // Nothing was saved, so trying again later is safe; say when.
+        if("PROVIDER_BUSY".equals(failure.code())) response.header("Retry-After","60");
+        return response.body(Map.of("code",failure.code(),"message",failure.getMessage()));
     }
     /** The refused action already rolled back; record the refusal in its own statement so the audit survives. */
     private void recordDenied(BillingProblem failure,HttpServletRequest request) {

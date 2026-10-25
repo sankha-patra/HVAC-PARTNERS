@@ -1,18 +1,18 @@
 <div class="billing-page">
   <header class="page-heading">
-    <p class="eyebrow">Customer receivables portal</p>
+    <p class="eyebrow">Pay your invoices</p>
     <h1>Invoice payments</h1>
-    <p>Select your business and pay outstanding invoices. Amounts and access are checked by the server.</p>
+    <p>Choose your business, pick the invoices to pay, then press Review payment.</p>
   </header>
   @if (loadingAccounts() || loadingInvoices() || busy()) { <mat-progress-bar mode="indeterminate" aria-label="Loading payment information" /> }
   @if (error()) { <p class="notice error" role="alert">{{ error() }}</p> }
   @if (storageError()) { <p class="notice error" role="alert">{{ storageError() }}</p> }
   @if (returnedIntentId()) {
-    <p class="reference">Returned payment reference: {{ returnedIntentId() }}</p>
-    <button mat-stroked-button (click)="recoverReturnedIntent()" [disabled]="busy()">Refresh returned payment</button>
+    <p class="reference">Payment reference: {{ returnedIntentId() }}</p>
+    <button mat-stroked-button (click)="recoverReturnedIntent()" [disabled]="busy()">Check payment status</button>
   }
   @if (!loadingAccounts() && !accounts().length && !error()) {
-    <mat-card class="panel"><mat-card-content><h2>No business accounts assigned</h2><p>Your sign-in has no billing account membership. Ask your account administrator to arrange access.</p></mat-card-content></mat-card>
+    <mat-card class="panel"><mat-card-content><h2>No business account yet</h2><p>You don't have access to any business account yet. Ask your administrator to give you access.</p></mat-card-content></mat-card>
   }
   @if (accounts().length) {
     <mat-form-field appearance="outline" class="account-picker">
@@ -24,88 +24,88 @@
 
     @if (request() && !intent()) {
       <mat-card class="panel recovery"><mat-card-content>
-        <h2>{{ request()!.definitiveRejection ? 'Request rejected before payment creation' : 'Recover your payment request' }}</h2>
-        <p>{{ request()!.definitiveRejection ? 'The server confirmed that this request did not create a payment. Refresh the invoices and review your selection.' : 'A request has already been prepared for this account. Recovering reuses that request; it does not create a new payment.' }}</p>
-        <p class="reference">Request reference: {{ request()!.key }}</p>
+        <h2>{{ request()!.definitiveRejection ? 'This payment could not be started' : 'You have a payment in progress' }}</h2>
+        <p>{{ request()!.definitiveRejection ? 'Nothing was charged. Go back to your invoices and try again.' : "You already started a payment for this account. Continue it instead of starting a new one, so you aren't charged twice." }}</p>
+        <p class="reference">Reference: {{ request()!.key }}</p>
         @if (request()!.definitiveRejection) {
-          <button mat-flat-button (click)="startAnother()" [disabled]="busy()">Return to invoice selection</button>
+          <button mat-flat-button (click)="startAnother()" [disabled]="busy()">Back to invoices</button>
         } @else if (request()!.intentId) {
-          <button mat-flat-button (click)="refreshIntent()" [disabled]="busy()">Refresh existing payment</button>
+          <button mat-flat-button (click)="refreshIntent()" [disabled]="busy()">Continue this payment</button>
         } @else {
-          <button mat-flat-button (click)="createIntent()" [disabled]="busy()">Recover same request</button>
+          <button mat-flat-button (click)="createIntent()" [disabled]="busy()">Continue this payment</button>
         }
       </mat-card-content></mat-card>
     }
 
     @if (intent(); as payment) {
       <mat-card class="panel" aria-live="polite"><mat-card-content>
-        <div class="section-heading"><h2>Payment request</h2><span class="status">{{ payment.status }}</span></div>
+        <div class="section-heading"><h2>Your payment</h2><span class="status">{{ statusLabel() }}</span></div>
         @if (payment.provider === 'SIMULATOR') {
-          <p class="notice simulator">SIMULATOR · Fictional payment only. No real funds are collected. Do not enter card or bank details.</p>
+          <p class="notice simulator">Test mode: this is not a real payment and no money will be taken. Don't enter real card or bank details.</p>
         }
         <p class="amount">{{ payment.amountMinor / 100 | currency:payment.currency }}</p>
         <p>{{ statusExplanation() }}</p>
         @if (payment.message) { <p>{{ payment.message }}</p> }
-        @if (submissionUncertain()) { <p class="notice">The latest action has no confirmed outcome. Refresh before continuing.</p> }
+        @if (submissionUncertain()) { <p class="notice">We couldn't confirm your last step yet. We're checking; please don't pay again.</p> }
         <p class="reference">Payment reference: {{ payment.id }}</p>
-        <p class="muted">Provider: {{ payment.provider }} · Method: {{ request()?.method }}</p>
+        @if (methodLabel(payment.method || request()?.method); as paidBy) { <p class="muted">Paying by: {{ paidBy }}</p> }
         <div class="actions">
           @if (canSubmit()) {
-            <button mat-flat-button (click)="submitIntent()">{{ simulator() ? 'Submit simulated payment' : 'Continue payment' }}</button>
-            <button mat-stroked-button (click)="cancelIntent()">Cancel unsubmitted request</button>
+            <button mat-flat-button (click)="submitIntent()">{{ simulator() ? 'Pay (test)' : 'Pay' }}</button>
+            <button mat-stroked-button (click)="cancelIntent()">Cancel</button>
           }
-          @if (checkoutUrl(); as url) { <a mat-flat-button [href]="url" target="_blank" rel="noopener noreferrer">Open secure provider checkout</a> }
+          @if (checkoutUrl(); as url) { <a mat-flat-button [href]="url" target="_blank" rel="noopener noreferrer">Go to secure payment page</a> }
           <button mat-stroked-button (click)="refreshIntent()" [disabled]="busy()">Refresh payment</button>
-          @if (receiptUrl(); as url) { <a mat-stroked-button [href]="url" download>Download receipt (JSON)</a> }
-          @if (terminal()) { <button mat-button (click)="startAnother()" [disabled]="busy()">Return to invoice selection</button> }
+          @if (receiptUrl(); as url) { <a mat-stroked-button [href]="url" download>Download receipt</a> }
+          @if (terminal()) { <button mat-button (click)="startAnother()" [disabled]="busy()">Back to invoices</button> }
         </div>
-        @if (payment.status === 'REQUIRES_ACTION' && !checkoutUrl()) { <p class="notice error">A trusted checkout link is not available. Refresh or contact support; do not enter payment details here.</p> }
+        @if (payment.status === 'REQUIRES_ACTION' && !checkoutUrl()) { <p class="notice error">The secure payment page isn't available right now. We'll keep checking; if it doesn't appear within a minute, please contact support. Never type card details anywhere else.</p> }
         @if (payment.allocations?.length) {
-          <h3>Invoice allocations</h3>
+          <h3>Invoices in this payment</h3>
           <ul class="details-list">@for (allocation of payment.allocations; track allocation.invoiceId) {
-            <li><span class="reference">{{ allocation.invoiceId }}</span> · {{ allocation.amountMinor / 100 | currency:payment.currency }} · {{ allocation.state }}</li>
+            <li><span class="reference">{{ invoiceNumber(allocation.invoiceId) }}</span> · {{ allocation.amountMinor / 100 | currency:payment.currency }} · {{ allocationLabel(allocation.state) }}</li>
           }</ul>
-          <p class="muted">Reserved amounts are separate from posted invoice receipts.</p>
+          <p class="muted">These amounts are held for this payment until it is confirmed.</p>
         }
         @if (payment.timeline?.length) {
-          <details><summary>Payment timeline</summary><ol class="details-list">@for (event of payment.timeline; track $index) {
+          <details><summary>Payment history</summary><ol class="details-list">@for (event of payment.timeline; track $index) {
             <li><strong>{{ event.type }}</strong> · {{ event.at | date:'medium' }}<p>{{ event.message }}</p></li>
           }</ol></details>
         }
         @if (simulator() && payment.status !== 'CREATED' && payment.status !== 'CANCELLED') {
-          <details class="simulator-controls"><summary>Simulator scenarios — no real money</summary>
-            <p>Exercise delayed processing, capture, failure, return, or a lost response. The server validates which transitions are allowed.</p>
-            <mat-form-field appearance="outline"><mat-label>Simulated outcome</mat-label><mat-select [(ngModel)]="simulationOutcome" [disabled]="busy()">
-              <mat-option value="PROCESSING">Still processing</mat-option><mat-option value="CAPTURED">Capture confirmed</mat-option>
-              <mat-option value="FAILED">Attempt failed</mat-option><mat-option value="RETURNED">Payment returned</mat-option>
-              <mat-option value="TIMEOUT_AFTER_ACCEPT">Accepted, response lost</mat-option>
+          <details class="simulator-controls"><summary>Test scenarios (no real money)</summary>
+            <p>Try what happens when a payment is slow, goes through, fails, is sent back by the bank, or its reply is lost.</p>
+            <mat-form-field appearance="outline"><mat-label>Test outcome</mat-label><mat-select [(ngModel)]="simulationOutcome" [disabled]="busy()">
+              <mat-option value="PROCESSING">Still on its way</mat-option><mat-option value="CAPTURED">Payment goes through</mat-option>
+              <mat-option value="FAILED">Payment fails</mat-option><mat-option value="RETURNED">Bank sends it back</mat-option>
+              <mat-option value="TIMEOUT_AFTER_ACCEPT">Reply lost after paying</mat-option>
             </mat-select></mat-form-field>
-            <button mat-stroked-button (click)="simulate()" [disabled]="busy()">Run simulator scenario</button>
+            <button mat-stroked-button (click)="simulate()" [disabled]="busy()">Run test</button>
           </details>
         }
       </mat-card-content></mat-card>
     }
 
     <mat-card class="panel"><mat-card-content>
-      <div class="section-heading"><h2>Recent payment requests</h2><button mat-button (click)="loadHistory()" [disabled]="historyLoading() || busy()">Refresh history</button></div>
-      <p class="muted">Resume an existing request if a tab was closed. Only an unsubmitted request can be cancelled. The latest 100 requests are shown.</p>
+      <div class="section-heading"><h2>Your recent payments</h2><button mat-button (click)="loadHistory()" [disabled]="historyLoading() || busy()">Refresh</button></div>
+      <p class="muted">Closed the page by mistake? Open your payment here to continue it. Your last 100 payments are shown.</p>
       @if (historyError()) { <p class="notice error" role="alert">{{ historyError() }}</p> }
-      @if (!historyLoading() && !historyError() && !history().length) { <p>No recent payment requests were returned for this account.</p> }
+      @if (!historyLoading() && !historyError() && !history().length) { <p>No payments yet for this account.</p> }
       @if (history().length) { <div class="table-scroll"><table>
-        <thead><tr><th scope="col">Reference</th><th scope="col">Created</th><th scope="col">Amount</th><th scope="col">Status / provider</th><th scope="col">Action</th></tr></thead>
+        <thead><tr><th scope="col">Reference</th><th scope="col">Started</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Action</th></tr></thead>
         <tbody>@for (previous of history(); track previous.id) {
           <tr><th scope="row" class="reference">{{ previous.id }}</th><td>{{ previous.createdAt | date:'medium' }}</td><td>{{ previous.amountMinor / 100 | currency:previous.currency }}</td>
-            <td>{{ previous.status }} · {{ previous.provider }}</td><td><button mat-button (click)="resumeIntent(previous.id)" [disabled]="busy()">Open request</button></td></tr>
+            <td>{{ statusLabel(previous.status) }}</td><td><button mat-button (click)="resumeIntent(previous.id)" [disabled]="busy()">Open</button></td></tr>
         }</tbody>
       </table></div> }
     </mat-card-content></mat-card>
 
     <mat-card class="panel"><mat-card-content>
-      <div class="section-heading"><h2>Invoices</h2><button mat-button (click)="loadInvoices()" [disabled]="loadingInvoices() || busy()">Refresh balances</button></div>
+      <div class="section-heading"><h2>Invoices</h2><button mat-button (click)="loadInvoices()" [disabled]="loadingInvoices() || busy()">Refresh</button></div>
       @if (invoiceError()) { <p class="notice error" role="alert">{{ invoiceError() }}</p> }
-      <p class="muted">Available balance excludes posted receipts and active reservations. The server confirms the final amount when preparing a payment.</p>
+      <p class="muted">"Left to pay" is what you still owe after payments that are done or in progress. You'll see the exact amount before you pay.</p>
       <div class="table-scroll"><table>
-        <thead><tr><th scope="col">Select</th><th scope="col">Invoice</th><th scope="col">Due</th><th scope="col">Total</th><th scope="col">Posted receipts</th><th scope="col">Reserved</th><th scope="col">Available</th><th scope="col">Status</th></tr></thead>
+        <thead><tr><th scope="col">Select</th><th scope="col">Invoice</th><th scope="col">Due</th><th scope="col">Total</th><th scope="col">Paid</th><th scope="col">In progress</th><th scope="col">Left to pay</th><th scope="col">Status</th></tr></thead>
         <tbody>@for (invoice of invoices(); track invoice.id) {
           <tr><td><mat-checkbox [aria-label]="'Select invoice ' + invoice.number" [checked]="selected().includes(invoice.id)" (change)="toggleInvoice(invoice, $event.checked)" [disabled]="!canPay() || selectionLocked() || !payable(invoice) || !!invoiceError() || loadingInvoices()" /></td>
             <th scope="row">{{ invoice.number }}</th><td>{{ invoice.dueDate | date:'mediumDate':'UTC' }}</td>
@@ -113,17 +113,17 @@
             <td>{{ invoice.reservedMinor / 100 | currency:invoice.currency }}</td><td>{{ available(invoice) / 100 | currency:invoice.currency }}</td><td>{{ invoice.status }}</td></tr>
         }</tbody>
       </table></div>
-      @if (!loadingInvoices() && !invoiceError() && !invoices().length) { <p>No invoices are available for this account.</p> }
-      @if (!canPay()) { <p class="notice">You have read-only invoice access for this account. A payer membership is required to prepare payments.</p> }
+      @if (!loadingInvoices() && !invoiceError() && !invoices().length) { <p>There are no invoices to pay for this account.</p> }
+      @if (!canPay()) { <p class="notice">You can see these invoices but can't pay them. Ask your administrator for payment access.</p> }
       @if (!request() && canPay()) {
         <div class="payment-choice">
-          <mat-form-field appearance="outline"><mat-label>Payment method</mat-label><mat-select [value]="method()" (selectionChange)="method.set($event.value)" [disabled]="busy()">
-            <mat-option value="CARD">Card</mat-option><mat-option value="ACH">US bank payment (ACH)</mat-option>
+          <mat-form-field appearance="outline"><mat-label>Pay by</mat-label><mat-select [value]="method()" (selectionChange)="method.set($event.value)" [disabled]="busy()">
+            <mat-option value="CARD">Card</mat-option><mat-option value="ACH">US bank account</mat-option>
           </mat-select></mat-form-field>
-          <p>{{ selected().length }} selected · Estimated available total <strong>{{ selectedTotal() / 100 | currency:'USD' }}</strong></p>
+          <p>{{ selected().length }} selected · Total about <strong>{{ selectedTotal() / 100 | currency:'USD' }}</strong></p>
           <button mat-flat-button (click)="createIntent()" [disabled]="!selected().length || busy() || loadingInvoices() || !!invoiceError() || !!storageError()">Review payment</button>
         </div>
-        @if (method() === 'ACH') { <p class="muted">ACH is asynchronous. A submitted or processing bank payment is not a confirmed capture or final bank settlement.</p> }
+        @if (method() === 'ACH') { <p class="muted">Bank payments can take a few days. The payment shows as paid only after your bank confirms it.</p> }
       }
     </mat-card-content></mat-card>
   }

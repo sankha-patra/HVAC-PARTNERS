@@ -239,3 +239,21 @@ tests:
             exp_annotations:
               summary: Many payment provider calls ended without a clear answer
               description: 'Timeouts, lost connections or provider server errors. The cause may be our network or egress, or the provider: check its status page. Affected payments stay UNKNOWN and recovery reuses the original identity; never create a replacement payment.'
+  - name: consumer-lag-alerts-only-when-it-lasts
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_fetch_manager_records_lag_max{client_id="consumer-billing-erp-simulator-v1-1"}'
+        values: '50+0x4 1500+0x15'
+      - series: 'kafka_consumer_fetch_manager_records_lag_max{client_id="consumer-billing-dlt-audit-v1-2"}'
+        values: '0 2000 0+0x18'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BillingKafkaConsumerLagging
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BillingKafkaConsumerLagging
+        exp_alerts:
+          - exp_labels: {severity: warning, responder: app-team, decision: none, environment: local, client_id: consumer-billing-erp-simulator-v1-1}
+            exp_annotations:
+              summary: A billing Kafka consumer is falling behind
+              description: 'Events are waiting in Kafka. Nothing is lost: payments are already committed and the outbox keeps every event. Check consumer errors, rebalances, slow database writes and partition count. Never reset offsets or skip records to catch up.'

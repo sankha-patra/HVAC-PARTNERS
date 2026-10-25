@@ -47,6 +47,9 @@ public final class StripeBillingProvider implements BillingProvider {
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
     /** Time one provider operation may take in total, searches included: half the 120-second lease of its caller. */
     public static final Duration OPERATION_BUDGET = Duration.ofSeconds(60);
+    /** Consecutive failed or throttled Stripe requests that pause new payments, and how long the pause lasts. */
+    public static final int FAILURES_BEFORE_PAUSE = 5;
+    public static final Duration PAUSE = Duration.ofSeconds(30);
     private final String secretKey;
     private final Transport transport;
     private final Clock clock;
@@ -57,6 +60,14 @@ public final class StripeBillingProvider implements BillingProvider {
     private final Map<String, AtomicInteger> invalidRequests = new ConcurrentHashMap<>();
     /** Nested recovery calls share one permit, one monotonic deadline and sanitized diagnostics. */
     private final ThreadLocal<OperationContext> operationContext = new ThreadLocal<>();
+    /** Set while a new payment holds the slot it reserved before saving, so its own Stripe call does not ask again. */
+    private final ThreadLocal<Boolean> reservedSlot = new ThreadLocal<>();
+    // New payments pause after repeated Stripe failures, so nothing new is saved while Stripe cannot answer.
+    // A failure while paused extends the pause; any answer from Stripe, even a refusal, ends it. Guarded by this.
+    private int consecutiveFailures;
+    private boolean paused, trialInProgress;
+    private long pausedUntilNanos;
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(StripeBillingProvider.class);
     /** Source of the operation deadline: monotonic in production, so a wall-clock jump cannot stretch it. */
     private final LongSupplier ticker;
 
@@ -112,6 +123,51 @@ public final class StripeBillingProvider implements BillingProvider {
     }
 
     /**
+     * Refused when every slot is busy or new payments are paused after repeated Stripe failures. After a pause,
+     * one trial payment is let through; its answer decides whether new payments resume or pause again.
+     */
+    @Override public ProviderPermit admitNewPayment() {
+        boolean trial;
+        synchronized (this) {
+            trial = paused;
+            if (paused && (ticker.getAsLong() - pausedUntilNanos < 0 || trialInProgress))
+                throw new ProviderBusyException("New payments are paused because Stripe keeps failing");
+            if (trial) trialInProgress = true;
+        }
+        boolean admitted = false;
+        try { admitted = admission.tryAcquire(admissionWait.toNanos(), TimeUnit.NANOSECONDS); }
+        catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
+        if (!admitted) {
+            if (trial) synchronized (this) { trialInProgress = false; }
+            recordRequestMetric("admission", "rate_limited", "rate_limit", System.nanoTime());
+            throw new ProviderBusyException("Every slot for new Stripe payments is in use");
+        }
+        reservedSlot.set(Boolean.TRUE);
+        java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+        return () -> {
+            if (!closed.compareAndSet(false, true)) return;
+            reservedSlot.remove();
+            admission.release();
+            // A trial that sent nothing leaves the decision to the next new payment.
+            if (trial) synchronized (this) { trialInProgress = false; }
+        };
+    }
+
+    /** Any answer from Stripe, even a refusal, means it is reachable; timeouts, server errors and throttling are not. */
+    private synchronized void recordHealth(String outcome) {
+        if ("ok".equals(outcome) || "rejected".equals(outcome)) {
+            if (paused) log.info("Stripe is answering again; new payments resume");
+            consecutiveFailures = 0; paused = false; trialInProgress = false;
+            return;
+        }
+        if (++consecutiveFailures < FAILURES_BEFORE_PAUSE) return;
+        if (!paused || trialInProgress) log.warn("Stripe failed {} times in a row; new payments are refused for {} seconds before anything is saved",
+                consecutiveFailures, PAUSE.toSeconds());
+        paused = true; trialInProgress = false;
+        pausedUntilNanos = ticker.getAsLong() + PAUSE.toNanos();
+    }
+
+    /**
      * Runs one provider operation inside OPERATION_BUDGET. Every public operation goes through here; a call made
      * from inside another operation keeps the outer deadline, so searches and fallbacks share one budget.
      */
@@ -123,11 +179,12 @@ public final class StripeBillingProvider implements BillingProvider {
         if (callerRemaining != null) budget = Math.min(budget, Math.max(0, callerRemaining.toNanos()));
         OperationContext context = new OperationContext(started + budget);
         operationContext.set(context);
+        boolean reserved = Boolean.TRUE.equals(reservedSlot.get());
         boolean admitted = false;
         try {
             long left = remainingNanos();
             if (left < Duration.ofMillis(500).toNanos()) throw budgetExhausted();
-            admitted = admission.tryAcquire(Math.min(admissionWait.toNanos(), left), TimeUnit.NANOSECONDS);
+            admitted = reserved || admission.tryAcquire(Math.min(admissionWait.toNanos(), left), TimeUnit.NANOSECONDS);
             if (!admitted) {
                 context.diagnostics = new ProviderDiagnostics(null, null, null, "local_admission_limit", null, 1, true, "local-admission");
                 recordRequestMetric("admission", "rate_limited", "rate_limit", measuredFrom);
@@ -155,7 +212,7 @@ public final class StripeBillingProvider implements BillingProvider {
             if (context.replayForbidden) uncertain.forbidReplay();
             throw uncertain;
         } finally {
-            if (admitted) admission.release();
+            if (admitted && !reserved) admission.release();
             operationContext.remove();
         }
     }
@@ -773,6 +830,7 @@ public final class StripeBillingProvider implements BillingProvider {
             throw new ProviderUncertainException("Stripe response could not be verified; acceptance is unknown");
         } finally {
             recordRequestMetric(operation, outcome, category, started);
+            recordHealth(outcome);
         }
     }
 

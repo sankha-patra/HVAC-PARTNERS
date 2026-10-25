@@ -65,7 +65,7 @@ Run `scripts/check-repository.ps1` to verify repository boundaries and migration
 | `identity-service` | Users, login, secure cookies and local demo fixtures |
 | `api-gateway` | Authenticated routing to identity and billing |
 | `frontend` | Customer invoices and finance operations only |
-| `monitoring` | Prometheus rules, Grafana dashboard and datasource provisioning |
+| `monitoring` | Prometheus rules, Grafana dashboard, datasource provisioning and an Alertmanager routing template |
 | `infra/aws-billing` | AWS reference deployment and mocked Terraform contract tests |
 | `scripts` | Local startup, tests, backup and failure drills |
 
@@ -76,3 +76,5 @@ propagation, read the [payment recovery walkthrough](docs/payment-recovery-walkt
 Refund recovery, case resolution and expiry are explained in
 [the second repair](docs/payment-lifecycle-completion.md). To prove one real Stripe test-mode
 payment end to end, follow the [Stripe test-mode runbook](docs/stripe-test-mode-runbook.md).
+When an alert needs a Carrier decision, the application team hands it over as described in the
+[Carrier handoff runbook](docs/carrier-handoff-runbook.md).

@@ -1,10 +1,12 @@
 package com.invoicepayments.billing;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.springframework.jdbc.core.JdbcTemplate;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.ToDoubleFunction;
 
 /** Aggregate business signals only: never label metrics with customer/payment identifiers. */
@@ -57,6 +59,20 @@ public class BillingMetrics {
         register(registry,"billing.outbox.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");
         register(registry,"billing.cases.open", "SELECT COUNT(*) FROM billing.cases WHERE status='OPEN'");
         register(registry,"billing.deadletters.open", "SELECT COUNT(*) FROM billing.dead_letters WHERE state<>'REPLAYED'");
+        // Counted from capture journals: one immutable journal per captured payment, so a restart or a repeated
+        // webhook cannot change the count. Every replica reports the same database total: take max, never sum.
+        for(String method:new String[]{"CARD","ACH"}) captured(registry,method);
+    }
+    private void captured(MeterRegistry registry,String method) {
+        // A counter must not go backwards or turn into NaN, so a failed read repeats the last known count.
+        var last=new AtomicReference<Double>(0.0);
+        FunctionCounter.builder("billing.payments.captured",jdbc,client->{
+            try {
+                Double n=client.queryForObject("SELECT COUNT(*) FROM billing.journals j JOIN billing.intents i ON i.id=j.intent_id WHERE j.effect_key LIKE 'capture:%' AND i.method=?",Double.class,method);
+                if(n!=null && n>last.get()) last.set(n);
+            } catch(RuntimeException failure) {}
+            return last.get();
+        }).tag("method",method).description("Payments with a recorded capture").register(registry);
     }
     private void register(MeterRegistry registry,String name,String query) {
         // Use a concrete JDBC double mapping for floating-point observations;

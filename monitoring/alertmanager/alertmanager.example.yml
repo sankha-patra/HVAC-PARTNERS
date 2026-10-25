@@ -1,5 +1,6 @@
 # TEMPLATE ONLY. Nothing mounts or starts this file, and it delivers no alert.
-# No real destination exists in this repository, so every receiver below is empty on purpose.
+# No real destination exists in this repository: the application team's receivers are empty, and the
+# Carrier email addresses and mail relay are placeholders on the reserved .invalid domain, which never resolves.
 #
 # Who gets what (labels set in monitoring/prometheus/*.yml):
 #   - Every alert goes to the application team (responder=app-team). We are the service provider:
@@ -17,11 +18,22 @@
 #          alertmanagers:
 #            - static_configs:
 #                - targets: [alertmanager:9093]
-#   3. Give each receiver a real integration (pager, chat channel, ticket queue), agreed with Carrier
-#      for the carrier-* queues. Keep secrets out of this file: use the integration's *_file option
+#   3. Give each receiver a real integration (pager, chat channel, ticket queue). For the carrier-*
+#      receivers, Carrier provides the mail relay and one group mailbox per deciding role, never a
+#      personal address, so people can change without a config change. The email is only a notice;
+#      the app team then sends the case details by hand (docs/carrier-handoff-runbook.md). Keep secrets out of this file: use the integration's *_file option
 #      where your Alertmanager version offers one (for example url_file for webhooks or api_url_file
 #      for Slack) and mount the secret.
 #   4. Check the result with: amtool check-config alertmanager.yml
+#      and the routing with, for example:
+#        amtool config routes test --config.file=alertmanager.yml alertname=BillingReleaseAwaitingApproval decision=carrier-finance severity=warning
+global:
+  smtp_smarthost: mail-relay.example.invalid:587
+  smtp_from: invoice-payments-alerts@example.invalid
+  smtp_require_tls: true
+  # If the relay needs a login, add smtp_auth_username and smtp_auth_password_file (a mounted secret).
+templates:
+  - templates/*.tmpl
 route:
   receiver: app-team-channel
   group_by: [alertname, decision, operation]
@@ -30,7 +42,12 @@ route:
   repeat_interval: 4h
   routes:
     # Copies to the deciding Carrier team. "continue" lets the app team's route below match as well.
-    - matchers: ['decision="carrier-finance"']
+    # A release waiting for its second approval goes to the approvers, not to the finance user who asked.
+    - matchers: ['alertname="BillingReleaseAwaitingApproval"']
+      receiver: carrier-approvers-queue
+      repeat_interval: 12h
+      continue: true
+    - matchers: ['decision="carrier-finance"', 'alertname!="BillingReleaseAwaitingApproval"']
       receiver: carrier-finance-queue
       repeat_interval: 12h
       continue: true
@@ -63,7 +80,32 @@ receivers:
   - name: app-team-page      # on-call: provider credential failures, scrape loss
   - name: app-team-channel   # technical uncertainty, retries, outbox, dead letters, provider health
   - name: app-team-queue     # informational: users who have not finished paying
-  # Carrier teams (client): they make the decisions
-  - name: carrier-finance-queue    # evidence that disagrees with our records, releases awaiting a second approver
+  # Carrier teams (client): they make the decisions. Placeholder group mailboxes; Carrier supplies the real ones.
+  - name: carrier-finance-queue    # evidence that disagrees with our records
+    email_configs:
+      - to: carrier-billing-finance@example.invalid
+        send_resolved: true
+        headers: {Subject: '{{ template "billing.handoff.subject" . }}'}
+        text: '{{ template "billing.handoff.text" . }}'
+        html: ''
+  - name: carrier-approvers-queue  # releases awaiting a second approver (a different person from the requester)
+    email_configs:
+      - to: carrier-billing-approvers@example.invalid
+        send_resolved: true
+        headers: {Subject: '{{ template "billing.handoff.subject" . }}'}
+        text: '{{ template "billing.handoff.text" . }}'
+        html: ''
   - name: carrier-treasury-queue   # bank debits and refunds still processing at the provider or bank
+    email_configs:
+      - to: carrier-billing-treasury@example.invalid
+        send_resolved: true
+        headers: {Subject: '{{ template "billing.handoff.subject" . }}'}
+        text: '{{ template "billing.handoff.text" . }}'
+        html: ''
   - name: carrier-business-queue   # paying companies that have not finished paying
+    email_configs:
+      - to: carrier-billing-business@example.invalid
+        send_resolved: true
+        headers: {Subject: '{{ template "billing.handoff.subject" . }}'}
+        text: '{{ template "billing.handoff.text" . }}'
+        html: ''

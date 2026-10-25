@@ -1,0 +1,18 @@
+{{/* Automatic notice to a Carrier decision queue. Metrics carry counts only, so this never holds payment,
+     card or bank data. The application team sends the case details separately: docs/carrier-handoff-runbook.md */}}
+{{ define "billing.handoff.subject" }}[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}: Carrier decision needed ({{ .CommonLabels.environment }}){{ end }}
+
+{{ define "billing.handoff.text" }}Automatic notice from the invoice payments application team.
+A Carrier decision is needed. The application team has the same alert, is checking it is not an application defect,
+and will email the case details (case ID, amounts, what was checked) separately.
+{{ range .Alerts }}
+Alert:         {{ .Labels.alertname }} ({{ .Status }})
+Started:       {{ .StartsAt.UTC.Format "2006-01-02 15:04 UTC" }}
+Environment:   {{ .Labels.environment }}
+Deciding team: {{ .Labels.decision }}
+Summary:       {{ .Annotations.summary }}
+Details:       {{ .Annotations.description }}
+{{ end }}
+This notice holds counts only. Never reply with card numbers, bank account numbers or passwords.
+Decisions are made in the application's finance workspace with your own sign-in.
+{{ end }}

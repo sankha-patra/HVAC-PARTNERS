@@ -113,7 +113,23 @@ public class BillingService {
     }
     public Map<String,Object> submit(String user,UUID intent) {
         requireNoTransaction();
-        authorizePayer(user,id(raw(intent).get("accountId")));
+        var current=raw(intent);
+        authorizePayer(user,id(current.get("accountId")));
+        // Only a new payment needs room at the provider. A payment already on its way is never refused.
+        if(!"CREATED".equals(current.get("status"))) return get(user,intent);
+        try (var permit=admitNewPayment(intent)) {
+            return submitAdmitted(user,intent);
+        }
+    }
+    /** Refused before anything is saved, so the payer can be told for certain that nothing was charged. */
+    private ProviderPermit admitNewPayment(UUID intent) {
+        try { return provider.admitNewPayment(); }
+        catch(ProviderBusyException busy) {
+            log.warn("New payment refused before anything was saved or sent intentId={} reason={}",intent,busy.getMessage());
+            throw new BillingProblem(503,"PROVIDER_BUSY","Payments are very busy right now. Nothing was charged. Please try again in a minute.");
+        }
+    }
+    private Map<String,Object> submitAdmitted(String user,UUID intent) {
         UUID token=UUID.randomUUID();
         var work=db.tx(() -> {
             var row=locked(intent);

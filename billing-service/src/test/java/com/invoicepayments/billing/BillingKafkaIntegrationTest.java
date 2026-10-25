@@ -117,13 +117,13 @@ class BillingKafkaIntegrationTest {
         properties.getProperties().put("security.protocol", "PLAINTEXT");
         var configuration = new BillingKafkaConfiguration();
         producer = configuration.billingKafkaTemplate(properties);
-        erp = configuration.billingKafkaListenerFactory(properties, producer).createContainer(TOPIC);
+        erp = configuration.billingKafkaListenerFactory(properties, producer, new io.micrometer.core.instrument.simple.SimpleMeterRegistry()).createContainer(TOPIC);
         erp.setBeanName("integration-erp");
         erp.getContainerProperties().setGroupId(ERP_GROUP);
         erp.getContainerProperties().setPollTimeout(200);
         erp.getContainerProperties().setShutdownTimeout(10000);
         erp.getContainerProperties().setMessageListener((AcknowledgingMessageListener<String, byte[]>) events::erp);
-        audit = configuration.billingDltListenerFactory(properties).createContainer(DLT);
+        audit = configuration.billingDltListenerFactory(properties, new io.micrometer.core.instrument.simple.SimpleMeterRegistry()).createContainer(DLT);
         audit.setBeanName("integration-dlt-audit");
         audit.getContainerProperties().setGroupId(DLT_GROUP);
         audit.getContainerProperties().setPollTimeout(200);

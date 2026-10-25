@@ -132,3 +132,13 @@ groups:
         annotations:
           summary: Payment provider calls are slow
           description: 'The 95th percentile is above 5 seconds against a 10-second request timeout. Slow calls hold request threads. Compare our egress and connection-pool waits with the provider status page before scaling.'
+  - name: billing-kafka-alerts
+    rules:
+      - alert: BillingKafkaConsumerLagging
+        # Micrometer reports the largest lag each billing consumer saw in its recent fetches.
+        expr: max by (client_id) (kafka_consumer_fetch_manager_records_lag_max) > 1000
+        for: 10m
+        labels: {severity: warning, responder: app-team, decision: none, environment: local}
+        annotations:
+          summary: A billing Kafka consumer is falling behind
+          description: 'Events are waiting in Kafka. Nothing is lost: payments are already committed and the outbox keeps every event. Check consumer errors, rebalances, slow database writes and partition count. Never reset offsets or skip records to catch up.'

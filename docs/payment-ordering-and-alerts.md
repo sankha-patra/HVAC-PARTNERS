@@ -39,7 +39,11 @@ unknown historical insertion order.
 V10 adds the terminal outbox state `DEAD_LETTER` and links publisher failures into
 the existing `billing.dead_letters` table. The policy is:
 
-- Transient failures retry after 10 seconds, up to **50 claims**. Counting claims
+- A broker outage (a Kafka retriable error, or a send that times out waiting) retries
+  after 10 seconds and gives its claim back, so it never uses the budget. The event is
+  not at fault: it waits, its successors wait behind it, and `BillingOutboxNotDraining`
+  tells the app team. It does not become a dead letter, however long Kafka is down.
+- Any other failure retries after 10 seconds, up to **50 claims**. Counting claims
   also bounds retries when workers crash or lose leases before recording a result.
 - Record-too-large, serialization and invalid-topic failures quarantine immediately.
 - Quarantine stores the original payload, payment key, authoritative merchant,
@@ -58,8 +62,9 @@ the existing `billing.dead_letters` table. The policy is:
   events. A failed replay reopens the same audit entry instead of creating cases
   indefinitely. Irreparably malformed data needs correction by its source owner.
 
-The budget is a work limit, not a promised outage recovery time. A prolonged broker
-outage can exhaust it, leaving durable entries requiring an operations replay.
+The budget is a work limit for failures the app cannot explain, not an outage timer.
+An expired claim (a worker that crashed or stalled) still counts, so a broker outage that
+also crashes workers repeatedly can still exhaust it.
 Money state and ledger entries are not rewritten by quarantine or replay.
 
 ## Producer configuration
@@ -81,6 +86,11 @@ it hands the case over with evidence. `severity: critical` pages the app team's 
 `warning` notifies its channel without paging, and `info` goes only to a queue.
 `monitoring/alertmanager/alertmanager.example.yml` is an unmounted template showing this
 routing; it delivers nothing until real receivers are configured on a private network.
+Its Carrier receivers send an email notice (counts only, no payment data) to placeholder
+group mailboxes on the reserved `.invalid` domain. A release waiting for its second
+approval goes to the approvers' mailbox, not to finance. The app team then sends the case
+details by hand and records the handoff as a case note: see
+[Carrier handoff runbook](carrier-handoff-runbook.md).
 
 ## Stuck payment alerts
 
@@ -127,6 +137,25 @@ All go to the app team. Card declines happen inside hosted Checkout and never re
 - `BillingProviderOutcomeUncertain`: over 20% of calls ended without a clear answer, with at
   least 10 calls in five minutes.
 - `BillingProviderLatencyHigh`: the 95th percentile is above 5 seconds.
+
+New payments are refused before anything is saved, with HTTP 503 `PROVIDER_BUSY` and `Retry-After: 60`, when all
+8 slots for new Stripe payments on a server are in use, or after 5 Stripe requests in a row timed out, failed on
+Stripe's side or were throttled. That pause lasts 30 seconds, longer while failures continue; then one trial
+payment decides. The payer is told nothing was charged, which is certain because nothing was saved or sent.
+Payments already on their way are never refused. The pause is logged; `BillingProviderOutcomeUncertain` and
+`BillingProviderThrottled` already alert on the failures that cause it.
+
+## Captures and consumer lag
+
+- `billing_payments_captured_total{method}` counts payments with a capture journal. Journals
+  are immutable and unique per payment, so restarts and repeated webhooks cannot change it.
+  Every replica reports the same database total: use `max`, never `sum`, across replicas.
+  A failed database read repeats the last count, so the counter never goes backwards.
+- Both billing consumer factories report Kafka client metrics, including
+  `kafka_consumer_fetch_manager_records_lag_max`. Spring Boot attaches these only to the
+  factory it builds itself, and billing builds its own.
+- `BillingKafkaConsumerLagging` fires when one consumer stays more than 1,000 records behind
+  for 10 minutes (app team). Nothing is lost while it lags; never reset offsets or skip records.
 
 ## Verification
 

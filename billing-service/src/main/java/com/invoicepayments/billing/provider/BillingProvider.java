@@ -5,6 +5,11 @@ import java.time.Instant;
 /** Network operations are invoked outside the caller's financial database transaction. */
 public interface BillingProvider {
     String name();
+    /**
+     * Reserves room for one new payment before anything is saved, so a busy or failing provider is refused while
+     * nothing has been sent. Throws ProviderBusyException when there is no room. The default always admits.
+     */
+    default ProviderPermit admitNewPayment() { return ProviderPermit.NONE; }
     ProviderResult submit(ProviderCommand command);
     /** Identifies the request format and provider configuration safe for a saved retry. */
     default String paymentRequestVersion() { return null; }

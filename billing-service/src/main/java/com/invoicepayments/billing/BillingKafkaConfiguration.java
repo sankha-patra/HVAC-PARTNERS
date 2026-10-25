@@ -1,5 +1,6 @@
 package com.invoicepayments.billing;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -43,22 +44,28 @@ public class BillingKafkaConfiguration {
         config.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS,ByteArrayDeserializer.class);
         return config;
     }
-    @Bean ConcurrentKafkaListenerContainerFactory<String,byte[]> billingKafkaListenerFactory(KafkaProperties properties,KafkaTemplate<String,byte[]> template) {
+    @Bean ConcurrentKafkaListenerContainerFactory<String,byte[]> billingKafkaListenerFactory(KafkaProperties properties,KafkaTemplate<String,byte[]> template,MeterRegistry registry) {
         var config=consumerProperties(properties);
         var factory=new ConcurrentKafkaListenerContainerFactory<String,byte[]>();
-        factory.setConsumerFactory(new DefaultKafkaConsumerFactory<>(config));
+        factory.setConsumerFactory(measured(new DefaultKafkaConsumerFactory<>(config),registry));
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         var recoverer=new DeadLetterPublishingRecoverer(template);recoverer.setFailIfSendResultIsError(true);
         var errors=new DefaultErrorHandler(recoverer,new FixedBackOff(1000,4));
         errors.addNotRetryableExceptions(IllegalArgumentException.class);errors.setCommitRecovered(true);
         factory.setCommonErrorHandler(errors);factory.setConcurrency(2);return factory;
     }
-    @Bean ConcurrentKafkaListenerContainerFactory<String,byte[]> billingDltListenerFactory(KafkaProperties properties) {
+    @Bean ConcurrentKafkaListenerContainerFactory<String,byte[]> billingDltListenerFactory(KafkaProperties properties,MeterRegistry registry) {
         var factory=new ConcurrentKafkaListenerContainerFactory<String,byte[]>();
-        factory.setConsumerFactory(new DefaultKafkaConsumerFactory<>(consumerProperties(properties)));
+        factory.setConsumerFactory(measured(new DefaultKafkaConsumerFactory<>(consumerProperties(properties)),registry));
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         // Keep the original DLT record unacknowledged while the database is unavailable.
         factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000,FixedBackOff.UNLIMITED_ATTEMPTS)));
+        return factory;
+    }
+    // Boot attaches Kafka client metrics only to the factory it builds itself. These factories are built here,
+    // so without this the consumer lag behind BillingKafkaConsumerLagging would never be exported.
+    private static DefaultKafkaConsumerFactory<String,byte[]> measured(DefaultKafkaConsumerFactory<String,byte[]> factory,MeterRegistry registry) {
+        factory.addListener(new MicrometerConsumerListener<>(registry));
         return factory;
     }
     @Bean NewTopic billingEventsTopic(@Value("${kafka.topic.partitions:6}") int partitions,@Value("${kafka.topic.replicas:3}") int replicas,@Value("${kafka.topic.min-insync-replicas:2}") int minIsr) {

@@ -1,5 +1,69 @@
 # Verification of the extracted repository
 
+## Busy refusal before saving, a page that checks by itself, and a dry run — 25 October 2026 (later)
+
+- **Busy or failing Stripe is refused before anything is saved.** Before, when all 8 slots for Stripe calls on a
+  server were in use, a payment was refused only after "about to ask Stripe" was saved, so it became UNKNOWN and the
+  payer read "confirming" although nothing had been sent. Now `submit` reserves a slot first. With no slot, or
+  while new payments are paused after 5 Stripe failures in a row (30 seconds, then one trial payment), it answers
+  HTTP 503 `PROVIDER_BUSY` with `Retry-After: 60` and "Nothing was charged"; the payment stays ready to pay.
+  Payments already on their way are never refused.
+- **The payer page checks by itself.** While a payment is being confirmed or the payer is on Stripe's page, it asks
+  our server every 3 seconds for a minute, then every 15 seconds, for at most ten minutes, and reloads invoices only
+  when the status changes. Its messages no longer ask the payer to refresh.
+- **Dry run.** `dryRun1` to `dryRun8` walk one $100 invoice through eight situations on a real database and check
+  24 steps against hand-worked numbers: see [payment dry run](payment-dry-run.md). These describe existing logic,
+  except `dryRun8`, which was written first for the busy refusal.
+- **Simulation lab.** Its drills shared one Stripe adapter, so failures acted out in one drill paused new payments in
+  the next. Each drill now starts with a fresh adapter, and a new drill shows the pause on the real HTTP path.
+
+Test first: the 4 new server tests (busy refusal, pause and trial, Retry-After, `dryRun8`) and 6 of 7 new browser
+tests failed against the old code; the seventh (stop checking when the payer leaves) passed only because nothing
+checked yet. The first full run then failed 6 simulation-lab drills, which led to the lab change above.
+
+| Check | Result |
+| --- | --- |
+| Java suite (`scripts/verify-container-tests.ps1`) | **401 tests**, 0 failures, errors or skips (375 billing, 26 identity) |
+| Frontend unit tests and production build | **69 tests** pass; build completes |
+
+Evidence: `.tmp-notes/container-tests/20261025T051755109Z/` (git-ignored). No key, webhook secret or bearer token in
+the evidence. Simulator, fake Stripe transport and the local lab only: no live Stripe call.
+
+## Kafka outages, capture counter, consumer lag and the Carrier handoff — 25 October 2026
+
+- **A Kafka outage no longer turns valid events into dead letters.** Before, every failed send used
+  one of 50 claims, so roughly 10–25 minutes of broker trouble parked a good event for a manual
+  replay. Now a retriable Kafka error or a send timeout gives its claim back: the event waits and
+  `BillingOutboxNotDraining` tells the app team. Unexplained failures and crashed workers still use
+  the budget.
+- **Captured payments are counted** as `billing_payments_captured_total{method}`, read from capture
+  journals, so restarts and repeated webhooks cannot change it. Take `max` across replicas.
+- **Consumer lag is exported** from both billing consumer factories, and `BillingKafkaConsumerLagging`
+  fires when a consumer stays more than 1,000 records behind for 10 minutes.
+- **Handoff to Carrier:** the Alertmanager template now emails a notice (counts only) to placeholder
+  Carrier group mailboxes, routes a release awaiting approval to the approvers, and
+  [the runbook](carrier-handoff-runbook.md) gives the case-detail email and the case note to record.
+
+Test first: against the old code, the outage test failed (the event became `DEAD_LETTER` with 50
+attempts), the counter test failed (no meter) and the lag test failed (no lag meter). The test that
+an unexplained failure is still quarantined passed before and after. The first attempt at this red
+run could not start Mockito's inline mock maker inside `docker compose run` (it could not attach to
+the JVM), so the new tests use a small scripted Kafka fake instead; the older Mockito tests pass in
+the full run.
+
+Results:
+
+| Check | Result |
+| --- | --- |
+| Java suite (`scripts/verify-container-tests.ps1`) | **389 tests**, 0 failures, errors or skips (363 billing, 26 identity) |
+| Frontend unit tests and production build | 63 tests pass; build completes. Every payer-screen status message, notice and button is now plain; the 13 new tests failed first against the old wording. The finance screen is unchanged |
+| `promtool test rules` / `check rules` / `check config` | all pass; 25 rules valid |
+| `amtool check-config`, `amtool config routes test`, `amtool template render` | valid; six sample alerts reach the expected receivers |
+
+Evidence: `.tmp-notes/container-tests/20261024T191312066Z/` (git-ignored; the folder name is UTC,
+19:13 on 24 Oct). The test log contains no key, webhook secret or bearer token. Simulator and fake
+transports only: no live Stripe call, no AWS deployment and no delivered email.
+
 ## Roles, Stripe-confirmation release and a tested Codex batch — 24 October 2026
 
 A Codex batch (stale-rejection guard, lease-bounded provider budget, admission limit, refund conflict

@@ -66,9 +66,22 @@ public final class LocalPaymentLab implements AutoCloseable {
         server.createContext("/",this::handle);server.setExecutor(threads);server.start();
     }
 
-    /** Keeps the real adapter parser/form generation; rewrites its fixed host only in this test transport. */
+    private volatile StripeBillingProvider adapter;
+
+    /**
+     * Keeps the real adapter parser/form generation; rewrites its fixed host only in this test transport. The bean
+     * forwards to the current adapter, so each drill can start with a fresh one (see restartAdapter).
+     */
     public BillingProvider provider() {
-        return new StripeBillingProvider("sk_test_localLabOnly", request -> {
+        restartAdapter();
+        return new CurrentAdapter();
+    }
+    /**
+     * Starts a new incident with a healthy connection, as after Stripe recovers. The pause for repeated failures
+     * lives in the adapter, so failures acted out in one drill would otherwise pause new payments in the next.
+     */
+    public void restartAdapter() {
+        adapter = new StripeBillingProvider("sk_test_localLabOnly", request -> {
             if (!"https".equals(request.uri().getScheme()) || !"api.stripe.com".equals(request.uri().getHost()))
                 throw new IOException("Unexpected original adapter destination");
             HttpRequest.Builder wire = HttpRequest.newBuilder(origin().resolve(request.uri().getRawPath()))
@@ -77,6 +90,24 @@ public final class LocalPaymentLab implements AutoCloseable {
             HttpResponse<String> response = client.send(wire.build(),HttpResponse.BodyHandlers.ofString());
             return new StripeBillingProvider.Response(response.statusCode(),response.body());
         });
+    }
+    private final class CurrentAdapter implements BillingProvider {
+        @Override public String name() { return adapter.name(); }
+        @Override public ProviderPermit admitNewPayment() { return adapter.admitNewPayment(); }
+        @Override public ProviderResult submit(ProviderCommand command) { return adapter.submit(command); }
+        @Override public String paymentRequestVersion() { return adapter.paymentRequestVersion(); }
+        @Override public ProviderResult submitSaved(ProviderCommand command, String version, java.time.Instant preparedAt) { return adapter.submitSaved(command, version, preparedAt); }
+        @Override public ProviderResult recoverPayment(ProviderCommand command, String version, java.time.Instant preparedAt, String providerId) { return adapter.recoverPayment(command, version, preparedAt, providerId); }
+        @Override public ProviderResult discoverPayment(ProviderCommand saved, String version, java.time.Instant preparedAt) { return adapter.discoverPayment(saved, version, preparedAt); }
+        @Override public ProviderResult lookup(String idempotencyKey, String providerId) { return adapter.lookup(idempotencyKey, providerId); }
+        @Override public ProviderResult verifyPaymentReference(ProviderCommand expected, String providerId) { return adapter.verifyPaymentReference(expected, providerId); }
+        @Override public ProviderResult refund(RefundCommand command) { return adapter.refund(command); }
+        @Override public ProviderResult lookupRefund(String idempotencyKey, String providerId) { return adapter.lookupRefund(idempotencyKey, providerId); }
+        @Override public ProviderResult verifyRefundReference(RefundCommand expected, String providerId) { return adapter.verifyRefundReference(expected, providerId); }
+        @Override public String refundRequestVersion() { return adapter.refundRequestVersion(); }
+        @Override public ProviderResult recoverRefund(RefundCommand command, String version, java.time.Instant preparedAt, String providerId) { return adapter.recoverRefund(command, version, preparedAt, providerId); }
+        @Override public ProviderResult closePayment(ProviderCommand saved, String version, java.time.Instant preparedAt, String providerId) { return adapter.closePayment(saved, version, preparedAt, providerId); }
+        @Override public ProviderResult findRefund(RefundCommand saved, String providerId) { return adapter.findRefund(saved, providerId); }
     }
 
     public void reset() {

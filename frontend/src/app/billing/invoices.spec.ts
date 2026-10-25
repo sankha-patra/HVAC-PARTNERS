@@ -5,7 +5,7 @@ import { signal } from '@angular/core';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { environment } from '../../environments/environment';
 import { AuthService } from '../shared/auth.service';
-import { InvoicesComponent } from './invoices';
+import { InvoicesComponent, PAYER_NOTICES, STATUS_CHECKS } from './invoices';
 import { BillingAccount, BillingIntent, Invoice } from './billing-api';
 
 describe('Invoice payment recovery', () => {
@@ -45,6 +45,124 @@ describe('Invoice payment recovery', () => {
     http.expectOne(`${base}/accounts/${account.id}/intents`).flush({ ...created, status });
     flushBalances();
   }
+
+  // Payers are not technical: one plain sentence per status, and only "successful" when the payment is confirmed.
+  it('explains every payment status in plain words', () => {
+    const plain: Record<string, string> = {
+      CREATED: 'Check the amount, then press Pay.',
+      REQUIRES_ACTION: "Finish paying on the secure payment page. This page will update by itself when you're done.",
+      SUBMITTING: "Processing your payment. Please don't close this page or pay again.",
+      UNKNOWN: "Processing your payment. Please don't close this page or pay again.",
+      PROCESSING: 'Your bank payment is on its way. This can take a few days.',
+      CAPTURED: 'Payment successful. Thank you.',
+      FAILED: "Your payment didn't go through and you weren't charged. You can try again.",
+      CANCELLED: 'This payment was never started, so nothing was charged. You can start again.',
+      RETURNED: 'Your bank sent this payment back. The invoice is unpaid again. Please contact your finance team.',
+      REFUNDED: 'This payment was refunded.',
+    };
+    for (const [status, message] of Object.entries(plain)) {
+      component.intent.set({ ...created, status } as BillingIntent);
+      expect(component.statusExplanation(), status).toBe(message);
+    }
+    component.intent.set(null);
+    expect(component.statusExplanation()).toBe("We're checking this payment. Please don't pay again yet.");
+    const jargon = /provider|server|capture|settlement|reserv|submi|request|ERP|outcome|recorded|refresh/i;
+    for (const status of [...Object.keys(plain), 'SOMETHING_NEW']) {
+      component.intent.set({ ...created, status } as BillingIntent);
+      expect(component.statusExplanation(), status).not.toMatch(jargon);
+      if (status !== 'CAPTURED') expect(component.statusExplanation(), status).not.toContain('successful');
+    }
+  });
+
+  // The payer never has to refresh: the page keeps checking while a payment is being confirmed.
+  describe('while a payment is being confirmed', () => {
+    const processing = "Processing your payment. Please don't close this page or pay again.";
+    const checkPath = `${base}/intents/intent-a`;
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+    function pay(answer: Partial<BillingIntent>) {
+      initialize(); prepare();
+      component.submitIntent();
+      http.expectOne(`${base}/intents/intent-a/submit`).flush({ ...created, ...answer });
+      flushBalances();
+    }
+
+    it('updates by itself, without reloading anything until the status changes, and stops at the result', () => {
+      pay({ status: 'UNKNOWN' });
+      expect(component.statusExplanation()).toBe(processing);
+      vi.advanceTimersByTime(STATUS_CHECKS.fastEveryMs);
+      http.expectOne(checkPath).flush({ ...created, status: 'UNKNOWN' });
+      http.expectNone(`${base}/accounts/${account.id}/invoices`);
+      vi.advanceTimersByTime(STATUS_CHECKS.fastEveryMs);
+      http.expectOne(checkPath).flush({ ...created, status: 'CAPTURED' });
+      flushBalances([{ ...invoice, paidMinor: 12525 }]);
+      expect(component.statusExplanation()).toBe('Payment successful. Thank you.');
+      vi.advanceTimersByTime(STATUS_CHECKS.stopAfterMs);
+      http.expectNone(checkPath);
+    });
+
+    it('checks every 3 seconds for a minute, then says it is taking longer and stops after ten minutes', () => {
+      pay({ status: 'SUBMITTING' });
+      let checks = 0;
+      const answer = () => { for (const check of http.match(checkPath)) { check.flush({ ...created, status: 'SUBMITTING' }); checks++; } };
+      const longer = "This is taking longer than usual. You can close this page safely; the result will appear in your recent payments. Please don't pay again.";
+      for (let second = 1; second <= 30; second++) { vi.advanceTimersByTime(1000); answer(); }
+      expect(component.statusExplanation()).toBe(processing);
+      for (let second = 31; second <= 60; second++) { vi.advanceTimersByTime(1000); answer(); }
+      expect(checks).toBe(20);
+      expect(component.statusExplanation()).toBe(longer);
+      for (let second = 61; second <= 660; second++) { vi.advanceTimersByTime(1000); answer(); }
+      expect(checks).toBe(20 + 36);
+      expect(component.statusExplanation()).toBe(longer);
+      vi.advanceTimersByTime(STATUS_CHECKS.slowEveryMs * 4);
+      http.expectNone(checkPath);
+    });
+
+    it('keeps checking after a lost reply instead of asking the payer to refresh', () => {
+      initialize(); prepare();
+      component.submitIntent();
+      http.expectOne(`${base}/intents/intent-a/submit`).flush({}, { status: 504, statusText: 'Timeout' });
+      expect(component.error()).toBe(PAYER_NOTICES.payNotConfirmed);
+      expect(component.canSubmit()).toBe(false);
+      vi.advanceTimersByTime(STATUS_CHECKS.fastEveryMs);
+      http.expectOne(checkPath).flush({ ...created, status: 'UNKNOWN' });
+      flushBalances();
+      expect(component.statusExplanation()).toBe(processing);
+    });
+
+    it('notices a payment finished on the secure payment page without a refresh', () => {
+      pay({ status: 'REQUIRES_ACTION', checkoutUrl: 'https://checkout.stripe.com/c/pay/cs_test_a1' });
+      expect(component.statusExplanation()).toContain('This page will update by itself');
+      vi.advanceTimersByTime(STATUS_CHECKS.fastEveryMs);
+      http.expectOne(checkPath).flush({ ...created, status: 'CAPTURED' });
+      flushBalances();
+      expect(component.statusExplanation()).toBe('Payment successful. Thank you.');
+    });
+
+    it('says nothing was charged when payments are busy, and lets the payer try again without checking', () => {
+      initialize(); prepare();
+      component.submitIntent();
+      http.expectOne(`${base}/intents/intent-a/submit`)
+        .flush({ code: 'PROVIDER_BUSY', message: 'Nothing was charged' }, { status: 503, statusText: 'Service Unavailable' });
+      expect(component.error()).toBe(PAYER_NOTICES.busyTryAgain);
+      expect(component.submissionUncertain()).toBe(false);
+      expect(component.canSubmit()).toBe(true);
+      expect(JSON.parse(sessionStorage.getItem('invoice-payments.billing.v1:user-a:account-a')!).uncertainSubmit).toBe(false);
+      vi.advanceTimersByTime(STATUS_CHECKS.stopAfterMs);
+      http.expectNone(checkPath);
+      component.submitIntent();
+      http.expectOne(`${base}/intents/intent-a/submit`).flush({ ...created, status: 'UNKNOWN' });
+      flushBalances();
+      expect(component.error()).toBe('');
+    });
+
+    it('stops checking when the payer leaves the page', () => {
+      pay({ status: 'UNKNOWN' });
+      component.ngOnDestroy();
+      vi.advanceTimersByTime(STATUS_CHECKS.stopAfterMs);
+      http.expectNone(checkPath);
+    });
+  });
 
   it('reuses the same key and original invoice payload after a lost create response', () => {
     initialize();
@@ -102,7 +220,7 @@ describe('Invoice payment recovery', () => {
     http.expectOne(`${base}/intents/intent-a`).flush({ ...created, status: 'UNKNOWN' });
     flushBalances();
     expect(component.canSubmit()).toBe(false);
-    expect(component.statusExplanation()).toContain('do not create another payment');
+    expect(component.statusExplanation()).toContain('pay again');
   });
 
   it('uses a known intent lookup on reload rather than recreating or resubmitting it', () => {
@@ -122,12 +240,12 @@ describe('Invoice payment recovery', () => {
   it('displays server outcomes without calling processing or unknown successful', () => {
     initialize();
     prepare('PROCESSING');
-    expect(component.statusExplanation()).toContain('processing');
+    expect(component.statusExplanation()).toContain('on its way');
     expect(component.terminal()).toBe(false);
     component.refreshIntent();
     http.expectOne(`${base}/intents/intent-a`).flush({ ...created, status: 'CAPTURED' });
     flushBalances([{ ...invoice, paidMinor: 12525 }]);
-    expect(component.statusExplanation()).toContain('separate from bank payout settlement');
+    expect(component.statusExplanation()).toBe('Payment successful. Thank you.');
     expect(component.terminal()).toBe(true);
     expect(component.canSubmit()).toBe(false);
     component.startAnother();
@@ -195,7 +313,7 @@ describe('Invoice payment recovery', () => {
     initialize();
     component.toggleInvoice(invoice, true);
     component.createIntent();
-    expect(component.storageError()).toContain('could not be recovered');
+    expect(component.storageError()).toContain("couldn't reopen your earlier payment");
     http.expectNone(`${base}/accounts/${account.id}/intents`);
   });
 
@@ -231,7 +349,7 @@ describe('Invoice payment recovery', () => {
     flushBalances();
     expect(component.request()?.key).toBe('original-key');
     expect(component.intent()).toBeNull();
-    expect(component.error()).toContain('Recover it first');
+    expect(component.error()).toContain('Please finish that one first');
     expect(JSON.parse(sessionStorage.getItem('invoice-payments.billing.v1:user-a:account-a')!).key).toBe('original-key');
   });
 
@@ -266,7 +384,7 @@ describe('Invoice payment recovery', () => {
     flushBalances([invoice], [{ ...created, status: 'CANCELLED' }]);
     expect(component.terminal()).toBe(true);
     expect(component.canSubmit()).toBe(false);
-    expect(component.statusExplanation()).toContain('No payment was submitted');
+    expect(component.statusExplanation()).toContain('nothing was charged');
     expect(component.receiptUrl()).toBeNull();
     component.cancelIntent();
     component.submitIntent();

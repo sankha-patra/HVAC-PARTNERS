@@ -20,6 +20,35 @@ interface SavedRequest extends IntentRequest {
   definitiveRejection?: boolean;
 }
 
+/**
+ * Every notice the payer can see on this page, in one place so the wording can be checked. Payers are not
+ * technical: say what happened and what to do next, and never invite a second payment while one may go through.
+ */
+export const PAYER_NOTICES = {
+  accountsUnavailable: "We couldn't load your business accounts. Refresh the page to try again.",
+  paymentNotInYourAccounts: "We couldn't find this payment in your business accounts. Please contact support and give them the payment reference.",
+  otherPaymentInProgress: (reference: string) => `You already have a payment in progress for this account. Please finish that one first. Payment reference: ${reference}.`,
+  paymentLookupFailed: "We couldn't check this payment right now. Press Check payment status to try again. Please don't pay again yet.",
+  invoicesUnavailable: "We couldn't load your invoices. Press Refresh to try again. You can pay once they load.",
+  historyUnavailable: "We couldn't load your recent payments. Press Refresh before paying again, so you don't pay twice.",
+  paymentNotStarted: 'This payment could not be started and nothing was charged. Go back to your invoices, check your choice and try again.',
+  startNotConfirmed: "We couldn't confirm that your payment was started. Press Continue this payment below. Please don't start a new payment for these invoices.",
+  statusUnavailable: "We couldn't check your payment just now. This doesn't mean it failed. We'll keep checking; please don't pay again.",
+  payNotConfirmed: "We're checking whether your payment went through. Please don't close this page or pay again.",
+  cancelNotConfirmed: "We couldn't confirm the cancellation. Press Refresh payment before doing anything else.",
+  testResultNotConfirmed: "We couldn't confirm the test result. Press Refresh payment. No real money is used in test mode.",
+  browserStorageBlockedReload: 'Your browser is blocking saved data for this site. Write down your payment reference, then reload the page.',
+  answerDidNotMatch: "Something didn't match your business account. Please contact support and don't start a new payment.",
+  signInAgain: 'Please sign in again before paying.',
+  browserStorageBlocked: 'Your browser is blocking saved data for this site. Allow it, then try again. It lets you continue a payment if the page closes.',
+  earlierPaymentUnreadable: "We couldn't reopen your earlier payment. Please contact support before paying again for this account.",
+  payingBlocked: 'You can pay again once your earlier payment is sorted out.',
+  busyTryAgain: "We're very busy right now. Nothing was charged. Please try again in a minute.",
+};
+
+/** How often the page checks a payment that is still being confirmed, so the payer never has to refresh. */
+export const STATUS_CHECKS = { fastEveryMs: 3_000, fastForMs: 60_000, slowEveryMs: 15_000, stopAfterMs: 600_000 };
+
 @Component({
   selector: 'app-invoices',
   standalone: true,
@@ -52,7 +81,11 @@ export class InvoicesComponent implements OnInit, OnDestroy {
   readonly storageError = signal('');
   readonly submissionUncertain = signal(false);
   readonly returnedIntentId = signal('');
+  /** True once a payment has been confirming for over a minute: the payer may leave, the result is kept. */
+  readonly confirmingSlowly = signal(false);
   private readonly recoveryBlocked = signal(false);
+  private watchTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchStartedAt = 0;
   readonly canPay = computed(() => this.accounts().find(a => a.id === this.accountId())?.role === 'PAYER');
   readonly selectedTotal = computed(() => this.invoices().filter(i => this.selected().includes(i.id))
     .reduce((total, i) => total + this.available(i), 0));
@@ -91,12 +124,12 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       },
       error: () => {
         this.loadingAccounts.set(false);
-        this.error.set('Business accounts could not be loaded. Refresh the page to try again.');
+        this.error.set(PAYER_NOTICES.accountsUnavailable);
       }
     });
   }
 
-  ngOnDestroy() { this.destroyed.next(); this.destroyed.complete(); }
+  ngOnDestroy() { this.stopWatching(); this.destroyed.next(); this.destroyed.complete(); }
 
   recoverReturnedIntent() {
     const id = this.returnedIntentId();
@@ -107,7 +140,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       next: intent => {
         this.busy.set(false);
         if (intent.id !== id || !this.accounts().some(a => a.id === intent.accountId)) {
-          this.error.set('The returned payment does not belong to an available business account. Contact support with this reference.');
+          this.error.set(PAYER_NOTICES.paymentNotInYourAccounts);
           return;
         }
         this.accountId.set(intent.accountId);
@@ -122,7 +155,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
         const matchesSaved = saved?.intentId === intent.id;
         if (saved && !matchesSaved) {
           this.returnedIntentId.set('');
-          this.error.set(`Another payment request is saved for this account. Recover it first. The returned payment reference is ${id}.`);
+          this.error.set(PAYER_NOTICES.otherPaymentInProgress(id));
           this.selected.set(saved.invoiceIds);
           this.loadInvoices();
           return;
@@ -138,7 +171,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       },
       error: () => {
         this.busy.set(false);
-        this.error.set('The returned payment could not be looked up. Refresh this reference before preparing another payment.');
+        this.error.set(PAYER_NOTICES.paymentLookupFailed);
       }
     });
   }
@@ -152,6 +185,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
     this.intent.set(null);
     this.request.set(null);
     this.submissionUncertain.set(false);
+    this.stopWatching();
     this.recoveryBlocked.set(false);
     this.storageError.set('');
     this.error.set('');
@@ -177,7 +211,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       error: () => {
         if (this.accountId() !== accountId) return;
         this.loadingInvoices.set(false);
-        this.invoiceError.set('Invoice balances could not be refreshed. No new payment can be prepared until they are available.');
+        this.invoiceError.set(PAYER_NOTICES.invoicesUnavailable);
       }
     });
   }
@@ -194,7 +228,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       error: () => {
         if (accountId !== this.accountId()) return;
         this.historyLoading.set(false);
-        this.historyError.set('Recent payment requests could not be loaded. Keep any existing reference and refresh before starting a replacement payment.');
+        this.historyError.set(PAYER_NOTICES.historyUnavailable);
       }
     });
   }
@@ -242,10 +276,10 @@ export class InvoicesComponent implements OnInit, OnDestroy {
             const rejected = { ...request, definitiveRejection: true };
             this.request.set(rejected);
             this.persist(rejected);
-            this.error.set('The server rejected this request before creating a payment. Return to invoice selection to refresh balances and correct your selection.');
+            this.error.set(PAYER_NOTICES.paymentNotStarted);
             return;
           }
-          this.error.set('The payment request could not be confirmed. Recover this same request below; do not start another payment for these invoices.');
+          this.error.set(PAYER_NOTICES.startNotConfirmed);
         }
       });
   }
@@ -259,7 +293,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       next: intent => this.acceptIntent(intent),
       error: () => {
         this.busy.set(false);
-        this.error.set('Payment status is unavailable. Keep this reference and refresh again; this does not mean the payment failed.');
+        this.error.set(PAYER_NOTICES.statusUnavailable);
       }
     });
   }
@@ -275,9 +309,19 @@ export class InvoicesComponent implements OnInit, OnDestroy {
     this.error.set('');
     this.api.submit(intent.id).pipe(takeUntil(this.destroyed)).subscribe({
       next: result => this.acceptIntent(result),
-      error: () => {
+      error: failure => {
         this.busy.set(false);
-        this.error.set('Submission could not be confirmed. Refresh this payment to recover its outcome before taking another action.');
+        // Refused before anything was saved: certain that nothing was charged, so Pay can be pressed again.
+        if (failure.status === 503 && failure.error?.code === 'PROVIDER_BUSY') {
+          const refused = { ...request, uncertainSubmit: false };
+          this.request.set(refused);
+          this.persist(refused);
+          this.submissionUncertain.set(false);
+          this.error.set(PAYER_NOTICES.busyTryAgain);
+          return;
+        }
+        this.error.set(PAYER_NOTICES.payNotConfirmed);
+        this.watchPayment();
       }
     });
   }
@@ -294,7 +338,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       next: result => this.acceptIntent(result),
       error: () => {
         this.busy.set(false);
-        this.error.set('Cancellation could not be confirmed. Refresh this payment before submitting, cancelling again, or preparing another request.');
+        this.error.set(PAYER_NOTICES.cancelNotConfirmed);
       }
     });
   }
@@ -307,7 +351,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       next: result => this.acceptIntent(result),
       error: () => {
         this.busy.set(false);
-        this.error.set('The simulator result could not be confirmed. Refresh the payment; no real money is collected by the simulator.');
+        this.error.set(PAYER_NOTICES.testResultNotConfirmed);
       }
     });
   }
@@ -315,58 +359,123 @@ export class InvoicesComponent implements OnInit, OnDestroy {
   startAnother() {
     if ((!this.terminal() && !this.request()?.definitiveRejection) || this.busy()) return;
     try { sessionStorage.removeItem(this.storageKey()); } catch {
-      this.storageError.set('Browser recovery storage is unavailable. Keep this payment reference and reload before continuing.');
+      this.storageError.set(PAYER_NOTICES.browserStorageBlockedReload);
       return;
     }
     this.request.set(null);
     this.intent.set(null);
     this.selected.set([]);
     this.submissionUncertain.set(false);
+    this.stopWatching();
     this.error.set('');
     this.loadInvoices();
   }
 
+  // Payers are not technical. Say what happened and what to do next; never call a payment successful
+  // before it is confirmed, and never invite a second payment while one may still go through.
   statusExplanation() {
     switch (this.intent()?.status) {
-      case 'CREATED': return 'Your invoices are reserved for this request. Review the server-calculated amount before submitting.';
-      case 'SUBMITTING': return 'Submission is in progress. Refresh this payment; do not create a second request.';
-      case 'REQUIRES_ACTION': return 'Continue through the provider checkout. Returning here or closing checkout does not confirm payment.';
-      case 'PROCESSING': return 'The payment is processing. Bank payments can take time and may later be returned.';
-      case 'UNKNOWN': return 'The provider outcome is unknown. Keep this reference and refresh; do not create another payment for these invoices.';
-      case 'CAPTURED': return 'Capture has been recorded. This is separate from bank payout settlement and ERP posting. Bank payments can still be returned.';
-      case 'FAILED': return 'The server recorded a failed attempt. Refresh invoice balances before preparing another request.';
-      case 'RETURNED': return 'A return has been recorded. Review the refreshed invoice balance and contact receivables if needed.';
-      case 'REFUNDED': return 'A refund has been recorded. Its bank arrival and invoice treatment are separate steps.';
-      case 'CANCELLED': return 'The server cancelled this unsubmitted request and released its invoice reservations. No payment was submitted by this request.';
-      default: return 'No confirmed outcome is available. Refresh this payment before taking another action.';
+      case 'CREATED': return 'Check the amount, then press Pay.';
+      case 'REQUIRES_ACTION': return "Finish paying on the secure payment page. This page will update by itself when you're done.";
+      case 'SUBMITTING':
+      case 'UNKNOWN': return this.confirmingSlowly()
+        ? "This is taking longer than usual. You can close this page safely; the result will appear in your recent payments. Please don't pay again."
+        : "Processing your payment. Please don't close this page or pay again.";
+      case 'PROCESSING': return 'Your bank payment is on its way. This can take a few days.';
+      case 'CAPTURED': return 'Payment successful. Thank you.';
+      case 'FAILED': return "Your payment didn't go through and you weren't charged. You can try again.";
+      case 'CANCELLED': return 'This payment was never started, so nothing was charged. You can start again.';
+      case 'RETURNED': return 'Your bank sent this payment back. The invoice is unpaid again. Please contact your finance team.';
+      case 'REFUNDED': return 'This payment was refunded.';
+      default: return "We're checking this payment. Please don't pay again yet.";
     }
   }
+
+  statusLabel(status = this.intent()?.status) {
+    switch (status) {
+      case 'CREATED': return 'Ready to pay';
+      case 'REQUIRES_ACTION': return 'Waiting for you';
+      case 'SUBMITTING':
+      case 'UNKNOWN': return 'Confirming';
+      case 'PROCESSING': return 'On its way';
+      case 'CAPTURED': return 'Paid';
+      case 'FAILED': return 'Not paid';
+      case 'CANCELLED': return 'Cancelled';
+      case 'RETURNED': return 'Sent back';
+      case 'REFUNDED': return 'Refunded';
+      default: return 'Checking';
+    }
+  }
+  methodLabel(method?: PaymentMethod) { return method === 'CARD' ? 'Card' : method === 'ACH' ? 'US bank account' : ''; }
+  allocationLabel(state: string) {
+    switch (state) {
+      case 'RESERVED': return 'held for this payment';
+      case 'POSTED': return 'paid';
+      case 'RELEASED': return 'released';
+      case 'REVERSED': return 'reversed';
+      default: return state.toLowerCase();
+    }
+  }
+  invoiceNumber(id: string) { return this.invoices().find(invoice => invoice.id === id)?.number || id; }
 
   private acceptIntent(intent: BillingIntent) {
     this.busy.set(false);
     if (!intent?.id || intent.accountId !== this.accountId()
       || (!!this.request()?.intentId && this.request()!.intentId !== intent.id)) {
-      this.error.set('The response could not be matched to this business account. Keep the existing request and contact support.');
+      this.error.set(PAYER_NOTICES.answerDidNotMatch);
       return;
     }
+    // A new status starts a new wait: the payer gets a fresh minute before "taking longer".
+    if (intent.status !== this.intent()?.status) this.stopWatching();
     this.intent.set(intent);
     this.submissionUncertain.set(false);
     const request = { ...this.request()!, intentId: intent.id, uncertainSubmit: false };
     this.request.set(request);
     this.persist(request);
     this.loadInvoices();
+    this.watchPayment();
+  }
+
+  /**
+   * Keeps checking a payment that is still being confirmed, so the payer never has to refresh: every 3 seconds
+   * for a minute, then every 15 seconds, for at most ten minutes. Invoices reload only when the status changes.
+   */
+  private watchPayment() {
+    const id = this.request()?.intentId;
+    const confirming = this.submissionUncertain() || ['SUBMITTING', 'UNKNOWN', 'REQUIRES_ACTION'].includes(this.intent()?.status || '');
+    if (!id || !confirming) { this.stopWatching(); return; }
+    if (this.watchTimer) return;
+    if (!this.watchStartedAt) this.watchStartedAt = Date.now();
+    const waited = Date.now() - this.watchStartedAt;
+    this.confirmingSlowly.set(waited >= STATUS_CHECKS.fastForMs);
+    if (waited >= STATUS_CHECKS.stopAfterMs) return;
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null;
+      if (this.busy()) { this.watchPayment(); return; }
+      this.api.intent(id).pipe(takeUntil(this.destroyed)).subscribe({
+        next: intent => intent.status !== this.intent()?.status || this.submissionUncertain()
+          ? this.acceptIntent(intent) : this.watchPayment(),
+        error: () => this.watchPayment()
+      });
+    }, waited < STATUS_CHECKS.fastForMs ? STATUS_CHECKS.fastEveryMs : STATUS_CHECKS.slowEveryMs);
+  }
+  private stopWatching() {
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = null;
+    this.watchStartedAt = 0;
+    this.confirmingSlowly.set(false);
   }
 
   private storagePrefix() { return `invoice-payments.billing.v1:${this.auth.user()?.userId || 'unavailable'}`; }
   private storageKey() { return `${this.storagePrefix()}:${this.accountId()}`; }
   private persist(request: SavedRequest) {
-    if (!this.auth.user()?.userId) { this.storageError.set('Sign in again before preparing a payment.'); return false; }
+    if (!this.auth.user()?.userId) { this.storageError.set(PAYER_NOTICES.signInAgain); return false; }
     try {
       sessionStorage.setItem(this.storageKey(), JSON.stringify(request));
       this.storageError.set('');
       return true;
     } catch {
-      this.storageError.set('Browser recovery storage is unavailable. Enable it before submitting a payment, so an interrupted request can be recovered.');
+      this.storageError.set(PAYER_NOTICES.browserStorageBlocked);
       return false;
     }
   }
@@ -386,9 +495,9 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       this.submissionUncertain.set(saved.uncertainSubmit === true);
     } catch {
       this.recoveryBlocked.set(true);
-      this.storageError.set('A saved payment request could not be recovered. Contact support before creating another payment for this account.');
+      this.storageError.set(PAYER_NOTICES.earlierPaymentUnreadable);
       // A corrupt recovery record cannot safely be replaced with a new operation.
-      this.invoiceError.set('Payment preparation is unavailable until the previous request is recovered.');
+      this.invoiceError.set(PAYER_NOTICES.payingBlocked);
     }
   }
 }

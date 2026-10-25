@@ -19,7 +19,8 @@ public class BillingWorkers {
     private final KafkaTemplate<String,byte[]> kafka;
     private final ThreadPoolExecutor io=pool(4,4,"billing-recovery-");
     private final ThreadPoolExecutor publishers=pool(8,8,"billing-publisher-");
-    // Claims consume the budget, so repeated worker crashes cannot retry forever.
+    // Claims consume the budget, so repeated worker crashes cannot retry forever. A broker outage gives the
+    // claim back: the event is not at fault, so it waits (BillingOutboxNotDraining alerts) instead of being parked.
     static final int MAX_OUTBOX_ATTEMPTS=50;
     private boolean refundFirst;
     public BillingWorkers(BillingStore db,BillingRecovery recovery,BillingInbox inbox,ObjectProvider<KafkaTemplate<String,byte[]>> kafka) {
@@ -112,9 +113,12 @@ public class BillingWorkers {
             boolean permanent=cause instanceof org.apache.kafka.common.errors.RecordTooLargeException
                 || cause instanceof org.apache.kafka.common.errors.SerializationException
                 || cause instanceof org.apache.kafka.common.errors.InvalidTopicException;
-            if(permanent || amount(current,"attempts")>=MAX_OUTBOX_ATTEMPTS)
+            // Kafka marks transient cluster conditions as retriable; a send that times out waiting is the same.
+            boolean brokerUnavailable=cause instanceof org.apache.kafka.common.errors.RetriableException
+                || cause instanceof java.util.concurrent.TimeoutException || cause instanceof InterruptedException;
+            if(permanent || (!brokerUnavailable && amount(current,"attempts")>=MAX_OUTBOX_ATTEMPTS))
                 quarantine(current,cause.getClass().getSimpleName());
-            else db.update("UPDATE billing.outbox SET state='NEW',lease_token=NULL,lease_until=NULL,next_attempt_at=NOW()+INTERVAL '10 seconds' WHERE id=?",id(current.get("id")));
+            else db.update("UPDATE billing.outbox SET state='NEW',attempts=attempts-?,lease_token=NULL,lease_until=NULL,next_attempt_at=NOW()+INTERVAL '10 seconds' WHERE id=?",brokerUnavailable?1:0,id(current.get("id")));
             return null;
         });
     }

@@ -100,7 +100,8 @@ class BillingSimulationLabTest {
             .put("scope","Random-port billing HTTP server; real PostgreSQL 17; loopback external doubles with separate commits; test-only Stripe transport relay; no Kafka in this lab")
             .put("limitations",new JSONArray(List.of("Same machine and PostgreSQL failure domain","Synthetic contracts do not prove vendor conformance","Bearer identities injected for test; no identity/gateway/browser in load","Workers disabled; recovery driven explicitly","ERP relay is test-only; existing Kafka integration is separate","No production capacity, availability, clearing-time, RPO or RTO claim")));
     }
-    @BeforeEach void normalFaults(){lab.erpFault=NORMAL;lab.bankOutage=false;lab.latencyMs=0;}
+    // Each drill is a separate incident that starts with Stripe healthy; the pause for repeated failures has its own drill.
+    @BeforeEach void normalFaults(){lab.erpFault=NORMAL;lab.bankOutage=false;lab.latencyMs=0;lab.restartAdapter();}
     @AfterAll void writeEvidence() throws Exception {
         report.put("finishedAt",Instant.now());
         Files.createDirectories(Path.of("target"));
@@ -135,6 +136,7 @@ class BillingSimulationLabTest {
 
     @Test @Order(2) void timeoutRateLimitAndOutageRemainUncertainWithoutReleasingReservations() throws Exception {
         for(var fault:List.of(TIMEOUT_AFTER_ACCEPT,RATE_LIMIT,UNAVAILABLE,WRONG_AMOUNT)){
+            lab.restartAdapter();
             Fixture f=fixture();UUID intent=create(f,"CARD");lab.plan(intent,fault);
             assertThat(command("/intents/"+intent+"/submit",new JSONObject(),PAYER).getString("status")).isEqualTo("UNKNOWN");
             assertMoney(f,0,12525);assertThat(count("SELECT count(*) FROM billing.journals WHERE intent_id=?",intent)).isZero();
@@ -268,6 +270,23 @@ class BillingSimulationLabTest {
         finally{times.add(millis(System.nanoTime()-start));}
     }
     private static JSONObject percentiles(Collection<Double> values){List<Double> sorted=values.stream().sorted().toList();JSONObject result=new JSONObject().put("samples",sorted.size());if(!sorted.isEmpty())for(int p:List.of(50,95,99))result.put("p"+p,sorted.get(Math.max(0,(int)Math.ceil(sorted.size()*p/100.0)-1)));return result;}
+    @Test @Order(8) void repeatedStripeFailuresRefuseNewPaymentsBeforeAnythingIsSaved() throws Exception {
+        for(int failure=1;failure<=StripeBillingProvider.FAILURES_BEFORE_PAUSE;failure++){
+            Fixture f=fixture();UUID intent=create(f,"CARD");lab.plan(intent,UNAVAILABLE);
+            assertThat(command("/intents/"+intent+"/submit",new JSONObject(),PAYER).getString("status")).isEqualTo("UNKNOWN");
+        }
+        Fixture f=fixture();UUID intent=create(f,"CARD");int posts=lab.paymentPosts.get();
+        Reply refused=send("POST","/intents/"+intent+"/submit",new JSONObject(),PAYER,UUID.randomUUID().toString());
+        assertThat(refused.status).isEqualTo(503);
+        assertThat(refused.json().getString("code")).isEqualTo("PROVIDER_BUSY");
+        assertThat(refused.json().getString("message")).contains("Nothing was charged");
+        assertThat(lab.paymentPosts.get()).isEqualTo(posts);
+        assertThat(db.one("SELECT status FROM billing.intents WHERE id=?",intent)).containsEntry("status","CREATED");
+        assertThat(count("SELECT count(*) FROM billing.attempts WHERE intent_id=?",intent)).isZero();
+        assertMoney(f,0,12525);
+        passed("Stripe failing repeatedly: a new payment is refused with 503 PROVIDER_BUSY before anything is saved or sent; it stays ready to pay");
+        lab.restartAdapter();
+    }
     private static int setting(String name,int fallback,int min,int max){int value=Integer.getInteger(name,fallback);if(value<min||value>max)throw new IllegalArgumentException(name+" is outside bounded lab limits");return value;}
     private static double millis(long nanos){return nanos/1_000_000.0;}
     private void passed(String name){report.getJSONArray("scenarios").put(new JSONObject().put("scenario",name).put("passed",true));}
