@@ -2452,6 +2452,78 @@ class BillingFinancialDatabaseTest {
         assertThat(busy.submit(PAYER, pay).get("status")).isEqualTo("PROCESSING");
     }
 
+    // Stripe's hosted page must not hold an invoice for a day. Thirty minutes after the page opened, recovery closes it
+    // with Stripe's expire step; a page that is expired and unpaid is a failed payment, so the invoice is free again.
+    @Test void dryRun9_unusedPaymentPageClosesAfterThirtyMinutes() {
+        var page = new HostedPage("ABSENT");
+        UUID pay = openPage(page);
+        step("9 payer leaves the payment page", "1 payer presses Pay: Stripe opens the page", pay, 1, "REQUIRES_ACTION", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        // Many earlier checks would normally push the next one out by 21 minutes, past the page's 30-minute mark.
+        db.update("UPDATE billing.intents SET recovery_count=8 WHERE id=?", pay);
+        pageOpenedMinutesAgo(pay, 10); due(pay); page.recover();
+        assertThat(page.closes).hasValue(0);
+        assertThat(db.one("""
+            SELECT i.next_recovery_at<=MIN(t.created_at)+INTERVAL '30 minutes 6 seconds' AS on_time FROM billing.intents i
+            JOIN billing.timeline t ON t.intent_id=i.id AND t.type='REQUIRES_ACTION' WHERE i.id=? GROUP BY i.next_recovery_at
+            """, pay)).as("the next check lands when the page is due to close").containsEntry("onTime", true);
+        step("9 payer leaves the payment page", "2 after 10 minutes: still open, checked again at 30", pay, 1, "REQUIRES_ACTION", "RESERVED", 0, 10000, 0, 1, 1, 0);
+        pageOpenedMinutesAgo(pay, 21); due(pay); page.recover();
+        assertThat(page.closes).hasValue(1);
+        step("9 payer leaves the payment page", "3 after 31 minutes: page closed unpaid, invoice free", pay, 1, "FAILED", "RELEASED", 0, 0, 10000, 1, 1, 0);
+    }
+
+    // The payer may finish paying just before the page closes: the expire step then reports the payment instead.
+    @Test void aPagePaidJustBeforeItClosesIsRecordedAsPaid() {
+        var page = new HostedPage("CAPTURED");
+        UUID pay = openPage(page);
+        pageOpenedMinutesAgo(pay, 31); due(pay); page.recover();
+        assertThat(page.closes).hasValue(1);
+        assertThat(payments.raw(pay).get("status")).isEqualTo("CAPTURED");
+        assertInvoice(INVOICE, 10000, 0);
+    }
+
+    // If Stripe cannot confirm the close, the page may still be open: keep waiting, never call it unknown or failed.
+    @Test void aCloseThatCannotBeConfirmedKeepsThePageWaiting() {
+        var page = new HostedPage("UNKNOWN");
+        UUID pay = openPage(page);
+        pageOpenedMinutesAgo(pay, 31); due(pay); page.recover();
+        assertThat(page.closes).hasValue(1);
+        assertThat(payments.raw(pay).get("status")).isEqualTo("REQUIRES_ACTION");
+        assertInvoice(INVOICE, 0, 10000);
+    }
+
+    /** Stands in for Stripe's hosted page: Pay opens a page the payer must finish; closing it reports the given state. */
+    final class HostedPage extends DelegateProvider {
+        final AtomicInteger closes = new AtomicInteger();
+        final String onClose;
+        HostedPage(String onClose) { super(provider); this.onClose = onClose; }
+        @Override public ProviderResult submit(ProviderCommand command) {
+            return new ProviderResult(delegate.submit(command).providerId(), "REQUIRES_ACTION", null, "Waiting for the payer on the payment page");
+        }
+        @Override public ProviderResult lookup(String key, String id) {
+            return new ProviderResult(id, "REQUIRES_ACTION", null, "Waiting for the payer on the payment page");
+        }
+        @Override public ProviderResult closePayment(ProviderCommand saved, String version, java.time.Instant preparedAt, String id) {
+            closes.incrementAndGet();
+            return new ProviderResult(id, onClose, null, "Payment page closed: " + onClose);
+        }
+        void recover() {
+            BillingService service = service(this, MERCHANT);
+            var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, this), this);
+            worker.recoverPayment(worker.claimPayments(1).get(0));
+        }
+    }
+    UUID openPage(HostedPage page) {
+        BillingService service = service(page, MERCHANT);
+        UUID pay = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        service.submit(PAYER, pay);
+        assertThat(service.raw(pay).get("status")).isEqualTo("REQUIRES_ACTION");
+        return pay;
+    }
+    void pageOpenedMinutesAgo(UUID pay, int minutes) {
+        db.update("UPDATE billing.timeline SET created_at=created_at-(? * INTERVAL '1 minute') WHERE intent_id=? AND type='REQUIRES_ACTION'", minutes, pay);
+    }
+
     /** Checks one step against the hand-worked numbers, then prints the real rows. */
     void step(String scenario, String step, UUID payment, long payments, String status, String allocation,
               long paid, long held, long left, long attempts, long atStripe, long journals) {

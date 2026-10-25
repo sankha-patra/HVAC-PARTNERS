@@ -1,8 +1,8 @@
 # Payment dry run: one $100 invoice, step by step
 
 Every number below was worked out by hand first, then checked by a test that runs the real code against a real
-PostgreSQL database: `BillingFinancialDatabaseTest`, tests `dryRun1` to `dryRun8`. Each test step prints the actual
-rows (log lines starting `DRYRUN|`). All 8 tests and all 24 steps pass (25 Oct 2026).
+PostgreSQL database: `BillingFinancialDatabaseTest`, tests `dryRun1` to `dryRun9`. Each test step prints the actual
+rows (log lines starting `DRYRUN|`). All 9 tests and all 27 steps pass (25 Oct 2026).
 
 The tests use the built-in simulator in place of Stripe. With real Stripe, step "payer presses Pay" shows
 `REQUIRES_ACTION` (the payer still has to finish Stripe's page) instead of the simulator's `PROCESSING`.
@@ -32,7 +32,7 @@ again and the payer can start a new payment. The old payment row stays, marked C
 **The busy sign (lease)** is `lease_until` on the payment row: "a worker is handling this until 10:02". Nobody else
 touches the payment until then. If the worker crashes, the sign simply runs out and another worker takes over.
 
-## The eight scenarios (real values from the database)
+## The nine scenarios (real values from the database)
 
 Money in dollars. "At Stripe" = payments Stripe knows about. "Saved requests" = rows in `attempts`.
 
@@ -124,6 +124,24 @@ always true, because the refusal happens before anything is saved or sent.
   answers, payments resume; if not, they pause again. Any answer from Stripe, even a refusal, ends the pause.
 - Payments already on their way are never refused: they are still checked, and that is how Stripe's recovery is noticed.
 
+### 9. The payer opens Stripe's payment page, then leaves
+
+| Step | Status | Held money | Held | Left |
+|---|---|---|---|---|
+| Payer presses Pay: Stripe opens the page | REQUIRES_ACTION | RESERVED | 100 | 0 |
+| After 10 minutes: still open, next check set for the 30-minute mark | REQUIRES_ACTION | RESERVED | 100 | 0 |
+| After 31 minutes: page closed unpaid, invoice free | FAILED | RELEASED | 0 | **100** |
+
+Stripe keeps an unused page open for 24 hours by default. The app closes it 30 minutes after it opened, with
+Stripe's expire step, and a page that is expired and unpaid is a failed payment, so the invoice is free again.
+If the payer paid at the last moment, the expire step reports the payment instead and it is recorded as paid. If
+Stripe cannot confirm the close, the page keeps waiting and is tried again. When Stripe itself says a page expired
+(`checkout.session.expired`), the invoice is freed at once.
+
+The page is closed by the app rather than by Stripe's own `expires_at` setting on purpose: that setting is part of
+the saved request, and Stripe accepts it only if it is at least 30 minutes in the future. A request retried more than
+a few minutes late, after an outage, could then never open its page.
+
 ## What the payer sees while waiting
 
 The payer page checks the payment by itself, so nobody is asked to refresh: every 3 seconds for the first minute,
@@ -137,7 +155,7 @@ then every 15 seconds, for at most ten minutes. It reloads invoices only when th
 | Paid | Payment successful. Thank you. |
 | Busy or Stripe failing | We're very busy right now. Nothing was charged. Please try again in a minute. |
 
-## The rule behind all eight
+## The rule behind all nine
 
 1. Save first, then call Stripe. The saved request has one key, made from our payment ID, and it never changes.
 2. Never delete a payment row. Its status changes; the row stays.
@@ -147,6 +165,7 @@ then every 15 seconds, for at most ten minutes. It reloads invoices only when th
    failure (scenario 7).
 6. The busy sign stops two workers from handling the same payment, and runs out by itself if a worker dies.
 7. Refuse a new payment only before anything is saved, so "nothing was charged" is always true (scenario 8).
+8. Never hold an invoice for an unused payment page longer than about 30 minutes (scenario 9).
 
 ## The four videos against this logic
 

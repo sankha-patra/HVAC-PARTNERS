@@ -34,10 +34,14 @@ This is a document check, not a live call. The steps below are the live proof.
 
 ```powershell
 stripe listen --forward-to http://localhost:4400/api/v1/billing/webhooks/stripe `
-  --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,refund.created,refund.updated,refund.failed
+  --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,refund.created,refund.updated,refund.failed
 ```
 
 Copy the `whsec_…` signing secret it prints. Leave this window open.
+
+`checkout.session.expired` frees the invoice as soon as a payment page closes unused. The app closes a page itself
+30 minutes after Stripe opened it (Stripe's own default is 24 hours), so an abandoned payment holds the invoice for
+about half an hour, not a day.
 
 ## 2. Configure the provider
 

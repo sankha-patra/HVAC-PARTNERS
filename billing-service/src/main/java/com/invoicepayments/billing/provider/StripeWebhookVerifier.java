@@ -71,7 +71,7 @@ public final class StripeWebhookVerifier {
                 || !StripeBillingProvider.validId(event.getString("id"), "evt_")) throw new InvalidProviderWebhookException();
         String type = event.getString("type");
         boolean payment = type.equals("checkout.session.completed") || type.equals("checkout.session.async_payment_succeeded")
-                || type.equals("checkout.session.async_payment_failed");
+                || type.equals("checkout.session.async_payment_failed") || type.equals("checkout.session.expired");
         boolean refund = type.equals("refund.created") || type.equals("refund.updated") || type.equals("refund.failed");
         boolean dispute = type.startsWith("charge.dispute.");
         // PI identifiers differ from the persisted Checkout Session identity. Disputes require review.
@@ -97,6 +97,9 @@ public final class StripeWebhookVerifier {
             String paymentStatus = object.optString("payment_status");
             if (type.equals("checkout.session.async_payment_failed")) {
                 state = "unpaid".equals(paymentStatus) ? "FAILED" : "REVIEW";
+            } else if (type.equals("checkout.session.expired")) {
+                // The payment page closed unused: nothing was paid, so the invoice can be freed. Anything else is reviewed.
+                state = "expired".equals(object.optString("status")) && "unpaid".equals(paymentStatus) ? "FAILED" : "REVIEW";
             } else {
                 // Completing the hosted form is not a successful ACH debit.
                 state = "paid".equals(paymentStatus) ? "CAPTURED" : "unpaid".equals(paymentStatus) ? "PROCESSING" : "REVIEW";

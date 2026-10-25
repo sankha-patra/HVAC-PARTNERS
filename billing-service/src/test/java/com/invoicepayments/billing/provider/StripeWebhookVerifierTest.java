@@ -41,6 +41,15 @@ class StripeWebhookVerifierTest {
         assertThat(normalized.providerId()).isEqualTo(SESSION);
     }
 
+    // Stripe tells us when a payment page closes unused. Nothing was paid, so it is a failed payment and frees the invoice.
+    @Test void anExpiredUnpaidPaymentPageIsAFailedPayment() throws Exception {
+        byte[] raw = bytes(event("checkout.session.expired", session(null, "unpaid", "expired")));
+        var normalized = verifier.verify(raw, signature(raw, NOW)).orElseThrow();
+        assertThat(normalized).isEqualTo(new ProviderWebhookEvent("evt_signed123", SESSION, INTENT, "FAILED", 12345, "USD", null));
+        raw = bytes(event("checkout.session.expired", session(PI, "paid", "complete")));
+        assertThat(verifier.verify(raw, signature(raw, NOW)).orElseThrow().state()).as("contradictory evidence is reviewed").isEqualTo("REVIEW");
+    }
+
     @Test void anyRawWhitespaceChangeInvalidatesSignature() throws Exception {
         byte[] raw = bytes(event("checkout.session.completed", session(PI, "paid", "complete")));
         String originalSignature = signature(raw, NOW);
@@ -81,7 +90,8 @@ class StripeWebhookVerifierTest {
         assertThatThrownBy(() -> verifier.verify(raw, signed)).isInstanceOf(InvalidProviderWebhookException.class);
     }
 
-    @ParameterizedTest @ValueSource(strings = {"payment_intent.succeeded", "charge.refunded", "checkout.session.expired"})
+    // checkout.session.expired is no longer ignored: it frees the invoice (see anExpiredUnpaidPaymentPageIsAFailedPayment).
+    @ParameterizedTest @ValueSource(strings = {"payment_intent.succeeded", "charge.refunded"})
     void unsupportedObjectsAreIgnoredWithoutInventingReturnOrMismatchingProviderIds(String type) throws Exception {
         byte[] raw = bytes(event(type, new JSONObject()));
         assertThat(verifier.verify(raw, signature(raw, NOW))).isEmpty();

@@ -1,5 +1,27 @@
 # Verification of the extracted repository
 
+## Unused payment pages close after 30 minutes — 25 October 2026 (later)
+
+Before, a payer who opened Stripe's payment page and walked away held the invoice for about a day (Stripe's default
+page life is 24 hours). Now recovery closes the page 30 minutes after it opened, with Stripe's expire step: expired
+and unpaid becomes a failed payment and frees the invoice; a last-moment payment is recorded as paid; an unconfirmed
+close keeps the page waiting. Recovery is scheduled to land on the 30-minute mark however far its backoff has grown.
+A signed `checkout.session.expired` message now frees the invoice at once, and the Stripe runbook forwards it.
+
+Stripe's own `expires_at` was not used: it is part of the saved request and must be at least 30 minutes ahead when
+the page is created, so a retry sent more than a few minutes late could never open the page.
+
+Test first: the 3 new database tests and the new webhook test failed against the old code (the page was never
+closed, the next check was not set for the 30-minute mark, the expired message was ignored). One older webhook test
+listed `checkout.session.expired` as a message to ignore; that case was removed because it is now handled.
+
+| Check | Result |
+| --- | --- |
+| Java suite (`scripts/verify-container-tests.ps1`) | **404 tests**, 0 failures, errors or skips |
+| Frontend unit tests and production build (no frontend change) | **70 tests** pass; build completes |
+
+Evidence: `.tmp-notes/container-tests/20261025T063925899Z/` (git-ignored). Simulator and fake Stripe only.
+
 ## One "Amount due" for payers — 25 October 2026 (later)
 
 The payer's invoice list now has one number per invoice, **Amount due** (total minus paid), and a

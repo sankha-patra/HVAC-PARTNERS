@@ -43,7 +43,8 @@ public class BillingRecovery {
         if(!provider.name().equals(work.get("provider"))) {db.tx(()->{db.escalate(intent,null,"ORIGINAL_PROVIDER_UNAVAILABLE",intent.toString(),"The original payment provider is still unavailable");return null;});return;}
         try (var ignored=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
             if(work.get("originalRequest")==null || work.get("providerId")!=null) {
-                result=provider.lookup(BillingService.operationKey(intent),text(work,"providerId"));
+                result=pageDueToClose(intent,work) ? closeUnusedPage(work)
+                    : provider.lookup(BillingService.operationKey(intent),text(work,"providerId"));
             } else {
                 ProviderCommand command=ProviderCommand.fromJson(text(work,"originalRequest"));
                 if(!intent.toString().equals(command.intentId()) || !BillingService.operationKey(intent).equals(command.idempotencyKey())
@@ -74,15 +75,48 @@ public class BillingRecovery {
         }
         ProviderDiagnostics diagnostics=result.diagnostics();
         db.tx(() -> {
-            // Backoff is per operation; stuck oldest records do not monopolize each batch.
+            // Backoff is per operation; stuck oldest records do not monopolize each batch. A waiting payment
+            // page is checked again when it is due to close, however far the backoff has grown.
             long seconds=retryDelay(amount(work,"recoveryCount"),diagnostics);
-            db.update("UPDATE billing.intents SET next_recovery_at=NOW()+(? * INTERVAL '1 second') WHERE id=? AND lease_token IS NULL AND status IN ('SUBMITTING','PROCESSING','UNKNOWN','REQUIRES_ACTION')",seconds,intent);
+            db.update("""
+                UPDATE billing.intents i SET next_recovery_at=CASE
+                    WHEN i.status='REQUIRES_ACTION' AND p.closes_at>NOW() THEN LEAST(NOW()+(? * INTERVAL '1 second'),p.closes_at)
+                    ELSE NOW()+(? * INTERVAL '1 second') END
+                FROM (SELECT MIN(created_at)+(? * INTERVAL '1 minute')+INTERVAL '1 second' AS closes_at
+                      FROM billing.timeline WHERE intent_id=? AND type='REQUIRES_ACTION') p
+                WHERE i.id=? AND i.lease_token IS NULL AND i.status IN ('SUBMITTING','PROCESSING','UNKNOWN','REQUIRES_ACTION')
+                """,seconds,seconds,PAGE_MINUTES,intent,intent);
             // A legitimately processing ACH payment may take days. Escalate uncertainty,
             // rather than treating every asynchronous provider response as a failure.
             if(!technicalFailure(diagnostics) && amount(work,"recoveryCount")>=5 && db.exists("SELECT 1 FROM billing.intents WHERE id=? AND status IN ('UNKNOWN','SUBMITTING')",intent))
                 db.escalate(intent,null,"PAYMENT_UNRESOLVED",intent.toString(),"Payment outcome still unconfirmed after repeated recovery");
             return null;
         });
+    }
+    /** A hosted payment page is closed this long after it opened, so an unused page holds invoices for minutes, not a day. */
+    static final int PAGE_MINUTES=30;
+    private boolean pageDueToClose(UUID intent,Map<String,Object> work) {
+        return "REQUIRES_ACTION".equals(work.get("status")) && work.get("providerId")!=null && work.get("originalRequest")!=null
+            && db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='REQUIRES_ACTION' HAVING MIN(created_at)<=NOW()-(? * INTERVAL '1 minute')",intent,PAGE_MINUTES);
+    }
+    /**
+     * Stripe's expire step, the same one a release uses. Expired and unpaid proves nothing was charged; a payment made at
+     * the last moment is reported instead. Until the close is confirmed the page may still be open, so it keeps waiting.
+     */
+    private ProviderResult closeUnusedPage(Map<String,Object> work) {
+        String page=text(work,"providerId");
+        ProviderResult closed;
+        try {
+            closed=provider.closePayment(ProviderCommand.fromJson(text(work,"originalRequest")),text(work,"requestVersion"),
+                Instant.parse(text(work,"preparedAt")),page);
+        } catch(ProviderUncertainException notConfirmed) {
+            closed=new ProviderResult(page,"UNKNOWN",null,notConfirmed.getMessage(),notConfirmed.diagnostics());
+        }
+        if("ABSENT".equals(closed.state()))
+            return new ProviderResult(page,"FAILED",null,"The payment page closed after "+PAGE_MINUTES+" minutes without a payment; nothing was charged");
+        if("UNKNOWN".equals(closed.state()))
+            return new ProviderResult(page,"REQUIRES_ACTION",null,"Closing the unused payment page is not confirmed yet; trying again",closed.diagnostics());
+        return closed;
     }
     public List<Map<String,Object>> claimRefunds(int limit) {
         return db.tx(() -> {
