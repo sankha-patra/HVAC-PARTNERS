@@ -5,6 +5,13 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class BillingAdviceTest {
+    @Test void anInFlightRepeatKeepsTheOriginalCommandAndSaysWhenToCheckAgain() {
+        var response = new BillingAdvice(null).problem(
+            new BillingProblem(409, "REQUEST_IN_PROGRESS", "Continue the same payment"), new MockHttpServletRequest());
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(response.getHeaders().getFirst("Retry-After")).isEqualTo("1");
+    }
+
     // A busy refusal tells the browser when to try again; nothing was saved, so trying again is safe.
     @Test void busyRefusalSaysWhenToTryAgain() {
         var response = new BillingAdvice(null).problem(

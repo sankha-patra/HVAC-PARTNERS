@@ -59,6 +59,10 @@ public class BillingMetrics {
         register(registry,"billing.outbox.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");
         register(registry,"billing.cases.open", "SELECT COUNT(*) FROM billing.cases WHERE status='OPEN'");
         register(registry,"billing.deadletters.open", "SELECT COUNT(*) FROM billing.dead_letters WHERE state<>'REPLAYED'");
+        // Bank disputes and inquiries waiting for Carrier finance's answer (or whose result is unclear and needs a look),
+        // and those due within 48 hours. Carrier finance decides.
+        register(registry,"billing.disputes.needing.response", "SELECT COUNT(*) FROM billing.disputes WHERE status_unclear OR status IN ('needs_response','warning_needs_response')");
+        register(registry,"billing.disputes.response.due.soon", "SELECT COUNT(*) FROM billing.disputes WHERE status IN ('needs_response','warning_needs_response') AND evidence_due_by<NOW()+INTERVAL '48 hours'");
         // Counted from capture journals: one immutable journal per captured payment, so a restart or a repeated
         // webhook cannot change the count. Every replica reports the same database total: take max, never sum.
         for(String method:new String[]{"CARD","ACH"}) captured(registry,method);

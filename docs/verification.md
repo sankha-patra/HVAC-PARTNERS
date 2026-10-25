@@ -1,5 +1,103 @@
 # Verification of the extracted repository
 
+## Payment references, prompt duplicate replies and transaction proof — 25 October 2026
+
+Current verified checkpoint. The earlier pending retry checkpoint is superseded.
+
+- A duplicate create/submit while its first save is in progress gets HTTP409 REQUEST_IN_PROGRESS and Retry-After: 1,
+  without waiting on that save's row lock/provider call. A committed create replay returns the original intent.
+- A deliberate retry after confirmed failure creates a new unsubmitted intent under the original customer reference.
+  It keeps its own provider key and money records. Uncertainty, finance-released uncertainty, known captures,
+  changed amounts/invoices and unauthorized account/merchant access are refused. A known older capture blocks Pay.
+- Browser retry identity survives timeout/reload; an identity conflict keeps the request for investigation.
+  An earlier-paid reply blocks Pay for this attempt while preserving Cancel. Historical attempts remain visible.
+- V22 backfills old references, defaults new rows to themselves, and enforces account-scoped links. A real upgrade
+  proof migrates version-21 data before testing V22. Earlier migration files are unchanged.
+- Admission configuration must be non-negative and below the 3-second database lock timeout (default 100 ms).
+- Five real Spring-proxy tests prove the one-flow annotation alternative, checked rollback, committed preparation,
+  no held connection during provider IO, atomic recording and preserved deadlines. Production templates remain.
+
+| Check | Result |
+|---|---|
+| Complete Java suite | **458 tests in 23 classes**, zero failures/errors/skips; all current test classes reconciled |
+| Complete frontend suite and production build | **80 tests** passed; build passed |
+| Retry / proxy / upgrade checks | 27 / 5 / 1 passed |
+| Prometheus and Alertmanager | rule tests/configs/templates pass; 27 rules |
+| Repository and earlier migrations | pass; all 20 existing billing migration files through V21 unchanged |
+| Tested source identity | 125 backend input files match the verification container; 33 UI source files match the snapshot; UI dependency manifests match |
+
+Test first: the old code reproduced two duplicate waits and one configuration failure; the unannotated proof failed
+transaction activation and checked rollback; retry stubs produced the two intended backend errors and seven UI
+failures. Independent review then reproduced and fixed saved-replay merchant checks and browser identity conflict
+handling. The old fixed notice-count assertion was replaced by a nonempty check; wording checks still cover every notice.
+
+Durable evidence: `.tmp-notes/payment-reference-verification-20261025/` (ignored): final logs, JUnit XML, source
+hashes and verification summary. [Current status](payment-reliability-update-2026-10-25.md) and
+[one-flow proof](transactional-one-flow-proof.md) explain the scope. Nothing committed, pushed or deployed.
+No live provider/AWS call or application restart by this task. Simulated evidence is not production capacity proof.
+
+## Traffic fixes: duplicate clicks, pause recovery and trial ownership — 25 October 2026
+
+- Admission is decided after locking the payment and checking that it is still CREATED. A duplicate click sees the
+  payment already on its way instead of a misleading busy refusal. The local admission wait defaults to 100 ms;
+  this is additional time under the row lock, not a limit on the whole transaction. Stripe HTTP runs after commit.
+- Successful reads and credential refusals no longer clear the failure streak or pause. Only successful Checkout
+  creation clears it. Timeouts, 429s and 5xx responses still count; saved payments remain available for reconciliation.
+- A trial belongs to its permit. A delayed old close cannot clear a newer trial, and another request failing during
+  a trial cannot allow a second trial. A payment waiting for capacity checks the pause again before admission.
+  Preparation failures return their permit; repeated close does not release capacity twice.
+
+Test first: the strengthened old-code run executed 104 tests and failed the six expected regressions, including
+`expected SUBMITTING but was PROVIDER_BUSY` while Stripe remained blocked. Two additional cleanup/capacity guards
+already passed on the old code. The fixed code adds eight tests overall.
+
+| Check | Result |
+| --- | --- |
+| Complete Java coverage, two disjoint runs on the same source | **421 tests in all 20 classes**, 0 failures, errors or skips: Claude 295 + Codex 126 |
+| Frontend tests and production build | **71 tests** pass; build completes; frontend hashes unchanged |
+| Prometheus rule tests and configuration | pass; **27 rules** validated |
+| Alertmanager configuration and dispute routing | pass; carrier-finance-queue and app-team-channel |
+| Terraform infrastructure tests | **3 mock tests** pass; no AWS API calls |
+| CloudFront / backup helper | **5 / 4 checks** pass; backup calls mocked |
+| Repository boundaries, preserved migrations, whitespace | pass |
+
+Evidence is saved in ignored `.tmp-notes/traffic-verification-20261025/`: `traffic-red.log`, `targeted-java.log`,
+`remaining-java.log`, the remaining JUnit reports and `verification-summary.json`. All 120 source/POM files in the
+verification image matched the saved project source; source hashes stayed unchanged across both Java runs. The
+class sets were reconciled so none were omitted or counted twice. `remaining-tests.yml` records the four exclusions
+already covered by the 295-test run; it is not a partial coverage claim.
+
+Claude implemented the fixes; Codex independently reviewed the implementation, strengthened the race regression,
+verified source identity and completed the other checks. Nothing committed or deployed; no live Stripe or bank
+request. The limiter and pause remain per application instance; these checks do not establish production capacity.
+
+
+## Disputes: deadlines saved, listed and alerted — 25 October 2026 (later)
+
+Before, a Stripe dispute message carried nothing linking it to our payment, so it was parked as unmatched evidence,
+retried hourly forever, opened no case and kept no deadline. Now each dispute or inquiry is saved with its stage, the
+disputed PaymentIntent and charge, the amount and currency when readable, and the evidence deadline; the finance
+workspace lists it (needing an answer first) with plain wording for inquiries versus disputes; two alerts go to
+Carrier finance (needs an answer; due within 48 hours); the Stripe runbook forwards `charge.dispute.*`.
+
+A Codex review of the first version found seven points, all accepted and fixed test-first: Stripe's `du_` IDs (old
+`dp_` still accepted); same-second and untimed messages (ordered by time then stage, otherwise marked unclear);
+actionable disputes listed before old ones; expanded or missing PaymentIntent plus the charge reference; unreadable
+amount or currency kept empty; messages saved in the old format upgraded when resent (any other difference is still
+refused); inquiry versus dispute wording. A payer and another company's staff cannot see disputes.
+
+Test first: the first round failed as expected (dispute details null, dispute parked as UNMATCHED, no alerts, no
+deadline text); the Codex round failed in 7 tests and 3 alert checks before the fixes.
+
+| Check | Result |
+| --- | --- |
+| Java suite (`scripts/verify-container-tests.ps1`) | **413 tests**, 0 failures, errors or skips |
+| Frontend unit tests and production build | **71 tests** pass; build completes |
+| `promtool test rules` / `check rules` | pass; 27 rules |
+| `amtool config routes test` (dispute alert) | reaches carrier-finance-queue and app-team-channel |
+
+Evidence: `.tmp-notes/container-tests/20261025T075215209Z/` (git-ignored). Simulator and fake Stripe only.
+
 ## Unused payment pages close after 30 minutes — 25 October 2026 (later)
 
 Before, a payer who opened Stripe's payment page and walked away held the invoice for about a day (Stripe's default

@@ -20,6 +20,7 @@ public class BillingStore {
     // Every transaction is bounded. Spring cancels statements past the deadline; PostgreSQL stops waiting
     // for a row lock, a slow statement, or a session that went idle inside a transaction while holding locks.
     static final int TRANSACTION_TIMEOUT_SECONDS=10;
+    static final int LOCK_TIMEOUT_MILLIS=3000;
     static final String LOCK_TIMEOUT="3s", STATEMENT_TIMEOUT="10s", IDLE_IN_TRANSACTION_TIMEOUT="20s";
     public BillingStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
         this.jdbc=jdbc; this.transaction=new TransactionTemplate(manager);
@@ -41,10 +42,20 @@ public class BillingStore {
                 java.time.Duration left=BillingExecutionBudget.remaining();
                 long millis=left==null ? 10000 : Math.max(1,Math.min(10000,left.toMillis()));
                 jdbc.queryForList("SELECT set_config('lock_timeout',?,true),set_config('statement_timeout',?,true),set_config('idle_in_transaction_session_timeout',?,true)",
-                    Math.min(3000,millis)+"ms",millis+"ms",IDLE_IN_TRANSACTION_TIMEOUT);
+                    Math.min(LOCK_TIMEOUT_MILLIS,millis)+"ms",millis+"ms",IDLE_IN_TRANSACTION_TIMEOUT);
             }
             return action.get();
         });
+    }
+    /** A repeated command gets a prompt response instead of waiting on the first command's row locks.
+     * Transaction locks are shared across app instances and are released at commit/rollback, before provider IO.
+     */
+    void requireCommandSlot(String scope) {
+        requireTransaction();
+        long key=Long.parseUnsignedLong(hash(scope).substring(0,16),16);
+        if(!Boolean.TRUE.equals(one("SELECT pg_try_advisory_xact_lock(?) AS acquired",key).get("acquired")))
+            throw new BillingProblem(409,"REQUEST_IN_PROGRESS",
+                "This payment request is already being processed. Continue the same payment; do not start another one.");
     }
     /** Money, event and audit writes must commit with the change they describe, like MANDATORY propagation. */
     static void requireTransaction() {

@@ -1,5 +1,5 @@
 import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { CommonModule, formatDate } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
@@ -181,7 +181,7 @@ interface SavedRefundRequest {
             <div class="table-scroll"><table><thead><tr><th scope="col">Case</th><th scope="col">Payment reference</th><th scope="col">Reason</th><th scope="col">Status</th><th scope="col">Opened</th><th scope="col">Action</th></tr></thead>
               <tbody>@for (item of cases(); track item.id) {
                 <tr><th scope="row" class="reference">{{ item.id }}</th><td class="reference">{{ item.intentId }}@if (item.refundId) { <p>Refund {{ item.refundId }}</p> }</td>
-                  <td>{{ item.reason }}</td>
+                  <td>{{ item.reason }}@if (item.reason === 'DISPUTE') { <p class="muted">{{ disputeDeadline(item) }}</p><p class="muted">Stripe payment {{ item.paymentReference || item.chargeReference || 'not given' }} · @if (item.amountMinor != null && item.currency) { {{ item.amountMinor / 100 | currency:item.currency }} } @else { amount not given }</p> }</td>
                   <td class="reason-cell">{{ item.status }}@if (item.resolution) { <p class="muted">{{ item.resolution }} · {{ item.resolvedBy }}</p> }@if (item.releaseRequestedBy && item.status === 'OPEN') { <p class="muted">Release awaiting approval</p> }</td>
                   <td>{{ item.createdAt | date:'medium' }}</td>
                   <td><div class="case-actions">
@@ -194,7 +194,7 @@ interface SavedRefundRequest {
                     @if (item.canRecordExternalConfirmation) { <button mat-button (click)="beginCaseAction(item, 'external-confirmation')" [disabled]="actionBusy()">Record Stripe confirmation</button> }
                     @if (item.canClose) { <button mat-button (click)="beginCaseAction(item, 'close')" [disabled]="actionBusy()">Close after review</button> }
                     @if (item.canAddNote) { <button mat-button (click)="beginCaseAction(item, 'note')" [disabled]="actionBusy()">Add note</button> }
-                    @if (item.reason !== 'UNMATCHED_WEBHOOK') { <button mat-button (click)="showHistory(item)" [disabled]="actionBusy()">History</button> }
+                    @if (item.reason !== 'UNMATCHED_WEBHOOK' && item.reason !== 'DISPUTE') { <button mat-button (click)="showHistory(item)" [disabled]="actionBusy()">History</button> }
                   </div></td></tr>
                 @if (historyFor() === item.id) {
                   <tr><td colspan="6">
@@ -322,8 +322,31 @@ export class FinanceComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Disputes and inquiries are answered in Carrier's Stripe Dashboard; the list says by when, and what the bank decided.
+   * An inquiry takes no money yet but can become a chargeback; an unanswered dispute is lost.
+   */
+  disputeDeadline(item: FinanceCase) {
+    if (item.reason !== 'DISPUTE') return '';
+    if (item.statusUnclear) return 'Stripe sent conflicting updates; check this dispute in the Stripe Dashboard';
+    const status = item.disputeStatus || '';
+    const due = item.evidenceDueBy ? `${formatDate(item.evidenceDueBy, 'medium', 'en-US', 'UTC')} UTC` : '';
+    if (status === 'warning_needs_response') return due
+      ? `Inquiry: answer in the Stripe Dashboard by ${due} so it does not become a chargeback`
+      : 'Inquiry: no deadline was given; check it in the Stripe Dashboard';
+    if (status === 'needs_response') return due
+      ? `Dispute: submit evidence in the Stripe Dashboard by ${due}; with no response it is lost`
+      : 'Dispute: no deadline was given; check it in the Stripe Dashboard';
+    if (['under_review', 'warning_under_review'].includes(status)) return 'Evidence sent; waiting for the bank';
+    if (status === 'won') return 'The bank decided for Carrier';
+    if (status === 'lost') return 'The bank decided for the paying company';
+    if (status === 'warning_closed') return 'Inquiry closed without a chargeback';
+    if (status === 'prevented') return 'Stopped before it became a chargeback';
+    return 'Check this dispute in the Stripe Dashboard';
+  }
+
   showHistory(item: FinanceCase) {
-    if (item.reason === 'UNMATCHED_WEBHOOK') return;
+    if (item.reason === 'UNMATCHED_WEBHOOK' || item.reason === 'DISPUTE') return;
     this.historyFor.set(item.id); this.history.set([]);
     this.api.caseHistory(item.id).pipe(takeUntil(this.destroyed)).subscribe({
       next: rows => { if (this.historyFor() === item.id) this.history.set(rows); },

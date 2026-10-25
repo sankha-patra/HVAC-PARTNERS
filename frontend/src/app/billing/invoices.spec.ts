@@ -421,4 +421,146 @@ describe('Invoice payment recovery', () => {
       expect(component.receiptUrl()).toBe('/api/v1/billing/intents/intent-a/receipt');
     }
   });
+
+  // Trying again after a failure: a new attempt under the same payment reference. The payer still presses Pay.
+  describe('retrying a failed payment', () => {
+    const storageKey = 'invoice-payments.billing.v1:user-a:account-a';
+    const retryPath = `${base}/intents/intent-a/retry`;
+    const retried: BillingIntent = { ...created, id: 'intent-b', method: 'ACH', paymentReference: 'intent-a', retryOf: 'intent-a',
+      allocations: [{ invoiceId: invoice.id, amountMinor: 10025, state: 'RESERVED' }] };
+    const failedFirst: BillingIntent = { ...created, status: 'FAILED', paymentReference: 'intent-a', retryOf: null };
+
+    function retryWith(method: 'CARD' | 'ACH' = 'ACH') {
+      initialize(); prepare('FAILED');
+      component.retryPayment(method);
+      return http.expectOne(retryPath);
+    }
+
+    it('keeps a retry identity conflict pending rather than replacing the request', () => {
+      const first = retryWith('ACH');
+      const key = first.request.headers.get('Idempotency-Key');
+      first.flush({ code: 'IDEMPOTENCY_CONFLICT' }, { status: 409, statusText: 'Conflict' });
+      expect(component.pendingRetry()).not.toBeNull();
+      expect(JSON.parse(sessionStorage.getItem(storageKey)!).definitiveRejection).not.toBe(true);
+      component.startAnother();
+      component.method.set('CARD');
+      component.createIntent();
+      const again = http.expectOne(retryPath);
+      expect(again.request.headers.get('Idempotency-Key')).toBe(key);
+      expect(again.request.body).toEqual({ method: 'ACH' });
+      again.flush(retried);
+      flushBalances();
+    });
+
+    it('shows the payment reference, and the payment id for answers that have none', () => {
+      expect(component.paymentReference({ ...created, paymentReference: 'intent-first' })).toBe('intent-first');
+      expect(component.paymentReference(created)).toBe('intent-a');
+      expect(component.paymentReference(null)).toBe('');
+    });
+
+    it('creates one retry with a fresh key and the method the payer chose, saved before it is sent', () => {
+      initialize(); prepare('FAILED');
+      const originalKey = JSON.parse(sessionStorage.getItem(storageKey)!).key;
+      expect(component.canRetry()).toBe(true);
+      component.retryPayment('ACH');
+      const sent = http.expectOne(retryPath);
+      expect(sent.request.method).toBe('POST');
+      expect(sent.request.body).toEqual({ method: 'ACH' });
+      const key = sent.request.headers.get('Idempotency-Key');
+      expect(key).toBeTruthy();
+      expect(key).not.toBe(originalKey);
+      // Saved before any answer: a lost reply or a reload sends exactly this again.
+      const saved = JSON.parse(sessionStorage.getItem(storageKey)!);
+      expect(saved).toMatchObject({ retryOf: 'intent-a', key, method: 'ACH', invoiceIds: [invoice.id] });
+      expect(saved.intentId).toBeUndefined();
+      component.retryPayment('ACH');
+      http.expectNone(retryPath);
+      sent.flush(retried);
+      flushBalances();
+      expect(component.intent()?.id).toBe('intent-b');
+      expect(component.intent()?.status).toBe('CREATED');
+      http.expectNone(`${base}/intents/intent-b/submit`);
+    });
+
+    it('sends the same retry again after a lost reply, even if the payer changed the method', () => {
+      const first = retryWith('ACH');
+      const key = first.request.headers.get('Idempotency-Key');
+      first.error(new ProgressEvent('error'));
+      component.method.set('CARD');
+      component.retryPayment('CARD');
+      const again = http.expectOne(retryPath);
+      expect(again.request.headers.get('Idempotency-Key')).toBe(key);
+      expect(again.request.body).toEqual({ method: 'ACH' });
+      again.flush(retried);
+      flushBalances();
+      expect(component.intent()?.id).toBe('intent-b');
+    });
+
+    it('sends the same retry again after the page is reloaded', () => {
+      const first = retryWith('ACH');
+      const key = first.request.headers.get('Idempotency-Key');
+      first.flush({}, { status: 503, statusText: 'Unavailable' });
+      component.ngOnDestroy();
+      component = TestBed.runInInjectionContext(() => new InvoicesComponent());
+      initialize();
+      component.createIntent();
+      http.expectNone(`${base}/accounts/${account.id}/intents`);
+      const again = http.expectOne(retryPath);
+      expect(again.request.headers.get('Idempotency-Key')).toBe(key);
+      expect(again.request.body).toEqual({ method: 'ACH' });
+      again.flush(retried);
+      flushBalances();
+      expect(component.intent()?.id).toBe('intent-b');
+    });
+
+    it('keeps the reference but pays, checks and links the receipt with the new attempt', () => {
+      retryWith('ACH').flush(retried);
+      flushBalances();
+      expect(component.paymentReference(component.intent())).toBe('intent-a');
+      component.submitIntent();
+      http.expectOne(`${base}/intents/intent-b/submit`).flush({ ...retried, status: 'CAPTURED' });
+      flushBalances();
+      http.expectNone(`${base}/intents/intent-a/submit`);
+      expect(component.receiptUrl()).toBe('/api/v1/billing/intents/intent-b/receipt');
+      expect(component.paymentReference(component.intent())).toBe('intent-a');
+    });
+
+    it('offers no retry while a payment is not certainly failed', () => {
+      for (const status of ['CREATED', 'SUBMITTING', 'REQUIRES_ACTION', 'PROCESSING', 'UNKNOWN', 'CAPTURED', 'RETURNED', 'REFUNDED', 'CANCELLED']) {
+        component.ngOnDestroy(); sessionStorage.clear();
+        component = TestBed.runInInjectionContext(() => new InvoicesComponent());
+        initialize(); prepare(status);
+        expect(component.canRetry(), status).toBe(false);
+        component.retryPayment('CARD');
+        http.expectNone(retryPath);
+      }
+    });
+
+    // Pay was refused because an earlier try was paid. This try was not sent, but the payer must not be told
+    // "nothing was charged": the earlier one was. They can see it in recent payments and cancel this one.
+    it('explains when Pay was refused because an earlier try was paid, and still lets the payer cancel', () => {
+      retryWith('ACH').flush(retried);
+      flushBalances();
+      component.submitIntent();
+      http.expectOne(`${base}/intents/intent-b/submit`)
+        .flush({ code: 'ALREADY_PAID', message: 'An earlier attempt was paid' }, { status: 409, statusText: 'Conflict' });
+      expect(component.error()).toBe(PAYER_NOTICES.earlierAttemptPaid);
+      expect(PAYER_NOTICES.earlierAttemptPaid).not.toMatch(/nothing was charged|weren't charged/i);
+      expect(component.submissionUncertain()).toBe(false);
+      expect(component.canSubmit()).toBe(false);
+      expect(component.canCancel()).toBe(true);
+      expect(JSON.parse(sessionStorage.getItem(storageKey)!)).toMatchObject({ uncertainSubmit: false, earlierAttemptPaid: true });
+      component.cancelIntent();
+      http.expectOne(`${base}/intents/intent-b/cancel`).flush({ ...retried, status: 'CANCELLED' });
+      flushBalances();
+      expect(component.intent()?.status).toBe('CANCELLED');
+    });
+
+    it('keeps every attempt in recent payments under the shared reference', () => {
+      retryWith('ACH').flush(retried);
+      flushBalances([invoice], [{ ...retried }, failedFirst]);
+      expect(component.history().map(row => row.id)).toEqual(['intent-b', 'intent-a']);
+      expect(component.history().map(row => component.paymentReference(row))).toEqual(['intent-a', 'intent-a']);
+    });
+  });
 });

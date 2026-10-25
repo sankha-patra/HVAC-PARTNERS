@@ -77,15 +77,21 @@ public final class StripeWebhookVerifier {
         // PI identifiers differ from the persisted Checkout Session identity. Disputes require review.
         if (!payment && !refund && !dispute) return Optional.empty();
         JSONObject object = event.getJSONObject("data").getJSONObject("object");
-        String prefix = payment ? "cs_test_" : refund ? "re_" : "dp_";
         String providerId = object.getString("id");
-        if (!StripeBillingProvider.validId(providerId, prefix)) throw new InvalidProviderWebhookException();
+        // Stripe's Dispute IDs start du_; older ones started dp_.
+        boolean known = payment ? StripeBillingProvider.validId(providerId, "cs_test_") : refund ? StripeBillingProvider.validId(providerId, "re_")
+                : StripeBillingProvider.validId(providerId, "du_") || StripeBillingProvider.validId(providerId, "dp_");
+        if (!known) throw new InvalidProviderWebhookException();
         String intentId = correlation(object, "intentId");
         String refundId = refund ? correlation(object, "refundId") : null;
         long amount = evidenceAmount(object, payment ? "amount_total" : "amount");
         String state = "REVIEW";
         // Retain signed but unmatched/contradictory evidence for operations review, never invent money.
-        if (dispute || amount == 0 || intentId == null || (refund && refundId == null)) {
+        if (dispute) {
+            return Optional.of(new ProviderWebhookEvent(event.getString("id"), providerId, intentId, state, amount, "USD", null,
+                    disputeDetails(event, object)));
+        }
+        if (amount == 0 || intentId == null || (refund && refundId == null)) {
             return Optional.of(new ProviderWebhookEvent(event.getString("id"), providerId, intentId,
                     state, amount, "USD", refundId));
         }
@@ -115,6 +121,32 @@ public final class StripeWebhookVerifier {
             if ("UNKNOWN".equals(state) || (type.equals("refund.failed") && !"FAILED".equals(state))) state = "REVIEW";
         }
         return Optional.of(new ProviderWebhookEvent(event.getString("id"), providerId, intentId, state, amount, "USD", refundId));
+    }
+
+    /**
+     * What finance needs to answer a dispute in time. Anything unreadable is left empty rather than guessed, and a
+     * missing event time stays missing: the receipt time would invent an order between messages.
+     */
+    private ProviderDispute disputeDetails(JSONObject event, JSONObject dispute) {
+        JSONObject evidence = dispute.optJSONObject("evidence_details");
+        String status = word(dispute.optString("status", ""));
+        Object amount = dispute.opt("amount");
+        String currency = dispute.optString("currency", "");
+        return new ProviderDispute(reference(dispute.opt("payment_intent"), "pi_"), reference(dispute.opt("charge"), "ch_", "py_"),
+                (amount instanceof Integer || amount instanceof Long) && ((Number) amount).longValue() >= 0 ? ((Number) amount).longValue() : null,
+                currency.matches("[a-z]{3}") ? currency.toUpperCase(java.util.Locale.ROOT) : null,
+                word(dispute.optString("reason", "")), status == null ? "unknown" : status,
+                evidence == null ? null : epoch(evidence.opt("due_by")), epoch(event.opt("created")));
+    }
+    /** A reference arrives as an ID or, when expanded, as the object itself; anything else is left empty. */
+    private static String reference(Object value, String... prefixes) {
+        String id = value instanceof JSONObject expanded ? expanded.optString("id", "") : value instanceof String text ? text : "";
+        for (String prefix : prefixes) if (StripeBillingProvider.validId(id, prefix)) return id;
+        return null;
+    }
+    private static String word(String value) { return value.matches("[a-z_]{1,40}") ? value : null; }
+    private static java.time.Instant epoch(Object value) {
+        return value instanceof Number seconds && seconds.longValue() > 0 ? java.time.Instant.ofEpochSecond(seconds.longValue()) : null;
     }
 
     private static String correlation(JSONObject object, String key) {

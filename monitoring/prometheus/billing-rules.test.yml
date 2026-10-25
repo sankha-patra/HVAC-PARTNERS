@@ -257,3 +257,31 @@ tests:
             exp_annotations:
               summary: A billing Kafka consumer is falling behind
               description: 'Events are waiting in Kafka. Nothing is lost: payments are already committed and the outbox keeps every event. Check consumer errors, rebalances, slow database writes and partition count. Never reset offsets or skip records to catch up.'
+  - name: a-dispute-goes-to-carrier-finance-and-warns-before-its-deadline
+    interval: 1m
+    input_series:
+      - series: billing_disputes_needing_response
+        values: '1+0x10'
+      - series: billing_disputes_response_due_soon
+        values: '0 0 0 1+0x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: BillingDisputeNeedsResponse
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: BillingDisputeNeedsResponse
+        exp_alerts:
+          - exp_labels: {severity: warning, responder: app-team, decision: carrier-finance, environment: local}
+            exp_annotations:
+              summary: A bank dispute or inquiry needs Carrier finance to respond
+              description: "A paying company's bank opened a dispute or an inquiry on a card payment. Carrier finance responds in Carrier's Stripe Dashboard before the deadline shown in the finance workspace: an unanswered dispute is lost, and an unanswered inquiry can become a chargeback. App team: check the messages arrived and hand it over (docs/carrier-handoff-runbook.md)."
+      - eval_time: 2m
+        alertname: BillingDisputeDeadlineNear
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: BillingDisputeDeadlineNear
+        exp_alerts:
+          - exp_labels: {severity: warning, responder: app-team, decision: carrier-finance, environment: local}
+            exp_annotations:
+              summary: A dispute or inquiry response is due within 48 hours
+              description: "Carrier finance must respond in Carrier's Stripe Dashboard before the deadline shown in the finance workspace. An inquiry takes no money yet but can become a chargeback; an unanswered dispute is lost."

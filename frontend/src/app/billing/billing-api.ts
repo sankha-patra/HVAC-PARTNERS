@@ -13,6 +13,10 @@ export interface BillingIntent {
   id: string; accountId: string; currency: string; amountMinor: number; status: string;
   provider: string; simulatorEnabled?: boolean; checkoutUrl?: string; message?: string;
   method?: PaymentMethod;
+  /** The payer's reference: the first attempt's id. Absent on answers from before references existed. */
+  paymentReference?: string;
+  /** The failed attempt this one tries again, if any. */
+  retryOf?: string | null;
   createdAt?: string;
   allocations?: { invoiceId: string; amountMinor: number; state: string }[];
   timeline?: { type: string; at: string; message: string }[];
@@ -24,6 +28,9 @@ export interface FinanceCase {
   releaseRequestedBy?: string | null; releaseNote?: string | null; releaseRequestedAt?: string | null;
   canVerifyReference?: boolean; canRequestRelease?: boolean; canApproveRelease?: boolean; canClose?: boolean;
   canAddNote?: boolean; canRecordExternalConfirmation?: boolean; externalConfirmation?: ExternalConfirmation | null;
+  /** Bank disputes only: answered in the Stripe Dashboard before evidenceDueBy. */
+  disputeStatus?: string | null; disputeReason?: string | null; evidenceDueBy?: string | null; statusUnclear?: boolean;
+  paymentReference?: string | null; chargeReference?: string | null; amountMinor?: number | null; currency?: string | null;
 }
 /** What Carrier finance saw in the Stripe Dashboard or heard from Stripe support. */
 export interface ExternalConfirmation {
@@ -75,6 +82,11 @@ export class BillingApi {
   intent(id: string) { return this.http.get<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}`); }
   history(accountId: string) {
     return this.http.get<BillingIntent[]>(`${this.base}/accounts/${encodeURIComponent(accountId)}/intents`);
+  }
+  /** Try again after a failure: creates a new unsubmitted attempt under the same reference. Pay is a separate step. */
+  retry(failedId: string, method: PaymentMethod, key: string) {
+    return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(failedId)}/retry`, { method },
+      { headers: { 'Idempotency-Key': key } });
   }
   submit(id: string) { return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}/submit`, {}); }
   cancel(id: string) { return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}/cancel`, {}); }

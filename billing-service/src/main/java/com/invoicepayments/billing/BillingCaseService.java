@@ -70,8 +70,21 @@ public class BillingCaseService {
             AND EXISTS(SELECT 1 FROM billing.staff s WHERE s.user_id=? AND s.merchant_id=w.merchant_id)
             ORDER BY w.received_at DESC LIMIT 200
             """,user);
-        for(var row:evidence) for(String flag:List.of("canVerifyReference","canRequestRelease","canApproveRelease","canClose","canAddNote","canRecordExternalConfirmation")) row.put(flag,false);
-        List<Map<String,Object>> result=new ArrayList<>(evidence); result.addAll(rows);
+        // Bank disputes and inquiries are answered in the provider's dashboard; finance sees each one here with its
+        // deadline. Those still needing an answer, or whose result is unclear, come first so old ones never hide them.
+        var disputes=db.rows("""
+            SELECT 'dispute:'||d.provider||':'||d.id AS id,'' AS intent_id,'DISPUTE' AS reason,
+              CASE WHEN NOT d.status_unclear AND d.status IN ('won','lost','warning_closed','prevented') THEN 'RESOLVED' ELSE 'OPEN' END AS status,
+              d.created_at,d.status AS dispute_status,d.reason AS dispute_reason,d.status_unclear,d.payment_reference,d.charge_reference,
+              d.amount_minor,d.currency,to_char(d.evidence_due_by AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS evidence_due_by
+            FROM billing.disputes d WHERE EXISTS(SELECT 1 FROM billing.staff s WHERE s.user_id=? AND s.merchant_id=d.merchant_id)
+            ORDER BY (d.status_unclear OR d.status IN ('needs_response','warning_needs_response')) DESC,
+              (d.status IN ('under_review','warning_under_review')) DESC,d.evidence_due_by ASC NULLS LAST,d.updated_at DESC
+            LIMIT 200
+            """,user);
+        List<Map<String,Object>> unactionable=new ArrayList<>(evidence); unactionable.addAll(disputes);
+        for(var row:unactionable) for(String flag:List.of("canVerifyReference","canRequestRelease","canApproveRelease","canClose","canAddNote","canRecordExternalConfirmation")) row.put(flag,false);
+        List<Map<String,Object>> result=new ArrayList<>(unactionable); result.addAll(rows);
         return result;
     }
 

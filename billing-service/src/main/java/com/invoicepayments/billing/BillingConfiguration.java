@@ -46,6 +46,13 @@ public class BillingConfiguration {
             throw new IllegalStateException("Production billing requires the configured Stripe test-mode provider");
     }
 
+    static java.time.Duration providerAdmissionWait(Environment env) {
+        var wait=org.springframework.boot.convert.DurationStyle.detectAndParse(env.getProperty("billing.stripe.admission-wait","100ms"));
+        if(wait.isNegative() || wait.compareTo(java.time.Duration.ofMillis(BillingStore.LOCK_TIMEOUT_MILLIS))>=0)
+            throw new IllegalArgumentException("Provider admission wait must be non-negative and below the database lock timeout (3 seconds)");
+        return wait;
+    }
+
     static String validatePublicOrigin(String value,boolean requireHttps) {
         try {
             URI uri=URI.create(value);
@@ -86,7 +93,7 @@ public class BillingConfiguration {
                 if(stripeKey.isBlank()) throw new IllegalStateException("Selecting Stripe requires a non-empty test-mode API key");
                 yield new StripeBillingProvider(stripeKey,registry,
                     env.getProperty("billing.stripe.max-concurrent",Integer.class,8),
-                    org.springframework.boot.convert.DurationStyle.detectAndParse(env.getProperty("billing.stripe.admission-wait","100ms")));
+                    providerAdmissionWait(env));
             }
             default -> throw new IllegalStateException("Unknown billing provider");
         };

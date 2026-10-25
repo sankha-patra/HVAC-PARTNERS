@@ -144,8 +144,13 @@ class BillingFinancialDatabaseTest {
 
     @Test void concurrentSameKeyCreatesOneIntentAndOneReservation() throws Exception {
         String key = key();
-        List<String> ids = concurrently(8, () -> payments.create(PAYER, ACCOUNT, key, List.of(INVOICE), "CARD").get("id").toString());
-        assertThat(ids.stream().distinct()).hasSize(1);
+        List<String> outcomes = concurrently(8, () -> {
+            try { return payments.create(PAYER, ACCOUNT, key, List.of(INVOICE), "CARD").get("id").toString(); }
+            catch (BillingProblem problem) { assertThat(problem.code()).isEqualTo("REQUEST_IN_PROGRESS"); return problem.code(); }
+        });
+        var ids=outcomes.stream().filter(value -> !"REQUEST_IN_PROGRESS".equals(value)).distinct().toList();
+        assertThat(ids).hasSize(1);
+        assertThat(payments.create(PAYER, ACCOUNT, key, List.of(INVOICE), "CARD").get("id").toString()).isEqualTo(ids.get(0));
         assertInvoice(INVOICE, 0, 10000);
         assertThat(count("billing.intents")).isEqualTo(1);
     }
@@ -197,9 +202,81 @@ class BillingFinancialDatabaseTest {
         assertThat(count("billing.intents")).isZero(); assertInvoice(INVOICE, 0, 0);
     }
 
+    // A repeat must be answered while the original transaction is still saving, not wait for its row lock.
+    @Test void anIdenticalCreateIsAnsweredBeforeTheOriginalTransactionCommits() throws Exception {
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var waitingStore = new BillingStore(jdbc, transactions) {
+            @Override public void event(UUID intent, String type, String message) {
+                super.event(intent, type, message);
+                if ("CREATED".equals(type)) {
+                    entered.countDown();
+                    try { if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("test did not release save"); }
+                    catch (InterruptedException ex) { Thread.currentThread().interrupt(); throw new IllegalStateException(ex); }
+                }
+            }
+        };
+        var firstService = new BillingService(waitingStore, provider, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());
+        var threads = Executors.newFixedThreadPool(2);
+        String sameKey = key();
+        try {
+            var first = threads.submit(() -> firstService.create(PAYER, ACCOUNT, sameKey, List.of(INVOICE), "CARD"));
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+            var duplicate = threads.submit(() -> {
+                try { payments.create(PAYER, ACCOUNT, sameKey, List.of(INVOICE), "CARD"); return "unexpected success"; }
+                catch (BillingProblem problem) { return problem.code(); }
+            });
+            assertThat(duplicate.get(1, TimeUnit.SECONDS)).isEqualTo("REQUEST_IN_PROGRESS");
+            assertThat(count("billing.intents")).isZero(); // TX1 has not committed; no guessed payment ID is exposed.
+            release.countDown();
+            var saved = first.get(5, TimeUnit.SECONDS);
+            assertThat(payments.create(PAYER, ACCOUNT, sameKey, List.of(INVOICE), "CARD").get("id")).isEqualTo(saved.get("id"));
+            assertThat(count("billing.intents")).isEqualTo(1);
+            assertThat(count("billing.allocations")).isEqualTo(1);
+        } finally { release.countDown(); threads.shutdownNow(); }
+    }
+
+    @Test void aDuplicateSubmitIsAnsweredWhileTheFirstIsStillPreparing() throws Exception {
+        UUID intent = created("CARD");
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var sent = new AtomicInteger();
+        var observed = new DelegateProvider(provider) {
+            @Override public ProviderPermit admitNewPayment() {
+                entered.countDown();
+                try { if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("test did not release admission"); }
+                catch (InterruptedException ex) { Thread.currentThread().interrupt(); throw new IllegalStateException(ex); }
+                return () -> {};
+            }
+            @Override public ProviderResult submit(ProviderCommand command) { sent.incrementAndGet(); return super.submit(command); }
+        };
+        var firstService = service(observed, MERCHANT);
+        var threads = Executors.newFixedThreadPool(2);
+        try {
+            var first = threads.submit(() -> firstService.submit(PAYER, intent));
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+            var duplicate = threads.submit(() -> {
+                try { payments.submit(PAYER, intent); return "unexpected success"; }
+                catch (BillingProblem problem) { return problem.code(); }
+            });
+            assertThat(duplicate.get(1, TimeUnit.SECONDS)).isEqualTo("REQUEST_IN_PROGRESS");
+            assertThat(sent).hasValue(0);
+            release.countDown();
+            assertThat(first.get(5, TimeUnit.SECONDS).get("id")).isEqualTo(intent.toString());
+            assertThat(sent).hasValue(1);
+            assertThat(count("billing.attempts")).isEqualTo(1);
+        } finally { release.countDown(); threads.shutdownNow(); }
+    }
+
     @Test void concurrentSubmitCallsOneDurableProviderOperation() throws Exception {
         UUID intent = created("CARD");
-        concurrently(6, () -> payments.submit(PAYER, intent));
+        concurrently(6, () -> {
+            try { return payments.submit(PAYER, intent); }
+            catch (BillingProblem problem) {
+                assertThat(problem.code()).isEqualTo("REQUEST_IN_PROGRESS");
+                return java.util.Map.<String,Object>of("status",problem.code());
+            }
+        });
         assertThat(count("billing.attempts")).isEqualTo(1);
         assertThat(count("billing.provider_operations")).isEqualTo(1);
         assertThat(payments.raw(intent).get("status")).isEqualTo("PROCESSING");
@@ -2452,6 +2529,96 @@ class BillingFinancialDatabaseTest {
         assertThat(busy.submit(PAYER, pay).get("status")).isEqualTo("PROCESSING");
     }
 
+    // The payer clicks Pay twice. The only slot is taken by the first click's own Stripe call, so a busy answer to the
+    // second click would say "nothing was charged" while the first may be charging the payer. Both clicks must be
+    // shown the payment on its way, and Stripe is asked once.
+    @Test void aSecondPayClickWhileTheFirstIsSendingIsShownThatPaymentNeverBusy() throws Exception {
+        var slot = new Semaphore(1);
+        var sending = new CountDownLatch(1);
+        var finish = new CountDownLatch(1);
+        var firstAsk = new AtomicBoolean(true);
+        var sent = new AtomicInteger();
+        var clicks = Executors.newFixedThreadPool(2);
+        var secondClick = new CompletableFuture<Future<Map<String, Object>>>();
+        BillingService[] service = new BillingService[1];
+        UUID[] pay = new UUID[1];
+        service[0] = service(new DelegateProvider(provider) {
+            @Override public ProviderPermit admitNewPayment() {
+                if (firstAsk.getAndSet(false)) {
+                    // While one click asks for a slot, the payer clicks Pay again.
+                    secondClick.complete(clicks.submit(() -> service[0].submit(PAYER, pay[0])));
+                    try { sending.await(1, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
+                if (!slot.tryAcquire()) throw new ProviderBusyException("Every slot for new Stripe payments is in use");
+                return slot::release;
+            }
+            @Override public ProviderResult submit(ProviderCommand command) {
+                sent.incrementAndGet();
+                sending.countDown();
+                try { finish.await(10, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                return super.submit(command);
+            }
+        }, MERCHANT);
+        pay[0] = id(service[0].create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        try {
+            var firstClick = clicks.submit(() -> service[0].submit(PAYER, pay[0]));
+            assertThat(sending.await(10, TimeUnit.SECONDS)).as("one click reaches Stripe").isTrue();
+            var otherClick = secondClick.get(10, TimeUnit.SECONDS);
+            // Stripe stays blocked, so the slot stays taken, until the click that is not sending has its answer.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (!firstClick.isDone() && !otherClick.isDone() && System.nanoTime() < deadline) Thread.sleep(10);
+            assertThat(firstClick.isDone() || otherClick.isDone()).as("one click is answered while Stripe is still busy").isTrue();
+            var answeredFirst = firstClick.isDone() ? firstClick : otherClick;
+            assertThat(shownTo(answeredFirst)).as("the repeat is answered during preparation or shown the committed payment")
+                .isIn("REQUEST_IN_PROGRESS", "SUBMITTING");
+            finish.countDown();
+            List<Object> shown = new ArrayList<>();
+            for (var click : List.of(firstClick, otherClick)) shown.add(shownTo(click));
+            assertThat(shown).as("both clicks are shown the payment on its way").doesNotContain("PROVIDER_BUSY")
+                .allSatisfy(status -> assertThat(status).isIn("REQUEST_IN_PROGRESS", "SUBMITTING", "PROCESSING"));
+            assertThat(sent).as("Stripe is asked once").hasValue(1);
+            assertThat(db.one("SELECT status FROM billing.intents WHERE id=?", pay[0]).get("status")).isEqualTo("PROCESSING");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM billing.attempts WHERE intent_id=?", Long.class, pay[0])).isEqualTo(1L);
+            assertThat(slot.availablePermits()).as("the slot is handed back").isEqualTo(1);
+        } finally {
+            finish.countDown();
+            clicks.shutdownNow();
+        }
+    }
+
+    static Object shownTo(Future<Map<String, Object>> click) throws Exception {
+        try { return click.get(10, TimeUnit.SECONDS).get("status"); }
+        catch (ExecutionException failed) { return failed.getCause() instanceof BillingProblem p ? p.code() : failed.getCause(); }
+    }
+
+    // Saving the payment can fail after it was given a slot. The slot is handed back exactly once, nothing is sent,
+    // the payment is still ready to pay, and the next click gets the slot.
+    @Test void aSlotIsHandedBackWhenSavingThePaymentFails() {
+        var slot = new Semaphore(1);
+        var savingFails = new AtomicBoolean(true);
+        var sent = new AtomicInteger();
+        BillingService oneSlot = service(new DelegateProvider(provider) {
+            @Override public ProviderPermit admitNewPayment() {
+                if (!slot.tryAcquire()) throw new ProviderBusyException("Every slot for new Stripe payments is in use");
+                return slot::release;
+            }
+            @Override public String paymentRequestVersion() {
+                if (savingFails.get()) throw new IllegalStateException("saving the payment failed");
+                return super.paymentRequestVersion();
+            }
+            @Override public ProviderResult submit(ProviderCommand command) { sent.incrementAndGet(); return super.submit(command); }
+        }, MERCHANT);
+        UUID pay = id(oneSlot.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
+        assertThatThrownBy(() -> oneSlot.submit(PAYER, pay)).hasMessageContaining("saving the payment failed");
+        assertThat(slot.availablePermits()).as("the slot is handed back exactly once").isEqualTo(1);
+        assertThat(sent).hasValue(0);
+        assertThat(db.one("SELECT status FROM billing.intents WHERE id=?", pay).get("status")).isEqualTo("CREATED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM billing.attempts WHERE intent_id=?", Long.class, pay)).isZero();
+        savingFails.set(false);
+        assertThat(oneSlot.submit(PAYER, pay).get("status")).isEqualTo("PROCESSING");
+        assertThat(slot.availablePermits()).isEqualTo(1);
+    }
+
     // Stripe's hosted page must not hold an invoice for a day. Thirty minutes after the page opened, recovery closes it
     // with Stripe's expire step; a page that is expired and unpaid is a failed payment, so the invoice is free again.
     @Test void dryRun9_unusedPaymentPageClosesAfterThirtyMinutes() {
@@ -2490,6 +2657,127 @@ class BillingFinancialDatabaseTest {
         assertThat(page.closes).hasValue(1);
         assertThat(payments.raw(pay).get("status")).isEqualTo("REQUIRES_ACTION");
         assertInvoice(INVOICE, 0, 10000);
+    }
+
+    // A bank dispute is answered by Carrier finance in Stripe before a deadline. The app keeps the deadline and status,
+    // shows them in the finance list, counts them for the alerts, and never parks a dispute as unmatched or moves money.
+    @Test void aDisputeIsSavedWithItsDeadlineShownToFinanceAndAlerted() {
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        new BillingMetrics(jdbc, registry);
+        java.time.Instant inFiveDays = java.time.Instant.now().plus(java.time.Duration.ofDays(5)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        inbox.receive("SIMULATOR", dispute("evt_dispute1", "dp_disputed1", "needs_response", inFiveDays, 100));
+        inbox.process("SIMULATOR", "evt_dispute1");
+        assertThat(db.one("SELECT state FROM billing.webhook_inbox WHERE event_id='evt_dispute1'")).containsEntry("state", "PROCESSED");
+        var cases = new BillingCaseService(db, payments, refunds, provider);
+        var row = cases.list(FINANCE).stream().filter(item -> "DISPUTE".equals(item.get("reason"))).findFirst().orElseThrow();
+        assertThat(row).containsEntry("status", "OPEN").containsEntry("disputeStatus", "needs_response")
+            .containsEntry("paymentReference", "pi_disputed1").containsEntry("disputeReason", "fraudulent");
+        assertThat(amount(row, "amountMinor")).isEqualTo(12345);
+        assertThat(java.time.Instant.parse(text(row, "evidenceDueBy"))).isEqualTo(inFiveDays);
+        assertThat(cases.list(FINANCE)).noneMatch(item -> "UNMATCHED_WEBHOOK".equals(item.get("reason")));
+        assertThat(registry.get("billing.disputes.needing.response").gauge().value()).isEqualTo(1.0);
+        assertThat(registry.get("billing.disputes.response.due.soon").gauge().value()).isZero();
+
+        // Finance answered in Stripe; an older message that arrives late cannot undo that.
+        inbox.receive("SIMULATOR", dispute("evt_dispute2", "dp_disputed1", "under_review", inFiveDays, 50));
+        inbox.process("SIMULATOR", "evt_dispute2");
+        inbox.receive("SIMULATOR", dispute("evt_dispute0", "dp_disputed1", "needs_response", inFiveDays, 200));
+        inbox.process("SIMULATOR", "evt_dispute0");
+        assertThat(db.one("SELECT status FROM billing.disputes WHERE id='dp_disputed1'")).containsEntry("status", "under_review");
+        assertThat(registry.get("billing.disputes.needing.response").gauge().value()).isZero();
+
+        java.time.Instant tomorrow = java.time.Instant.now().plus(java.time.Duration.ofDays(1)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        inbox.receive("SIMULATOR", dispute("evt_dispute3", "dp_disputed2", "warning_needs_response", tomorrow, 10));
+        inbox.process("SIMULATOR", "evt_dispute3");
+        assertThat(registry.get("billing.disputes.needing.response").gauge().value()).isEqualTo(1.0);
+        assertThat(registry.get("billing.disputes.response.due.soon").gauge().value()).isEqualTo(1.0);
+        assertThat(count("billing.journals")).isZero();
+        registry.close();
+    }
+    ProviderWebhookEvent dispute(String eventId, String disputeId, String status, java.time.Instant dueBy, long secondsAgo) {
+        return disputeAt(eventId, disputeId, status, dueBy, java.time.Instant.now().minusSeconds(secondsAgo).truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
+    }
+    ProviderWebhookEvent disputeAt(String eventId, String disputeId, String status, java.time.Instant dueBy, java.time.Instant at) {
+        return new ProviderWebhookEvent(eventId, disputeId, null, "REVIEW", 12345, "USD", null,
+            new ProviderDispute("pi_" + disputeId.substring(3), "ch_" + disputeId.substring(3), 12345L, "USD", "fraudulent", status, dueBy, at));
+    }
+    void deliver(ProviderWebhookEvent event) { inbox.receive("SIMULATOR", event); inbox.process("SIMULATOR", event.eventId()); }
+
+    // Stripe's event time has one-second resolution, so two changes can share a second. A later stage of the same
+    // dispute is never hidden by an earlier one; two different final results in one second are shown as unclear.
+    @Test void disputeMessagesInTheSameSecondNeverHideALaterStage() {
+        var at = java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        var due = at.plus(java.time.Duration.ofDays(5));
+        deliver(disputeAt("evt_same2", "du_same1", "under_review", due, at));
+        deliver(disputeAt("evt_same1", "du_same1", "needs_response", due, at));
+        assertThat(db.one("SELECT status,status_unclear FROM billing.disputes WHERE id='du_same1'"))
+            .containsEntry("status", "under_review").containsEntry("statusUnclear", false);
+        deliver(disputeAt("evt_same3", "du_same1", "won", due, at.plusSeconds(60)));
+        deliver(disputeAt("evt_same4", "du_same1", "lost", due, at.plusSeconds(60)));
+        assertThat(db.one("SELECT status_unclear FROM billing.disputes WHERE id='du_same1'")).containsEntry("statusUnclear", true);
+        var row = new BillingCaseService(db, payments, refunds, provider).list(FINANCE).stream()
+            .filter(item -> "DISPUTE".equals(item.get("reason"))).findFirst().orElseThrow();
+        assertThat(row).containsEntry("statusUnclear", true).containsEntry("status", "OPEN");
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        new BillingMetrics(jdbc, registry);
+        assertThat(registry.get("billing.disputes.needing.response").gauge().value()).as("an unclear result needs a person").isEqualTo(1.0);
+        registry.close();
+    }
+
+    // A message with no event time cannot be ordered: it fills in a new dispute but never overrides a known stage.
+    @Test void aDisputeMessageWithoutATimeNeverOverridesAKnownStage() {
+        var due = java.time.Instant.now().plus(java.time.Duration.ofDays(5)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        deliver(dispute("evt_timed", "du_untimed1", "under_review", due, 30));
+        deliver(disputeAt("evt_untimed", "du_untimed1", "needs_response", due, null));
+        assertThat(db.one("SELECT status,status_unclear FROM billing.disputes WHERE id='du_untimed1'"))
+            .containsEntry("status", "under_review").containsEntry("statusUnclear", true);
+    }
+
+    // Finance must see a dispute that needs an answer, even behind many old, resolved ones.
+    @Test void disputesThatNeedAnAnswerAreListedBeforeOldOnes() {
+        for (int i = 0; i < 205; i++) db.update("""
+            INSERT INTO billing.disputes(provider,id,merchant_id,status,evidence_due_by,last_event_id,last_event_at)
+            VALUES('SIMULATOR',?,?,'lost',NOW()-INTERVAL '90 days',?,NOW()-INTERVAL '80 days')""", "du_old" + i, MERCHANT, "evt_old" + i);
+        deliver(dispute("evt_current", "du_current1", "needs_response",
+            java.time.Instant.now().plus(java.time.Duration.ofDays(3)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS), 10));
+        var disputes = new BillingCaseService(db, payments, refunds, provider).list(FINANCE).stream()
+            .filter(item -> "DISPUTE".equals(item.get("reason"))).toList();
+        assertThat(disputes.get(0)).containsEntry("id", "dispute:SIMULATOR:du_current1");
+    }
+
+    // A dispute message saved before its details were kept has an older fingerprint. Stripe resending the same message
+    // must upgrade it, not be refused as a different message; genuinely different evidence is still refused.
+    @Test void aDisputeSavedInTheOldFormatIsUpgradedWhenStripeSendsItAgain() {
+        String legacy = hash(String.join("|", "du_legacy1", "", "REVIEW", "12345", "USD", ""));
+        db.update("""
+            INSERT INTO billing.webhook_inbox(provider,event_id,merchant_id,payload,payload_hash,state,attempts,last_error)
+            VALUES('SIMULATOR','evt_legacy',?,'{"eventId":"evt_legacy","providerId":"du_legacy1","intentId":"","state":"REVIEW","amountMinor":12345,"currency":"USD","refundId":""}'::jsonb,?,'UNMATCHED',3,'Evidence requires matching or finance review')
+            """, MERCHANT, legacy);
+        var due = java.time.Instant.now().plus(java.time.Duration.ofDays(4)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        deliver(dispute("evt_legacy", "du_legacy1", "needs_response", due, 20));
+        assertThat(db.one("SELECT state FROM billing.webhook_inbox WHERE event_id='evt_legacy'")).containsEntry("state", "PROCESSED");
+        assertThat(db.one("SELECT status FROM billing.disputes WHERE id='du_legacy1'")).containsEntry("status", "needs_response");
+        assertProblem(409, () -> inbox.receive("SIMULATOR", new ProviderWebhookEvent("evt_legacy", "du_legacy1", null, "REVIEW", 99, "USD", null)));
+    }
+
+    // An amount or currency Stripe sent that we could not read stays unknown; it is never shown as $0.00.
+    @Test void aDisputeAmountWeCouldNotReadStaysUnknown() {
+        deliver(new ProviderWebhookEvent("evt_noamount", "du_noamount1", null, "REVIEW", 0, "USD", null,
+            new ProviderDispute(null, null, null, null, null, "needs_response", null, java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS))));
+        var row = new BillingCaseService(db, payments, refunds, provider).list(FINANCE).stream()
+            .filter(item -> "DISPUTE".equals(item.get("reason"))).findFirst().orElseThrow();
+        assertThat(row.get("amountMinor")).isNull();
+        assertThat(row.get("currency")).isNull();
+    }
+
+    // Disputes are visible only to staff of the company that received the payment; payers never see them.
+    @Test void onlyThatCompanysFinanceStaffSeeItsDisputes() {
+        deliver(dispute("evt_private", "du_private1", "needs_response",
+            java.time.Instant.now().plus(java.time.Duration.ofDays(3)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS), 10));
+        var cases = new BillingCaseService(db, payments, refunds, provider);
+        assertProblem(403, () -> cases.list(PAYER));
+        assertThat(cases.list("other-finance")).noneMatch(item -> "DISPUTE".equals(item.get("reason")));
+        assertThat(cases.list(FINANCE)).anyMatch(item -> "DISPUTE".equals(item.get("reason")));
     }
 
     /** Stands in for Stripe's hosted page: Pay opens a page the payer must finish; closing it reports the given state. */

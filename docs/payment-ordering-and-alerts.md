@@ -140,10 +140,28 @@ All go to the app team. Card declines happen inside hosted Checkout and never re
 
 New payments are refused before anything is saved, with HTTP 503 `PROVIDER_BUSY` and `Retry-After: 60`, when all
 8 slots for new Stripe payments on a server are in use, or after 5 Stripe requests in a row timed out, failed on
-Stripe's side or were throttled. That pause lasts 30 seconds, longer while failures continue; then one trial
-payment decides. The payer is told nothing was charged, which is certain because nothing was saved or sent.
+Stripe's side or were throttled with no payment page created in between (checks of saved payments that work, and a
+refused key, do not break the run). That pause lasts 30 seconds, longer while failures continue; then one trial
+payment decides, and only a page Stripe created resumes new payments. A payment that waited for a slot is checked
+against the pause again before it goes. The payer is told nothing was charged, which is certain because nothing was
+saved or sent: the check runs while the payment is locked and still new, so a second click on a payment already
+being sent is shown that payment instead.
 Payments already on their way are never refused. The pause is logged; `BillingProviderOutcomeUncertain` and
 `BillingProviderThrottled` already alert on the failures that cause it.
+
+## Disputes and inquiries
+
+Signed `charge.dispute.*` messages are saved in `billing.disputes` with the disputed PaymentIntent and charge, the
+amount and currency when readable (otherwise empty, never $0), the stage and the evidence deadline. They move no
+money. The finance workspace lists them, those needing an answer first. Messages are ordered by Stripe's event time
+and then by stage; two different results that cannot be ordered are marked unclear for a person to check.
+
+- `BillingDisputeNeedsResponse`: a dispute or inquiry needs an answer, or its result is unclear (carrier-finance).
+- `BillingDisputeDeadlineNear`: an answer is due within 48 hours (carrier-finance).
+
+An inquiry takes no money yet but can become a chargeback; an unanswered dispute is lost. Carrier finance answers in
+Carrier's Stripe Dashboard. Dispute messages saved before 25 October are upgraded when Stripe resends them; others
+stay in the finance list as unmatched messages.
 
 ## Captures and consumer lag
 
@@ -163,3 +181,19 @@ Verification results and the full seven-check recovery drill are recorded in
 [verification](verification.md). The drill records SHA-256 hashes of the publisher,
 producer configuration, metrics, V9/V10, alert rules and runner so its evidence can
 be checked against the published source.
+
+
+## Prompt repeats and a stable customer reference (25 October 2026)
+
+While a create or submit is still saving, an identical command gets HTTP409 REQUEST_IN_PROGRESS and Retry-After: 1
+without waiting for the first transaction's row lock or provider call. Keep the same request and key. After commit,
+creation replays return the same payment. PostgreSQL transaction-scoped try-locks release before provider IO.
+
+A deliberate retry after confirmed failure is a new, unsubmitted attempt under the first payment's customer
+reference; each attempt keeps its own provider key and money records. Unknown/pending, finance-released and paid
+groups cannot use this path. Account/merchant/payer checks also apply to saved retry responses. The browser persists
+the target/key/method before sending, preserves them across reload and conflicts, and never automatically charges.
+The payer still presses Pay. See payment-reliability-update-2026-10-25.md for the verified rules and operating limits.
+
+The admission wait defaults to 100 ms and must be configured below the 3-second DB lock timeout. It does not bound
+the entire transaction. Limits and breaker state remain per app instance, not a claim of fleet-wide throughput.

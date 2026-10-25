@@ -18,6 +18,10 @@ interface SavedRequest extends IntentRequest {
   intentId?: string;
   uncertainSubmit?: boolean;
   definitiveRejection?: boolean;
+  /** Set for a retry: the failed attempt it tries again. Saved with the key and method before sending. */
+  retryOf?: string;
+  /** Pay was refused because an earlier attempt under this reference was paid. */
+  earlierAttemptPaid?: boolean;
 }
 
 /**
@@ -44,6 +48,10 @@ export const PAYER_NOTICES = {
   earlierPaymentUnreadable: "We couldn't reopen your earlier payment. Please contact support before paying again for this account.",
   payingBlocked: 'You can pay again once your earlier payment is sorted out.',
   busyTryAgain: "We're very busy right now. Nothing was charged. Please try again in a minute.",
+  retryNotPossible: "This payment can't be tried again here. Check your recent payments below, or go back to your invoices to start a new payment.",
+  retryNotConfirmed: "We couldn't confirm that your new try was started. Press Continue trying again. Please don't start a new payment for these invoices.",
+  retryNeedsHelp: "We couldn't match this try to the saved payment. Please contact support before starting another payment for these invoices.",
+  earlierAttemptPaid: 'An earlier try of this payment was paid, so this one was not sent. Check your recent payments below. You can cancel this one to free your invoices.',
 };
 
 /** How often the page checks a payment that is still being confirmed, so the payer never has to refresh. */
@@ -90,7 +98,20 @@ export class InvoicesComponent implements OnInit, OnDestroy {
   readonly selectedTotal = computed(() => this.invoices().filter(i => this.selected().includes(i.id))
     .reduce((total, i) => total + this.available(i), 0));
   readonly selectionLocked = computed(() => !!this.request() || this.busy());
-  readonly canSubmit = computed(() => this.canPay() && this.intent()?.status === 'CREATED' && !this.busy() && !this.submissionUncertain());
+  readonly canSubmit = computed(() => this.canPay() && this.intent()?.status === 'CREATED' && !this.busy() && !this.submissionUncertain()
+    && !this.request()?.earlierAttemptPaid);
+  /** Cancelling is allowed for any unsent payment, including one whose Pay was refused because an earlier try was paid. */
+  readonly canCancel = computed(() => this.canPay() && this.intent()?.status === 'CREATED' && !this.busy() && !this.submissionUncertain());
+  /** A retry saved and sent, whose answer has not arrived yet. It is sent again exactly as saved, never replaced. */
+  readonly pendingRetry = computed(() => {
+    const request = this.request();
+    return request?.retryOf && !request.intentId && !request.definitiveRejection ? request : null;
+  });
+  /** Only a failed payment, with nothing pending. The server still decides, for example after a finance release. */
+  readonly canRetry = computed(() => this.canPay() && this.intent()?.status === 'FAILED' && !this.busy()
+    && !this.pendingRetry() && !this.request()?.definitiveRejection && !this.recoveryBlocked() && !this.returnedIntentId() && !this.submissionUncertain());
+  /** What the payer quotes: the first try's id. Older answers without one show the payment's own id. */
+  paymentReference(intent: BillingIntent | null | undefined) { return intent?.paymentReference || intent?.id || ''; }
   readonly terminal = computed(() => ['CAPTURED', 'FAILED', 'RETURNED', 'REFUNDED', 'CANCELLED'].includes(this.intent()?.status || ''));
   readonly receiptUrl = computed(() => this.intent() && ['CAPTURED', 'RETURNED', 'REFUNDED'].includes(this.intent()!.status)
     ? this.api.receiptUrl(this.intent()!.id) : null);
@@ -262,6 +283,8 @@ export class InvoicesComponent implements OnInit, OnDestroy {
     if (this.busy() || this.returnedIntentId() || this.recoveryBlocked() || !this.accountId()) return;
     const existing = this.request();
     if (existing?.definitiveRejection) return;
+    // A saved retry continues as a retry, with its own key and method, never as a fresh payment.
+    if (this.pendingRetry()) { this.sendRetry(this.pendingRetry()!); return; }
     if (existing?.intentId) { this.refreshIntent(); return; }
     if (!existing) {
       if (!this.canPay() || this.loadingInvoices() || this.invoiceError()) return;
@@ -291,6 +314,55 @@ export class InvoicesComponent implements OnInit, OnDestroy {
           this.error.set(PAYER_NOTICES.startNotConfirmed);
         }
       });
+  }
+
+  /**
+   * Try again after a failure: a new attempt under the same payment reference, for the same invoices. It only
+   * prepares the payment; the payer checks the amount and presses Pay. A lost reply sends the saved retry again
+   * with the same key, which the server answers with the same attempt (a network retry, not a new try).
+   */
+  retryPayment(method: PaymentMethod) {
+    if (this.busy() || this.recoveryBlocked() || !this.accountId()) return;
+    const pending = this.pendingRetry();
+    if (pending) { this.sendRetry(pending); return; }
+    if (!this.canRetry() || !['CARD', 'ACH'].includes(method)) return;
+    const failed = this.intent()!;
+    const saved = this.request();
+    const invoiceIds = saved?.intentId === failed.id && saved.invoiceIds.length ? [...saved.invoiceIds]
+      : (failed.allocations || []).map(a => a.invoiceId).sort();
+    if (!invoiceIds.length) return;
+    const request: SavedRequest = { accountId: this.accountId(), invoiceIds, method, key: crypto.randomUUID(), retryOf: failed.id };
+    // Saved before sending: a lost reply or a reload sends exactly this again.
+    if (!this.persist(request)) return;
+    this.request.set(request);
+    this.sendRetry(request);
+  }
+
+  private sendRetry(request: SavedRequest) {
+    this.busy.set(true);
+    this.error.set('');
+    this.api.retry(request.retryOf!, request.method, request.key).pipe(takeUntil(this.destroyed)).subscribe({
+      next: intent => this.acceptIntent(intent),
+      error: failure => {
+        this.busy.set(false);
+        // A conflicting identity is not proof that the saved request had no effect. Keep it for investigation.
+        if (failure.status === 409 && failure.error?.code === 'IDEMPOTENCY_CONFLICT') {
+          this.error.set(PAYER_NOTICES.retryNeedsHelp);
+          return;
+        }
+        // Refused for this command: say so, and let the payer return to their invoices/history.
+        if ([400, 404, 409].includes(failure.status) && ['RETRY_NOT_ALLOWED', 'ALREADY_RETRIED', 'AMOUNT_CHANGED', 'INVOICE_UNAVAILABLE',
+          'INVALID_REQUEST', 'NOT_FOUND'].includes(failure.error?.code)) {
+          const rejected = { ...request, definitiveRejection: true };
+          this.request.set(rejected);
+          this.persist(rejected);
+          this.error.set(PAYER_NOTICES.retryNotPossible);
+          return;
+        }
+        // Anything else, including a request still in progress: keep the same saved retry and send it again later.
+        this.error.set(PAYER_NOTICES.retryNotConfirmed);
+      }
+    });
   }
 
   refreshIntent() {
@@ -329,6 +401,16 @@ export class InvoicesComponent implements OnInit, OnDestroy {
           this.error.set(PAYER_NOTICES.busyTryAgain);
           return;
         }
+        // An earlier try under this reference was paid, so this one was not sent. Pay stays blocked, even after a
+        // reload; the payer can still cancel this unsent try to free the invoices.
+        if (failure.status === 409 && failure.error?.code === 'ALREADY_PAID') {
+          const blocked = { ...request, uncertainSubmit: false, earlierAttemptPaid: true };
+          this.request.set(blocked);
+          this.persist(blocked);
+          this.submissionUncertain.set(false);
+          this.error.set(PAYER_NOTICES.earlierAttemptPaid);
+          return;
+        }
         this.error.set(PAYER_NOTICES.payNotConfirmed);
         this.watchPayment();
       }
@@ -337,7 +419,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
 
   cancelIntent() {
     // Only an unsubmitted CREATED operation can release invoice reservations.
-    if (!this.canSubmit()) return;
+    if (!this.canCancel()) return;
     const intent = this.intent()!;
     const request = { ...this.request()!, uncertainSubmit: true };
     if (!this.persist(request)) return;
@@ -366,7 +448,8 @@ export class InvoicesComponent implements OnInit, OnDestroy {
   }
 
   startAnother() {
-    if ((!this.terminal() && !this.request()?.definitiveRejection) || this.busy()) return;
+    // A retry sent but not yet answered is kept: erasing it could turn a lost reply into a second new try.
+    if ((!this.terminal() && !this.request()?.definitiveRejection) || this.busy() || this.pendingRetry()) return;
     try { sessionStorage.removeItem(this.storageKey()); } catch {
       this.storageError.set(PAYER_NOTICES.browserStorageBlockedReload);
       return;
@@ -430,7 +513,8 @@ export class InvoicesComponent implements OnInit, OnDestroy {
   private acceptIntent(intent: BillingIntent) {
     this.busy.set(false);
     if (!intent?.id || intent.accountId !== this.accountId()
-      || (!!this.request()?.intentId && this.request()!.intentId !== intent.id)) {
+      || (!!this.request()?.intentId && this.request()!.intentId !== intent.id)
+      || (!!this.pendingRetry() && intent.retryOf !== this.pendingRetry()!.retryOf)) {
       this.error.set(PAYER_NOTICES.answerDidNotMatch);
       return;
     }
@@ -441,6 +525,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
     const request = { ...this.request()!, intentId: intent.id, uncertainSubmit: false };
     this.request.set(request);
     this.persist(request);
+    if (request.earlierAttemptPaid && intent.status === 'CREATED') this.error.set(PAYER_NOTICES.earlierAttemptPaid);
     this.loadInvoices();
     this.watchPayment();
   }
@@ -495,7 +580,7 @@ export class InvoicesComponent implements OnInit, OnDestroy {
       const saved: SavedRequest = JSON.parse(raw);
       if (saved.accountId !== this.accountId() || typeof saved.key !== 'string' || !saved.key
         || !Array.isArray(saved.invoiceIds) || (!saved.invoiceIds.length && !saved.intentId) || !saved.invoiceIds.every(id => typeof id === 'string')
-        || !['CARD', 'ACH'].includes(saved.method)) {
+        || !['CARD', 'ACH'].includes(saved.method) || (saved.retryOf !== undefined && (typeof saved.retryOf !== 'string' || !saved.retryOf))) {
         throw new Error('Invalid saved request');
       }
       this.request.set(saved);

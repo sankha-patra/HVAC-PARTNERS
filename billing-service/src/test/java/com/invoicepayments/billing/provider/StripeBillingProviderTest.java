@@ -334,6 +334,146 @@ class StripeBillingProviderTest {
     static void failOnce(StripeBillingProvider adapter) {
         assertThatThrownBy(() -> adapter.lookup(KEY, SESSION)).isInstanceOf(RuntimeException.class);
     }
+    void checkSavedPayment(StripeBillingProvider adapter) {
+        transport.reply(session(null, "unpaid", "open"));
+        assertThat(adapter.lookup(KEY, SESSION).state()).isEqualTo("REQUIRES_ACTION");
+    }
+    void createPage(StripeBillingProvider adapter, Clock clock) {
+        transport.reply(session(null, "unpaid", "open"));
+        assertThat(adapter.submitSaved(command("CARD", 12345), adapter.paymentRequestVersion(), clock.instant()).state())
+            .isEqualTo("REQUIRES_ACTION");
+    }
+
+    // Checks of saved payments can keep working while Stripe fails to create new payment pages. Those checks must not
+    // hide the failures, and must not end a pause: only a page Stripe created shows new payments work again.
+    @Test void successfulChecksOfSavedPaymentsDoNotHideFailingNewPayments() {
+        var clock = new MutableClock(Instant.parse("2026-10-25T08:00:00Z"));
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, clock);
+        for (int i = 0; i < StripeBillingProvider.FAILURES_BEFORE_PAUSE; i++) {
+            transport.responses.add(new StripeBillingProvider.Response(500, "{}"));
+            assertThatThrownBy(() -> adapter.submit(command("CARD", 12345))).isInstanceOf(ProviderUncertainException.class);
+            checkSavedPayment(adapter);
+        }
+        assertThatThrownBy(adapter::admitNewPayment).as("five failed pages in a row pause new payments")
+            .isInstanceOf(ProviderBusyException.class);
+        checkSavedPayment(adapter);
+        assertThatThrownBy(adapter::admitNewPayment).as("a check that works does not end the pause")
+            .isInstanceOf(ProviderBusyException.class);
+    }
+
+    // A refused key (401) has its own critical alert, and Stripe refuses every new payment with it anyway. It says
+    // nothing about whether Stripe works again: it neither ends a pause nor passes as a trial.
+    @Test void aRefusedKeyDoesNotEndAPauseOnlyACreatedPaymentPageDoes() {
+        var clock = new MutableClock(Instant.parse("2026-10-25T08:00:00Z"));
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, clock);
+        transport.failure = new IOException("Stripe unavailable");
+        for (int i = 0; i < StripeBillingProvider.FAILURES_BEFORE_PAUSE; i++) failOnce(adapter);
+        transport.failure = null;
+        transport.responses.add(new StripeBillingProvider.Response(401, "{}"));
+        assertThatThrownBy(() -> adapter.lookup(KEY, SESSION)).isInstanceOf(ProviderRejectedException.class);
+        assertThatThrownBy(adapter::admitNewPayment).as("a refused key does not end the pause")
+            .isInstanceOf(ProviderBusyException.class);
+
+        clock.advance(StripeBillingProvider.PAUSE);
+        try (var trial = adapter.admitNewPayment()) {
+            transport.responses.add(new StripeBillingProvider.Response(401, "{}"));
+            assertThatThrownBy(() -> adapter.submitSaved(command("CARD", 12345), adapter.paymentRequestVersion(), clock.instant()))
+                .isInstanceOf(ProviderRejectedException.class);
+        }
+        try (var trial = adapter.admitNewPayment()) {
+            assertThatThrownBy(adapter::admitNewPayment).as("a refused trial resumes nothing: still one trial at a time")
+                .isInstanceOf(ProviderBusyException.class);
+            createPage(adapter, clock);
+        }
+        try (var first = adapter.admitNewPayment(); var second = adapter.admitNewPayment()) {
+            assertThat(first).isNotNull(); assertThat(second).isNotNull();
+        }
+    }
+
+    // A trial that failed can finish late, after the next pause has ended and a new trial has started. Its late close
+    // must not end the new trial, or two trials would reach Stripe at once.
+    @Test void aFailedTrialClosingLateDoesNotEndTheNextTrial() {
+        var clock = new MutableClock(Instant.parse("2026-10-25T08:00:00Z"));
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, clock);
+        transport.failure = new IOException("Stripe unavailable");
+        for (int i = 0; i < StripeBillingProvider.FAILURES_BEFORE_PAUSE; i++) failOnce(adapter);
+        clock.advance(StripeBillingProvider.PAUSE);
+        var oldTrial = adapter.admitNewPayment();
+        failOnce(adapter);
+        clock.advance(StripeBillingProvider.PAUSE);
+        try (var newTrial = adapter.admitNewPayment()) {
+            oldTrial.close();
+            assertThatThrownBy(adapter::admitNewPayment).as("the old trial's late close leaves exactly one trial")
+                .isInstanceOf(ProviderBusyException.class);
+        }
+        transport.failure = null;
+        try (var nextTrial = adapter.admitNewPayment()) { createPage(adapter, clock); }
+        try (var first = adapter.admitNewPayment(); var second = adapter.admitNewPayment()) {
+            assertThat(first).isNotNull(); assertThat(second).isNotNull();
+        }
+    }
+
+    // A trial's Stripe call can take up to the 60-second operation budget, longer than the 30-second pause. A check of
+    // a saved payment failing meanwhile restarts the pause, but the running trial still decides: no second trial.
+    @Test void aCheckFailingDuringATrialDoesNotLetASecondTrialStart() throws Exception {
+        var clock = new MutableClock(Instant.parse("2026-10-25T08:00:00Z"));
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, clock);
+        transport.failure = new IOException("Stripe unavailable");
+        for (int i = 0; i < StripeBillingProvider.FAILURES_BEFORE_PAUSE; i++) failOnce(adapter);
+        clock.advance(StripeBillingProvider.PAUSE);
+        try (var trial = adapter.admitNewPayment()) {
+            Thread recovery = new Thread(() -> failOnce(adapter));
+            recovery.start();
+            recovery.join();
+            clock.advance(StripeBillingProvider.PAUSE);
+            assertThatThrownBy(adapter::admitNewPayment).as("the running trial still decides")
+                .isInstanceOf(ProviderBusyException.class);
+            transport.failure = null;
+            createPage(adapter, clock);
+        }
+        try (var first = adapter.admitNewPayment(); var second = adapter.admitNewPayment()) {
+            assertThat(first).isNotNull(); assertThat(second).isNotNull();
+        }
+    }
+
+    // A new payment can wait up to the admission wait for a free slot. If new payments pause during that wait, it must
+    // be refused when the slot frees, not let through to Stripe.
+    @Test void aPaymentWaitingForASlotIsRefusedIfNewPaymentsPausedMeanwhile() throws Exception {
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, Clock.systemUTC(), null, 1, Duration.ofSeconds(5));
+        var outcome = new java.util.concurrent.CompletableFuture<String>();
+        Thread waiting = new Thread(() -> {
+            try (var permit = adapter.admitNewPayment()) { outcome.complete("let through"); }
+            catch (RuntimeException refused) { outcome.completeExceptionally(refused); }
+        });
+        try (var sending = adapter.admitNewPayment()) {
+            waiting.start();
+            long deadline = System.nanoTime() + Duration.ofSeconds(4).toNanos();
+            while (waiting.getState() != Thread.State.TIMED_WAITING && System.nanoTime() < deadline) Thread.onSpinWait();
+            assertThat(waiting.getState()).as("the second payment is waiting for the only slot").isEqualTo(Thread.State.TIMED_WAITING);
+            transport.failure = new IOException("Stripe unavailable");
+            for (int i = 0; i < StripeBillingProvider.FAILURES_BEFORE_PAUSE; i++) failOnce(adapter);
+        }
+        waiting.join(Duration.ofSeconds(5).toMillis());
+        assertThat(outcome).isCompletedExceptionally();
+        assertThatThrownBy(outcome::join).hasCauseInstanceOf(ProviderBusyException.class);
+    }
+
+    // A trial that finds every slot taken gives up its turn, so the next new payment can be the trial.
+    @Test void aTrialThatGetsNoSlotGivesUpItsTurn() {
+        var clock = new MutableClock(Instant.parse("2026-10-25T08:00:00Z"));
+        var adapter = new StripeBillingProvider("sk_test_exampleOnly", transport, clock);
+        List<ProviderPermit> busy = new ArrayList<>();
+        for (int i = 0; i < 8; i++) busy.add(adapter.admitNewPayment());
+        transport.failure = new IOException("Stripe unavailable");
+        for (int i = 0; i < StripeBillingProvider.FAILURES_BEFORE_PAUSE; i++) failOnce(adapter);
+        clock.advance(StripeBillingProvider.PAUSE);
+        assertThatThrownBy(adapter::admitNewPayment).hasMessageContaining("Every slot");
+        busy.remove(0).close();
+        try (var trial = adapter.admitNewPayment()) {
+            assertThatThrownBy(adapter::admitNewPayment).as("one trial at a time").isInstanceOf(ProviderBusyException.class);
+        }
+        busy.forEach(ProviderPermit::close);
+    }
 
     /** A clock the test moves forward, to act out slow provider responses without waiting. */
     static final class MutableClock extends Clock {

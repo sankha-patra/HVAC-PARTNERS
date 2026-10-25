@@ -47,17 +47,28 @@
         <p>{{ statusExplanation() }}</p>
         @if (payment.message) { <p>{{ payment.message }}</p> }
         @if (submissionUncertain()) { <p class="notice">We couldn't confirm your last step yet. We're checking; please don't pay again.</p> }
-        <p class="reference">Payment reference: {{ payment.id }}</p>
+        <p class="reference">Payment reference: {{ paymentReference(payment) }}</p>
+        @if (payment.retryOf) { <p class="muted">This is another try of an earlier payment that didn't go through.</p> }
         @if (methodLabel(payment.method || request()?.method); as paidBy) { <p class="muted">Paying by: {{ paidBy }}</p> }
+        @if (canRetry()) {
+          <div class="payment-choice">
+            <mat-form-field appearance="outline"><mat-label>Pay by</mat-label><mat-select [value]="method()" (selectionChange)="method.set($event.value)" [disabled]="busy()">
+              <mat-option value="CARD">Card</mat-option><mat-option value="ACH">US bank account</mat-option>
+            </mat-select></mat-form-field>
+            <p class="muted">Trying again keeps the same payment reference and the same invoices. You'll check the amount and press Pay next.</p>
+          </div>
+        }
         <div class="actions">
           @if (canSubmit()) {
             <button mat-flat-button (click)="submitIntent()">{{ simulator() ? 'Pay (test)' : 'Pay' }}</button>
-            <button mat-stroked-button (click)="cancelIntent()">Cancel</button>
           }
+          @if (canCancel()) { <button mat-stroked-button (click)="cancelIntent()">Cancel</button> }
+          @if (canRetry()) { <button mat-flat-button (click)="retryPayment(method())">Try again</button> }
+          @if (pendingRetry(); as pending) { <button mat-flat-button (click)="retryPayment(pending.method)" [disabled]="busy()">Continue trying again</button> }
           @if (checkoutUrl(); as url) { <a mat-flat-button [href]="url" target="_blank" rel="noopener noreferrer">Go to secure payment page</a> }
           <button mat-stroked-button (click)="refreshIntent()" [disabled]="busy()">Refresh payment</button>
           @if (receiptUrl(); as url) { <a mat-stroked-button [href]="url" download>Download receipt</a> }
-          @if (terminal()) { <button mat-button (click)="startAnother()" [disabled]="busy()">Back to invoices</button> }
+          @if (terminal() && !pendingRetry()) { <button mat-button (click)="startAnother()" [disabled]="busy()">Back to invoices</button> }
         </div>
         @if (payment.status === 'REQUIRES_ACTION' && !checkoutUrl()) { <p class="notice error">The secure payment page isn't available right now. We'll keep checking; if it doesn't appear within a minute, please contact support. Never type card details anywhere else.</p> }
         @if (payment.allocations?.length) {
@@ -94,7 +105,7 @@
       @if (history().length) { <div class="table-scroll"><table>
         <thead><tr><th scope="col">Reference</th><th scope="col">Started</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Action</th></tr></thead>
         <tbody>@for (previous of history(); track previous.id) {
-          <tr><th scope="row" class="reference">{{ previous.id }}</th><td>{{ previous.createdAt | date:'medium' }}</td><td>{{ previous.amountMinor / 100 | currency:previous.currency }}</td>
+          <tr><th scope="row" class="reference">{{ paymentReference(previous) }}@if (previous.retryOf) { <span class="muted"> · another try</span> }</th><td>{{ previous.createdAt | date:'medium' }}</td><td>{{ previous.amountMinor / 100 | currency:previous.currency }}</td>
             <td>{{ statusLabel(previous.status) }}</td><td><button mat-button (click)="resumeIntent(previous.id)" [disabled]="busy()">Open</button></td></tr>
         }</tbody>
       </table></div> }

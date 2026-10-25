@@ -38,6 +38,18 @@ class BillingConfigurationTest {
         assertThatThrownBy(()->BillingConfiguration.validatePublicOrigin("https://user@merchant.example",true)).isInstanceOf(IllegalStateException.class);
         assertThat(BillingConfiguration.validatePublicOrigin("https://merchant.example",true)).isEqualTo("https://merchant.example");
     }
+    @Test void admissionWaitMustStayBelowTheDatabaseLockTimeout() {
+        for (String wait : java.util.List.of("3s", "4s", "-1ms")) {
+            var env = new MockEnvironment().withProperty("billing.stripe.admission-wait", wait);
+            assertThatThrownBy(() -> new BillingConfiguration(env).billingProvider(null, null, env,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), "STRIPE", "sk_test_fixture"))
+                .as("admission wait %s", wait).isInstanceOf(IllegalArgumentException.class);
+        }
+        var env = new MockEnvironment().withProperty("billing.stripe.admission-wait", "100ms");
+        assertThat(new BillingConfiguration(env).billingProvider(null, null, env,
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), "STRIPE", "sk_test_fixture")).isNotNull();
+    }
+
     private static MockEnvironment prod() {return new MockEnvironment().withProperty("spring.profiles.active","prod").withProperty("billing.public-url","https://payments.example.test");}
     private static MockEnvironment ready() {
         return prod().withProperty("app.jwt.secret","a-secure-test-secret-with-more-than-48-characters-for-prod-tests")

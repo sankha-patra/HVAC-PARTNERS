@@ -21,6 +21,7 @@ public class BillingAdvice {
         var response=ResponseEntity.status(failure.status());
         // Nothing was saved, so trying again later is safe; say when.
         if("PROVIDER_BUSY".equals(failure.code())) response.header("Retry-After","60");
+        if("REQUEST_IN_PROGRESS".equals(failure.code())) response.header("Retry-After","1");
         return response.body(Map.of("code",failure.code(),"message",failure.getMessage()));
     }
     /** The refused action already rolled back; record the refusal in its own statement so the audit survives. */

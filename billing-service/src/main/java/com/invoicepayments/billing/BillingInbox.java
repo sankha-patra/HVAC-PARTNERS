@@ -25,11 +25,34 @@ public class BillingInbox {
         JSONObject payload=new JSONObject().put("eventId",event.eventId()).put("providerId",event.providerId())
             .put("intentId",Objects.toString(event.intentId(),"")).put("state",event.state())
             .put("amountMinor",event.amountMinor()).put("currency",event.currency()).put("refundId",Objects.toString(event.refundId(),""));
-        String fingerprint=hash(String.join("|",event.providerId(),Objects.toString(event.intentId(),""),event.state(),Long.toString(event.amountMinor()),event.currency(),Objects.toString(event.refundId(),"")));
+        String evidence=String.join("|",event.providerId(),Objects.toString(event.intentId(),""),event.state(),Long.toString(event.amountMinor()),event.currency(),Objects.toString(event.refundId(),""));
+        // Dispute messages saved before their details were kept carry this older fingerprint.
+        String older=null;
+        ProviderDispute dispute=event.dispute();
+        if(dispute!=null) {
+            older=hash(evidence);
+            List<String> fields=List.of(Objects.toString(dispute.paymentReference(),""),Objects.toString(dispute.chargeReference(),""),
+                Objects.toString(dispute.amountMinor(),""),Objects.toString(dispute.currency(),""),Objects.toString(dispute.reason(),""),
+                dispute.status(),Objects.toString(dispute.evidenceDueBy(),""),Objects.toString(dispute.occurredAt(),""));
+            payload.put("dispute",new JSONObject().put("paymentReference",fields.get(0)).put("chargeReference",fields.get(1))
+                .put("amountMinor",fields.get(2)).put("currency",fields.get(3)).put("reason",fields.get(4)).put("status",fields.get(5))
+                .put("evidenceDueBy",fields.get(6)).put("occurredAt",fields.get(7)));
+            evidence=evidence+"|"+String.join("|",fields);
+        }
+        String fingerprint=hash(evidence),legacy=older;
         db.tx(() -> {
             db.update("INSERT INTO billing.webhook_inbox(provider,event_id,merchant_id,payload,payload_hash) VALUES(?,?,?,?::jsonb,?) ON CONFLICT(provider,event_id) DO NOTHING",provider,event.eventId(),merchant,payload.toString(),fingerprint);
-            var stored=db.one("SELECT payload_hash FROM billing.webhook_inbox WHERE provider=? AND event_id=?",provider,event.eventId());
-            if(!fingerprint.equals(stored.get("payloadHash"))) throw BillingProblem.conflict("Webhook identity was reused with different financial evidence"); return null;
+            var stored=db.one("SELECT payload_hash,state FROM billing.webhook_inbox WHERE provider=? AND event_id=? FOR UPDATE",provider,event.eventId());
+            if(fingerprint.equals(stored.get("payloadHash"))) return null;
+            // The same dispute message, saved before its details were kept: add them and handle it again.
+            // Any other difference is still a reused identity with different evidence.
+            if(legacy!=null && legacy.equals(stored.get("payloadHash"))) {
+                if(!"PROCESSED".equals(stored.get("state"))) db.update("""
+                    UPDATE billing.webhook_inbox SET payload=?::jsonb,payload_hash=?,state='NEW',attempts=0,last_error=NULL,next_attempt_at=NOW()
+                    WHERE provider=? AND event_id=?""",payload.toString(),fingerprint,provider,event.eventId());
+                return null;
+            }
+            throw BillingProblem.conflict("Webhook identity was reused with different financial evidence");
         });
     }
     public void drain(int limit) {
@@ -40,7 +63,13 @@ public class BillingInbox {
         try { db.tx(() -> {
             var candidates=db.rows("SELECT payload::text AS payload,state,merchant_id FROM billing.webhook_inbox WHERE provider=? AND event_id=? FOR UPDATE SKIP LOCKED",provider,eventId);
             if(candidates.isEmpty() || "PROCESSED".equals(candidates.get(0).get("state"))) return null;
-            JSONObject event=new JSONObject(text(candidates.get(0),"payload")); UUID intent=id(event.getString("intentId"));
+            JSONObject event=new JSONObject(text(candidates.get(0),"payload"));
+            if(event.has("dispute")) {
+                recordDispute(provider,eventId,id(candidates.get(0).get("merchantId")),event);
+                db.update("UPDATE billing.webhook_inbox SET state='PROCESSED',last_error=NULL WHERE provider=? AND event_id=?",provider,eventId);
+                return null;
+            }
+            UUID intent=id(event.getString("intentId"));
             var payment=payments.locked(intent);
             var account=db.one("SELECT merchant_id FROM billing.accounts WHERE id=?",id(payment.get("accountId")));
             if(!account.get("merchantId").equals(candidates.get(0).get("merchantId"))) throw BillingProblem.conflict("Provider merchant does not match the customer account");
@@ -67,6 +96,46 @@ public class BillingInbox {
             catch(RuntimeException unrecorded) { unrecorded.addSuppressed(failure); throw unrecorded; }
             if(outcome!=null) logFailure(provider,eventId,outcome,failure);
         }
+    }
+    /**
+     * A dispute moves no money here: Carrier finance answers it in the provider's dashboard. It is kept so finance sees
+     * the deadline. The provider's event time has one-second resolution and may be missing, so messages are ordered
+     * by time and then by stage; when that cannot decide between two different results, the dispute is marked unclear
+     * for a person to check in the dashboard. Details only fill gaps, never erase what an earlier message gave.
+     */
+    private void recordDispute(String provider,String eventId,UUID merchant,JSONObject event) {
+        JSONObject dispute=event.getJSONObject("dispute");
+        String disputeId=event.getString("providerId"),status=dispute.getString("status"),at=dispute.getString("occurredAt");
+        db.update("""
+            INSERT INTO billing.disputes(provider,id,merchant_id,status,last_event_id,last_event_at) VALUES(?,?,?,?,?,NULLIF(?,'')::timestamptz)
+            ON CONFLICT(provider,id) DO NOTHING""",provider,disputeId,merchant,status,eventId,at);
+        var current=db.one("SELECT status,last_event_id,EXTRACT(EPOCH FROM last_event_at)::bigint AS seen FROM billing.disputes WHERE provider=? AND id=? FOR UPDATE",provider,disputeId);
+        Long seen=current.get("seen")==null?null:amount(current,"seen"), time=at.isEmpty()?null:java.time.Instant.parse(at).getEpochSecond();
+        int stage=disputeStage(status),known=disputeStage(text(current,"status"));
+        boolean newest=eventId.equals(current.get("lastEventId"))
+            || (time!=null && (seen==null || time>seen || (time.equals(seen) && stage>known)));
+        boolean unclear=!newest && !status.equals(current.get("status")) && (time==null || seen==null || (time.equals(seen) && stage==known));
+        db.update("""
+            UPDATE billing.disputes SET payment_reference=COALESCE(NULLIF(?,''),payment_reference),charge_reference=COALESCE(NULLIF(?,''),charge_reference),
+              amount_minor=COALESCE(NULLIF(?,'')::bigint,amount_minor),currency=COALESCE(NULLIF(?,''),currency),reason=COALESCE(NULLIF(?,''),reason),
+              status=CASE WHEN ? THEN ? ELSE status END,
+              evidence_due_by=CASE WHEN ? THEN COALESCE(NULLIF(?,'')::timestamptz,evidence_due_by) ELSE COALESCE(evidence_due_by,NULLIF(?,'')::timestamptz) END,
+              last_event_id=CASE WHEN ? THEN ? ELSE last_event_id END,
+              last_event_at=CASE WHEN ? THEN NULLIF(?,'')::timestamptz ELSE last_event_at END,
+              status_unclear=CASE WHEN ? THEN FALSE ELSE status_unclear OR ? END,updated_at=NOW()
+            WHERE provider=? AND id=?""",
+            dispute.getString("paymentReference"),dispute.getString("chargeReference"),dispute.getString("amountMinor"),dispute.getString("currency"),
+            dispute.getString("reason"),newest,status,newest,dispute.getString("evidenceDueBy"),dispute.getString("evidenceDueBy"),
+            newest,eventId,newest,at,newest,unclear,provider,disputeId);
+    }
+    /** How far a dispute has gone: waiting for an answer, answered, then decided. Unknown statuses rank lowest. */
+    private static int disputeStage(String status) {
+        return switch(status) {
+            case "needs_response","warning_needs_response" -> 1;
+            case "under_review","warning_under_review" -> 2;
+            case "won","lost","warning_closed","prevented" -> 3;
+            default -> 0;
+        };
     }
     /** The tenth failed attempt is logged at WARN again; engineering's alert watches the event's age. */
     static final int TEMPORARY_RETRIES=10;

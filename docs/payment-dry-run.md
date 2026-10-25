@@ -108,6 +108,23 @@ already has instead of making a second one.
 
 A payment is marked FAILED only when Stripe confirms the failure, never because of a timeout.
 
+When the payer presses **Try again** on the failed payment, the new payment row keeps the **same payment
+reference** (the first payment's id), so the payer quotes one reference however many tries it takes. It covers
+the same invoices and amount, and the payer chooses card or bank again. It only prepares the payment: the payer
+still checks the amount and presses Pay. The failed row is never changed or reused, and keeps its own Stripe
+request, so any late word from Stripe about it is still recorded against it.
+
+Two kinds of "again", not to be confused:
+
+- **Same request sent again** (a lost reply, a reload, a double click): the browser resends the saved request with
+  the same key, and the server answers with the same payment. No second payment is made.
+- **Try again after a failure**: a new payment with a new key and its own Stripe request, under the same reference.
+
+Try again is refused (nothing is created) while any try under the reference is not FAILED, after any try was
+paid, after Carrier finance closed a payment without Stripe confirming it failed, if the payment was already tried
+again, or if the invoices' amount due has changed. If an earlier try is found to be paid after a new try was
+prepared, Pay on the new try is refused and the payer is told; they can cancel the unsent try.
+
 ### 8. Payments are very busy, or Stripe keeps failing
 
 | Step | Status | Held | Saved requests | At Stripe |
@@ -119,9 +136,12 @@ The payer sees: "We're very busy right now. Nothing was charged. Please try agai
 always true, because the refusal happens before anything is saved or sent.
 
 - **Busy:** all 8 slots for new Stripe payments on this server are in use for more than 100 ms.
-- **Failing:** 5 Stripe requests in a row timed out, failed on Stripe's side or were throttled. New payments then
-  pause for 30 seconds, longer while failures continue. After the pause one trial payment is let through: if Stripe
-  answers, payments resume; if not, they pause again. Any answer from Stripe, even a refusal, ends the pause.
+- **Failing:** 5 Stripe requests in a row timed out, failed on Stripe's side or were throttled, with no new payment
+  page created in between. Checks of saved payments that work, and a refused key, do not break the run. New payments
+  then pause for 30 seconds, longer while failures continue. After the pause one trial payment is let through: if
+  Stripe creates its page, payments resume; if the trial fails, they pause again. Only a created page ends the pause.
+- **Pressed twice:** a second Pay click on a payment that is already being sent is shown that payment, never the
+  busy message, because the busy check happens while the payment is locked and still new.
 - Payments already on their way are never refused: they are still checked, and that is how Stripe's recovery is noticed.
 
 ### 9. The payer opens Stripe's payment page, then leaves

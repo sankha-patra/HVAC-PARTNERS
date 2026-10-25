@@ -142,3 +142,19 @@ groups:
         annotations:
           summary: A billing Kafka consumer is falling behind
           description: 'Events are waiting in Kafka. Nothing is lost: payments are already committed and the outbox keeps every event. Check consumer errors, rebalances, slow database writes and partition count. Never reset offsets or skip records to catch up.'
+  - name: billing-dispute-alerts
+    rules:
+      - alert: BillingDisputeNeedsResponse
+        expr: billing_disputes_needing_response > 0
+        for: 5m
+        labels: {severity: warning, responder: app-team, decision: carrier-finance, environment: local}
+        annotations:
+          summary: A bank dispute or inquiry needs Carrier finance to respond
+          description: "A paying company's bank opened a dispute or an inquiry on a card payment. Carrier finance responds in Carrier's Stripe Dashboard before the deadline shown in the finance workspace: an unanswered dispute is lost, and an unanswered inquiry can become a chargeback. App team: check the messages arrived and hand it over (docs/carrier-handoff-runbook.md)."
+      - alert: BillingDisputeDeadlineNear
+        expr: billing_disputes_response_due_soon > 0
+        for: 1m
+        labels: {severity: warning, responder: app-team, decision: carrier-finance, environment: local}
+        annotations:
+          summary: A dispute or inquiry response is due within 48 hours
+          description: "Carrier finance must respond in Carrier's Stripe Dashboard before the deadline shown in the finance workspace. An inquiry takes no money yet but can become a chargeback; an unanswered dispute is lost."

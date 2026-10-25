@@ -61,11 +61,14 @@ public final class StripeBillingProvider implements BillingProvider {
     /** Nested recovery calls share one permit, one monotonic deadline and sanitized diagnostics. */
     private final ThreadLocal<OperationContext> operationContext = new ThreadLocal<>();
     /** Set while a new payment holds the slot it reserved before saving, so its own Stripe call does not ask again. */
-    private final ThreadLocal<Boolean> reservedSlot = new ThreadLocal<>();
-    // New payments pause after repeated Stripe failures, so nothing new is saved while Stripe cannot answer.
-    // A failure while paused extends the pause; any answer from Stripe, even a refusal, ends it. Guarded by this.
+    private final ThreadLocal<Permit> reservedSlot = new ThreadLocal<>();
+    // New payments pause after repeated Stripe failures, so nothing new is saved while Stripe cannot answer. Failures
+    // of any Stripe call count, and one while paused restarts the pause; only a payment page Stripe created ends a run
+    // of failures or a pause. Guarded by this.
     private int consecutiveFailures;
-    private boolean paused, trialInProgress;
+    private boolean paused;
+    /** The one payment let through after a pause, until its own Stripe answer is known or it closes. Guarded by this. */
+    private Permit trial;
     private long pausedUntilNanos;
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(StripeBillingProvider.class);
     /** Source of the operation deadline: monotonic in production, so a wall-clock jump cannot stretch it. */
@@ -127,43 +130,66 @@ public final class StripeBillingProvider implements BillingProvider {
      * one trial payment is let through; its answer decides whether new payments resume or pause again.
      */
     @Override public ProviderPermit admitNewPayment() {
-        boolean trial;
-        synchronized (this) {
-            trial = paused;
-            if (paused && (ticker.getAsLong() - pausedUntilNanos < 0 || trialInProgress))
-                throw new ProviderBusyException("New payments are paused because Stripe keeps failing");
-            if (trial) trialInProgress = true;
-        }
+        Permit permit = new Permit();
+        synchronized (this) { mayStart(permit); }
         boolean admitted = false;
         try { admitted = admission.tryAcquire(admissionWait.toNanos(), TimeUnit.NANOSECONDS); }
         catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
         if (!admitted) {
-            if (trial) synchronized (this) { trialInProgress = false; }
+            // A trial that got no slot gives up its turn to the next new payment.
+            synchronized (this) { if (trial == permit) trial = null; }
             recordRequestMetric("admission", "rate_limited", "rate_limit", System.nanoTime());
             throw new ProviderBusyException("Every slot for new Stripe payments is in use");
         }
-        reservedSlot.set(Boolean.TRUE);
-        java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
-        return () -> {
-            if (!closed.compareAndSet(false, true)) return;
-            reservedSlot.remove();
-            admission.release();
-            // A trial that sent nothing leaves the decision to the next new payment.
-            if (trial) synchronized (this) { trialInProgress = false; }
-        };
+        // New payments may have paused while this one waited for a slot: ask again before letting it through.
+        try { synchronized (this) { mayStart(permit); } }
+        catch (ProviderBusyException pausedMeanwhile) { admission.release(); throw pausedMeanwhile; }
+        reservedSlot.set(permit);
+        return permit;
     }
 
-    /** Any answer from Stripe, even a refusal, means it is reachable; timeouts, server errors and throttling are not. */
-    private synchronized void recordHealth(String outcome) {
-        if ("ok".equals(outcome) || "rejected".equals(outcome)) {
-            if (paused) log.info("Stripe is answering again; new payments resume");
-            consecutiveFailures = 0; paused = false; trialInProgress = false;
+    /** Refuses a new payment while paused; once the pause is over, the first one to ask is the trial. Guarded by this. */
+    private void mayStart(Permit permit) {
+        if (!paused || trial == permit) return;
+        if (ticker.getAsLong() - pausedUntilNanos < 0 || trial != null)
+            throw new ProviderBusyException("New payments are paused because Stripe keeps failing");
+        trial = permit;
+    }
+
+    /** One new payment's slot. A second close does nothing, and a close ends the trial only while it is still the trial. */
+    private final class Permit implements ProviderPermit {
+        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+        boolean open() { return !closed.get(); }
+        @Override public void close() {
+            if (!closed.compareAndSet(false, true)) return;
+            if (reservedSlot.get() == this) reservedSlot.remove();
+            admission.release();
+            // A trial that ends without Stripe's answer leaves the decision to the next new payment.
+            synchronized (StripeBillingProvider.this) { if (trial == this) trial = null; }
+        }
+    }
+
+    /**
+     * Only a payment page Stripe created shows that new payments work. Timeouts, server errors, throttling and
+     * unreadable answers from any Stripe call count against it; any other answer, such as a refused key (it has its
+     * own alert) or a check of a saved payment, changes nothing.
+     */
+    private synchronized void recordHealth(String operation, int status, String outcome) {
+        if ("ok".equals(outcome) && "checkout_create".equals(operation)) {
+            if (paused) log.info("Stripe created a payment page again; new payments resume");
+            consecutiveFailures = 0; paused = false; trial = null;
             return;
         }
+        boolean failed = status >= 200 && status < 300 ? !"ok".equals(outcome) : status == 0 || status == 429 || status >= 500;
+        if (!failed) return;
+        // The trial's own failure is its answer. Another call failing meanwhile restarts the pause, but the trial,
+        // whose Stripe call may outlast the pause, still decides: never two trials at once.
+        boolean trialFailed = trial != null && reservedSlot.get() == trial;
+        if (trialFailed) trial = null;
         if (++consecutiveFailures < FAILURES_BEFORE_PAUSE) return;
-        if (!paused || trialInProgress) log.warn("Stripe failed {} times in a row; new payments are refused for {} seconds before anything is saved",
+        if (!paused || trialFailed) log.warn("Stripe failed {} times in a row; new payments are refused for {} seconds before anything is saved",
                 consecutiveFailures, PAUSE.toSeconds());
-        paused = true; trialInProgress = false;
+        paused = true;
         pausedUntilNanos = ticker.getAsLong() + PAUSE.toNanos();
     }
 
@@ -179,7 +205,8 @@ public final class StripeBillingProvider implements BillingProvider {
         if (callerRemaining != null) budget = Math.min(budget, Math.max(0, callerRemaining.toNanos()));
         OperationContext context = new OperationContext(started + budget);
         operationContext.set(context);
-        boolean reserved = Boolean.TRUE.equals(reservedSlot.get());
+        Permit slot = reservedSlot.get();
+        boolean reserved = slot != null && slot.open();
         boolean admitted = false;
         try {
             long left = remainingNanos();
@@ -795,8 +822,10 @@ public final class StripeBillingProvider implements BillingProvider {
         long started = System.nanoTime();
         String operation = requestOperation(method, path);
         String outcome = "uncertain", category = "other";
+        int status = 0;
         try {
             Response response = transport.send(builder.build());
+            status = response.status();
             recordCredentialStatus(operation, response.status());
             ProviderDiagnostics diagnostics = responseDiagnostics(response);
             recordInvalidRequestStatus(operation, response.status(), diagnostics);
@@ -830,7 +859,7 @@ public final class StripeBillingProvider implements BillingProvider {
             throw new ProviderUncertainException("Stripe response could not be verified; acceptance is unknown");
         } finally {
             recordRequestMetric(operation, outcome, category, started);
-            recordHealth(outcome);
+            recordHealth(operation, status, outcome);
         }
     }
 

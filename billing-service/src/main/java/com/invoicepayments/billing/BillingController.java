@@ -16,13 +16,16 @@ public class BillingController {
     private final BillingInbox inbox; private final StripeWebhookVerifier verifier; private final BillingStore db;
     private final BillingReconciliation reconciliation;
     private final BillingCaseService cases;
+    private final BillingPaymentRetry retries;
     private final org.springframework.beans.factory.ObjectProvider<BillingEvents> events;
     public BillingController(BillingService payments,BillingRefundService refunds,BillingInbox inbox,StripeWebhookVerifier verifier,BillingStore db,
-        BillingReconciliation reconciliation,BillingCaseService cases,org.springframework.beans.factory.ObjectProvider<BillingEvents> events) {
+        BillingReconciliation reconciliation,BillingCaseService cases,org.springframework.beans.factory.ObjectProvider<BillingEvents> events,
+        BillingPaymentRetry retries) {
         this.payments=payments;this.refunds=refunds;this.inbox=inbox;this.verifier=verifier;this.db=db;
-        this.reconciliation=reconciliation;this.cases=cases;this.events=events;
+        this.reconciliation=reconciliation;this.cases=cases;this.events=events;this.retries=retries;
     }
     public record CreateIntent(List<UUID> invoiceIds,String method) {}
+    public record RetryIntent(String method) {}
     public record Simulation(String outcome) {}
     public record RefundRequest(long amountMinor,String reason) {}
     public record CaseNote(String note) {}
@@ -41,6 +44,11 @@ public class BillingController {
         if(!payments.hasCapture(intent)) throw BillingProblem.conflict("A receipt is available only after capture evidence is recorded");
         return ResponseEntity.ok().header("Content-Disposition","attachment; filename=receipt_"+intent+".json")
             .body(Map.of("receipt",payment,"meaning","Historical capture receipt. Current returns/refunds are shown; capture does not establish bank settlement."));
+    }
+    /** Try again after a failure Stripe confirmed: a new payment under the same payment reference. */
+    @PostMapping("/intents/{intent}/retry") public Object retry(Authentication auth,@PathVariable UUID intent,
+        @RequestHeader("Idempotency-Key") String key,@RequestBody(required=false) RetryIntent request) {
+        return retries.retry(user(auth),intent,key,request==null ? null : request.method());
     }
     @PostMapping("/intents/{intent}/submit") public Object submit(Authentication auth,@PathVariable UUID intent) {return payments.submit(user(auth),intent);}
     @PostMapping("/intents/{intent}/simulate") public Object simulate(Authentication auth,@PathVariable UUID intent,@RequestBody Simulation request) {

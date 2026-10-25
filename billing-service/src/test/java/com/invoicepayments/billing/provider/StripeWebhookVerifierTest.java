@@ -165,6 +165,34 @@ class StripeWebhookVerifierTest {
         assertThat(normalized.amountMinor()).isEqualTo(500);
     }
 
+    // A dispute is never money evidence, but its deadline, status and disputed payment must reach finance.
+    // Shaped like Stripe's documented Dispute object: du_ ID, charge and PaymentIntent references.
+    @Test void disputeKeepsItsDeadlineStatusAndDisputedPayment() throws Exception {
+        long due = NOW + 7 * 86_400;
+        JSONObject object = new JSONObject().put("object", "dispute").put("id", "du_example123").put("amount", 12345)
+                .put("currency", "usd").put("charge", "ch_example123").put("payment_intent", PI).put("reason", "fraudulent")
+                .put("status", "needs_response").put("evidence_details", new JSONObject().put("due_by", due));
+        byte[] raw = bytes(event("charge.dispute.created", object).put("created", NOW - 60));
+        var normalized = verifier.verify(raw, signature(raw, NOW)).orElseThrow();
+        assertThat(normalized.state()).isEqualTo("REVIEW");
+        assertThat(normalized.intentId()).isNull();
+        assertThat(normalized.providerId()).isEqualTo("du_example123");
+        assertThat(normalized.dispute()).isEqualTo(new ProviderDispute(PI, "ch_example123", 12345L, "USD", "fraudulent",
+                "needs_response", Instant.ofEpochSecond(due), Instant.ofEpochSecond(NOW - 60)));
+    }
+
+    // Stripe may expand the PaymentIntent or leave it empty, and an amount, currency or time it sends may be unreadable.
+    // Nothing is guessed: unreadable details stay empty, and a missing event time is never replaced by receipt time.
+    @Test void disputeDetailsAreReadAsSentAndNeverGuessed() throws Exception {
+        JSONObject object = new JSONObject().put("object", "dispute").put("id", "dp_legacy123").put("amount", "12.50")
+                .put("currency", "dollars").put("charge", JSONObject.NULL)
+                .put("payment_intent", new JSONObject().put("id", PI).put("object", "payment_intent"))
+                .put("status", "warning_needs_response");
+        byte[] raw = bytes(event("charge.dispute.created", object));
+        var dispute = verifier.verify(raw, signature(raw, NOW)).orElseThrow().dispute();
+        assertThat(dispute).isEqualTo(new ProviderDispute(PI, null, null, null, null, "warning_needs_response", null, null));
+    }
+
     @Test void numericStringAmountIsRetainedForReviewRatherThanCoercedToMoney() throws Exception {
         byte[] raw = bytes(event("checkout.session.completed", session(PI, "paid", "complete").put("amount_total", "12345")));
         var normalized = verifier.verify(raw, signature(raw, NOW)).orElseThrow();

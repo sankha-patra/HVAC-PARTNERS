@@ -345,6 +345,27 @@ describe('Finance cases', () => {
     expect(component.caseError()).toContain('more than 7 days old');
   });
 
+  // Disputes are answered in the Stripe Dashboard. The list shows the deadline; there is no case history to open.
+  it('shows when a dispute must be answered in Stripe, and opens no case history for it', () => {
+    initialize();
+    const dispute: FinanceCase = { id: 'dispute:STRIPE:dp_example', intentId: '', reason: 'DISPUTE', status: 'OPEN',
+      createdAt: '2026-10-25T00:00:00Z', disputeStatus: 'needs_response', evidenceDueBy: '2026-10-30T23:59:59Z',
+      paymentReference: 'pi_example', amountMinor: 12345 };
+    expect(component.disputeDeadline(dispute)).toContain('Dispute: submit evidence in the Stripe Dashboard by Oct 30, 2026');
+    expect(component.disputeDeadline(dispute)).toContain('UTC; with no response it is lost');
+    // An inquiry takes no money yet, but can become a chargeback if it is not answered.
+    expect(component.disputeDeadline({ ...dispute, disputeStatus: 'warning_needs_response' }))
+      .toContain('Inquiry: answer in the Stripe Dashboard by Oct 30, 2026');
+    expect(component.disputeDeadline({ ...dispute, disputeStatus: 'warning_needs_response' })).toContain('so it does not become a chargeback');
+    expect(component.disputeDeadline({ ...dispute, evidenceDueBy: null })).toBe('Dispute: no deadline was given; check it in the Stripe Dashboard');
+    expect(component.disputeDeadline({ ...dispute, statusUnclear: true }))
+      .toBe('Stripe sent conflicting updates; check this dispute in the Stripe Dashboard');
+    expect(component.disputeDeadline({ ...dispute, disputeStatus: 'under_review' })).toBe('Evidence sent; waiting for the bank');
+    expect(component.disputeDeadline({ ...dispute, reason: 'PAYMENT_UNRESOLVED' })).toBe('');
+    component.showHistory(dispute);
+    http.expectNone(request => request.url.includes('/history'));
+  });
+
   it('fails closed on a corrupt stored refund record', () => {
     sessionStorage.setItem('invoice-payments.billing.refund.v1:finance-user', '{invalid');
     initialize(); draft(); component.sendRefundRequest();

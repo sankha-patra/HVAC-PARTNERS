@@ -34,7 +34,7 @@ public class BillingService {
     public void authorize(String user,UUID account) {
         if(!db.exists("SELECT 1 FROM billing.memberships WHERE user_id=? AND account_id=?",user,account)) throw BillingProblem.missing();
     }
-    private void authorizePayer(String user,UUID account) {
+    void authorizePayer(String user,UUID account) {
         if(!db.exists("SELECT 1 FROM billing.memberships m JOIN billing.accounts a ON a.id=m.account_id WHERE m.user_id=? AND m.account_id=? AND m.role='PAYER' AND a.merchant_id=?",user,account,providerMerchant)) throw BillingProblem.missing();
     }
     public void staff(String user,UUID merchant,String role) {
@@ -60,7 +60,14 @@ public class BillingService {
         // UUID.compareTo is signed, so its order can invert and deadlock. The fingerprint keeps its original order.
         List<UUID> lockOrder=requested.stream().sorted(Comparator.comparing(UUID::toString)).toList();
         return db.tx(() -> {
-            // Serialize this customer's creation commands and the uniqueness check, not provider IO.
+            // A committed replay needs no account lock. An uncommitted repeat must not wait behind its first save.
+            var replay=db.rows("SELECT * FROM billing.intents WHERE account_id=? AND idempotency_key=?",account,key);
+            if(!replay.isEmpty()) {
+                if(!fingerprint.equals(replay.get(0).get("requestHash"))) throw new BillingProblem(409,"IDEMPOTENCY_CONFLICT","Idempotency key already belongs to a different request");
+                return view(replay.get(0));
+            }
+            db.requireCommandSlot("create:"+account+":"+key);
+            // Serialize different creation commands for the same account, not provider IO.
             db.one("SELECT id FROM billing.accounts WHERE id=? FOR UPDATE",account);
             var prior=db.rows("SELECT * FROM billing.intents WHERE account_id=? AND idempotency_key=?",account,key);
             if(!prior.isEmpty()) {
@@ -93,7 +100,7 @@ public class BillingService {
     }
     public List<Map<String,Object>> history(String user,UUID account) {
         authorize(user,account);
-        var rows=db.rows("SELECT id,account_id,amount_minor,currency,method,status,provider,created_at,updated_at,refunded_minor FROM billing.intents WHERE account_id=? ORDER BY created_at DESC,id DESC LIMIT 100",account);
+        var rows=db.rows("SELECT id,account_id,amount_minor,currency,method,status,provider,created_at,updated_at,refunded_minor,payment_reference,retry_of FROM billing.intents WHERE account_id=? ORDER BY created_at DESC,id DESC LIMIT 100",account);
         for(var row:rows) row.put("simulatorEnabled",simulator && "SIMULATOR".equals(row.get("provider")));
         return rows;
     }
@@ -117,9 +124,7 @@ public class BillingService {
         authorizePayer(user,id(current.get("accountId")));
         // Only a new payment needs room at the provider. A payment already on its way is never refused.
         if(!"CREATED".equals(current.get("status"))) return get(user,intent);
-        try (var permit=admitNewPayment(intent)) {
-            return submitAdmitted(user,intent);
-        }
+        return submitNew(user,intent);
     }
     /** Refused before anything is saved, so the payer can be told for certain that nothing was charged. */
     private ProviderPermit admitNewPayment(UUID intent) {
@@ -129,23 +134,40 @@ public class BillingService {
             throw new BillingProblem(503,"PROVIDER_BUSY","Payments are very busy right now. Nothing was charged. Please try again in a minute.");
         }
     }
-    private Map<String,Object> submitAdmitted(String user,UUID intent) {
+    private Map<String,Object> submitNew(String user,UUID intent) {
         UUID token=UUID.randomUUID();
-        var work=db.tx(() -> {
-            var row=locked(intent);
-            requireProvider(row);
-            if(!"CREATED".equals(row.get("status"))) return null;
-            db.update("UPDATE billing.intents SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds',updated_at=NOW() WHERE id=?",token,intent);
-            ProviderCommand command=new ProviderCommand(intent.toString(),operationKey(intent),amount(row,"amountMinor"),
-                text(row,"currency"),text(row,"method"),publicUrl+"/invoices?intentId="+intent);
-            db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status,original_request,request_version) VALUES(?,?,?,?,'SUBMITTING',?::jsonb,?)",
-                UUID.randomUUID(),intent,provider.name(),operationKey(intent),command.toJson(),provider.paymentRequestVersion());
-            db.event(intent,"SUBMITTING","Payment submission prepared; provider acceptance is not yet known");
-            return db.one("SELECT a.original_request,a.request_version,a.created_at,i.lease_until FROM billing.attempts a JOIN billing.intents i ON i.id=a.intent_id WHERE a.intent_id=?",intent);
-        });
+        var slot=new java.util.concurrent.atomic.AtomicReference<ProviderPermit>();
+        Map<String,Object> work;
+        try {
+            work=db.tx(() -> {
+                db.requireCommandSlot("submit:"+intent);
+                var row=locked(intent);
+                requireProvider(row);
+                if(!"CREATED".equals(row.get("status"))) return null;
+                // Existing money evidence remains recordable; a known older capture stops a new retry from being sent.
+                if(db.exists("SELECT 1 FROM billing.intents i JOIN billing.journals j ON j.effect_key='capture:'||i.id WHERE i.payment_reference=? AND i.id<>?",
+                        id(row.get("paymentReference")),intent))
+                    throw new BillingProblem(409,"ALREADY_PAID","An earlier attempt for this payment was received. This attempt was not sent. Check your payment history.");
+                // Asked only while this payment is locked and still new. Another click on it waits for the lock and is then
+                // shown the payment on its way, so "busy, nothing was charged" is only ever said of an unsent payment.
+                slot.set(admitNewPayment(intent));
+                db.update("UPDATE billing.intents SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds',updated_at=NOW() WHERE id=?",token,intent);
+                ProviderCommand command=new ProviderCommand(intent.toString(),operationKey(intent),amount(row,"amountMinor"),
+                    text(row,"currency"),text(row,"method"),publicUrl+"/invoices?intentId="+intent);
+                db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status,original_request,request_version) VALUES(?,?,?,?,'SUBMITTING',?::jsonb,?)",
+                    UUID.randomUUID(),intent,provider.name(),operationKey(intent),command.toJson(),provider.paymentRequestVersion());
+                db.event(intent,"SUBMITTING","Payment submission prepared; provider acceptance is not yet known");
+                return db.one("SELECT a.original_request,a.request_version,a.created_at,i.lease_until FROM billing.attempts a JOIN billing.intents i ON i.id=a.intent_id WHERE a.intent_id=?",intent);
+            });
+        } catch(RuntimeException|Error failure) {
+            // Saving failed or did not commit: hand the slot back. Nothing was sent.
+            if(slot.get()!=null) slot.get().close();
+            throw failure;
+        }
         if(work==null) return get(user,intent);
         ProviderResult result;
-        try (var ignored=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
+        // The slot is handed back as soon as Stripe answers, before the answer is saved.
+        try (var permit=slot.get(); var ignored=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
             result=provider.submitSaved(ProviderCommand.fromJson(text(work,"originalRequest")),
                 text(work,"requestVersion"),Instant.parse(text(work,"createdAt")));
         } catch(ProviderRejectedException rejected) {
@@ -345,7 +367,7 @@ public class BillingService {
     Map<String,Object> view(Map<String,Object> row) {
         UUID intent=id(row.get("id"));
         Map<String,Object> result=new LinkedHashMap<>();
-        for(String key:List.of("id","accountId","amountMinor","currency","method","status","provider","checkoutUrl","createdAt","updatedAt","refundedMinor")) result.put(key,row.get(key));
+        for(String key:List.of("id","accountId","amountMinor","currency","method","status","provider","checkoutUrl","createdAt","updatedAt","refundedMinor","paymentReference","retryOf")) result.put(key,row.get(key));
         result.put("simulatorEnabled",simulator && "SIMULATOR".equals(row.get("provider")));
         result.put("message",switch(text(row,"status")) {
             case "CAPTURED" -> "Payment captured. Bank settlement is tracked separately.";

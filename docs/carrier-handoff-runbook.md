@@ -28,6 +28,7 @@ yourself: Carrier decides who is responsible, and people change.
 | `BillingReleaseAwaitingApproval` | REFUND_APPROVER, not the person who requested the release | `carrier-billing-approvers` |
 | An approved refund that cannot be sent and is not our defect (after `BillingRefundStuck`) | REFUND_APPROVER: reject it or keep it | `carrier-billing-approvers` |
 | `BillingWebhookNeedsMatching`, or an open finance case that needs a reference verified or a release requested | FINANCE | `carrier-billing-finance` |
+| `BillingDisputeNeedsResponse`, `BillingDisputeDeadlineNear` | FINANCE, in Carrier's Stripe Dashboard before the deadline shown in the finance workspace: answer an inquiry so it does not become a chargeback, or submit evidence for a dispute (unanswered, it is lost). The app has no button for this | `carrier-billing-finance` |
 | `BillingPaymentProcessingOverdue`, `BillingRefundProcessingOverdue` | Treasury: contact the bank or Stripe | `carrier-billing-treasury` |
 | `BillingPaymentActionOverdue` | Business: contact the paying company | `carrier-billing-business` |
 | Any alert with `decision: none` | Nobody at Carrier. The app team fixes it. | none |

@@ -73,6 +73,8 @@ See [payment publication order and alert policy](docs/payment-ordering-and-alert
 
 For a step-by-step explanation of payment submission, crash recovery and transaction
 propagation, read the [payment recovery walkthrough](docs/payment-recovery-walkthrough.md).
+The [one-flow transaction proof](docs/transactional-one-flow-proof.md) explains the tested annotation alternative and preserved deadlines.
+The [current reliability update](docs/payment-reliability-update-2026-10-25.md) reconciles the earlier findings with the implemented retry and duplicate-response changes.
 Refund recovery, case resolution and expiry are explained in
 [the second repair](docs/payment-lifecycle-completion.md). To prove one real Stripe test-mode
 payment end to end, follow the [Stripe test-mode runbook](docs/stripe-test-mode-runbook.md).
