@@ -35,11 +35,11 @@ describe('Payer screen wording', () => {
   });
   afterEach(() => { http.verify(); sessionStorage.clear(); });
 
-  function open(accounts = [account], history: BillingIntent[] = []) {
+  function open(accounts = [account], history: BillingIntent[] = [], invoices: Invoice[] = [invoice]) {
     fixture.detectChanges();
     http.expectOne(`${base}/accounts`).flush(accounts);
     if (accounts.length) {
-      http.expectOne(`${base}/accounts/${account.id}/invoices`).flush([invoice]);
+      http.expectOne(`${base}/accounts/${account.id}/invoices`).flush(invoices);
       http.expectOne({ method: 'GET', url: `${base}/accounts/${account.id}/intents` }).flush(history);
     }
     fixture.detectChanges();
@@ -52,6 +52,15 @@ describe('Payer screen wording', () => {
   function labels() {
     return [...(fixture.nativeElement as HTMLElement).querySelectorAll('button, a')].map(e => e.textContent!.replace(/\s+/g, ' ').trim());
   }
+  function invoiceTable() {
+    return [...(fixture.nativeElement as HTMLElement).querySelectorAll('table')]
+      .find(table => table.querySelector('th')?.textContent?.trim() === 'Select')!;
+  }
+  function invoiceHeadings() { return [...invoiceTable().querySelectorAll('thead th')].map(th => th.textContent!.trim()); }
+  function row(number: string) { return [...invoiceTable().querySelectorAll('tbody tr')].find(tr => tr.textContent!.includes(number))!; }
+  function invoiceRow(number: string) { return row(number).textContent!.replace(/\s+/g, ' ').trim(); }
+  function badge(number: string) { return row(number).querySelector('.badge')?.textContent?.trim() ?? null; }
+  function checkbox(number: string) { return row(number).querySelector('input[type="checkbox"]') as HTMLInputElement; }
   function expectPlain() {
     expect(text()).not.toMatch(JARGON);
     expect(text()).not.toMatch(ACRONYMS);
@@ -61,13 +70,35 @@ describe('Payer screen wording', () => {
     open();
     expect(text()).toContain('Pay your invoices');
     expect(text()).toContain('Choose your business, pick the invoices to pay, then press Review payment.');
-    for (const heading of ['Paid', 'In progress', 'Left to pay', 'Total about', 'Your recent payments', 'No payments yet for this account.'])
+    for (const heading of ['Total about', 'Your recent payments', 'No payments yet for this account.'])
       expect(text()).toContain(heading);
+    // One number per invoice: what is still owed. Held and paid amounts belong on the finance screen.
+    expect(invoiceHeadings()).toEqual(['Select', 'Invoice', 'Due', 'Amount due', 'Status']);
+    expect(invoiceRow('INV-001')).toContain('$100.25');
+    expect(invoiceRow('INV-001')).toContain('Part paid');
     expect(labels()).toContain('Review payment');
     expectPlain();
     component.method.set('ACH');
     fixture.detectChanges();
     expect(text()).toContain('Bank payments can take a few days.');
+    expectPlain();
+  });
+
+  it('marks an invoice that is already being paid, and it cannot be chosen again', () => {
+    const held: Invoice = { ...invoice, id: 'invoice-b', number: 'INV-002', paidMinor: 0, reservedMinor: 12525, status: 'PAYMENT_PENDING' };
+    const paid: Invoice = { ...invoice, id: 'invoice-c', number: 'INV-003', paidMinor: 12525, status: 'PAID' };
+    const unpaid: Invoice = { ...invoice, id: 'invoice-d', number: 'INV-004', paidMinor: 0 };
+    open([account], [], [invoice, held, paid, unpaid]);
+    expect(invoiceRow('INV-004')).toContain('$125.25');
+    expect(invoiceRow('INV-004')).toContain('To pay');
+    expect(invoiceRow('INV-002')).toContain('$125.25');
+    expect(badge('INV-002')).toBe('Payment in progress');
+    expect(checkbox('INV-002').disabled).toBe(true);
+    expect(checkbox('INV-001').disabled).toBe(false);
+    expect(badge('INV-001')).toBeNull();
+    expect(invoiceRow('INV-003')).toContain('$0.00');
+    expect(invoiceRow('INV-003')).toContain('Paid');
+    expect(text()).toContain("An invoice marked Payment in progress is already being paid and can't be chosen again until that payment finishes.");
     expectPlain();
   });
 

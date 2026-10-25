@@ -22,7 +22,8 @@ There is no history table and no second table for "real" payments. The other tab
 | `journals` | The money record: one per captured payment | never changes, can't be added twice |
 | `provider_operations` | Test only: what the simulated Stripe knows | one per Stripe payment |
 
-**Left to pay** = total − paid − held.
+**Left to pay** = total − paid − held. This is what the app checks. Payers see one number instead, **Amount due**
+(total − paid), with a **Payment in progress** badge while money is held.
 
 **"Held"** means the invoice money is set aside for one payment, so a second payment can't pay the same invoice at
 the same time. **"Released" (freed)** means that hold is taken off: `held` goes back to 0, so left to pay is $100

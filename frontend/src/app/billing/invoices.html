@@ -103,14 +103,14 @@
     <mat-card class="panel"><mat-card-content>
       <div class="section-heading"><h2>Invoices</h2><button mat-button (click)="loadInvoices()" [disabled]="loadingInvoices() || busy()">Refresh</button></div>
       @if (invoiceError()) { <p class="notice error" role="alert">{{ invoiceError() }}</p> }
-      <p class="muted">"Left to pay" is what you still owe after payments that are done or in progress. You'll see the exact amount before you pay.</p>
+      <p class="muted">Amount due is what you still owe. An invoice marked Payment in progress is already being paid and can't be chosen again until that payment finishes.</p>
       <div class="table-scroll"><table>
-        <thead><tr><th scope="col">Select</th><th scope="col">Invoice</th><th scope="col">Due</th><th scope="col">Total</th><th scope="col">Paid</th><th scope="col">In progress</th><th scope="col">Left to pay</th><th scope="col">Status</th></tr></thead>
+        <thead><tr><th scope="col">Select</th><th scope="col">Invoice</th><th scope="col">Due</th><th scope="col">Amount due</th><th scope="col">Status</th></tr></thead>
         <tbody>@for (invoice of invoices(); track invoice.id) {
           <tr><td><mat-checkbox [aria-label]="'Select invoice ' + invoice.number" [checked]="selected().includes(invoice.id)" (change)="toggleInvoice(invoice, $event.checked)" [disabled]="!canPay() || selectionLocked() || !payable(invoice) || !!invoiceError() || loadingInvoices()" /></td>
             <th scope="row">{{ invoice.number }}</th><td>{{ invoice.dueDate | date:'mediumDate':'UTC' }}</td>
-            <td>{{ invoice.totalMinor / 100 | currency:invoice.currency }}</td><td>{{ invoice.paidMinor / 100 | currency:invoice.currency }}</td>
-            <td>{{ invoice.reservedMinor / 100 | currency:invoice.currency }}</td><td>{{ available(invoice) / 100 | currency:invoice.currency }}</td><td>{{ invoice.status }}</td></tr>
+            <td>{{ amountDue(invoice) / 100 | currency:invoice.currency }}</td>
+            <td>@if (inProgress(invoice)) { <span class="badge">Payment in progress</span> } @else { {{ invoiceStatusLabel(invoice) }} }</td></tr>
         }</tbody>
       </table></div>
       @if (!loadingInvoices() && !invoiceError() && !invoices().length) { <p>There are no invoices to pay for this account.</p> }

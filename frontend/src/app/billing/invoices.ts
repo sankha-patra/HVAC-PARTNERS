@@ -240,6 +240,15 @@ export class InvoicesComponent implements OnInit, OnDestroy {
   }
 
   available(invoice: Invoice) { return Math.max(0, invoice.totalMinor - invoice.paidMinor - invoice.reservedMinor); }
+  // Payers see one number, what they still owe, and a badge while a payment holds the invoice.
+  // Held and paid amounts stay on the finance screen.
+  amountDue(invoice: Invoice) { return Math.max(0, invoice.totalMinor - invoice.paidMinor); }
+  inProgress(invoice: Invoice) { return invoice.reservedMinor > 0; }
+  invoiceStatusLabel(invoice: Invoice) {
+    if (['VOID', 'CANCELLED'].includes(invoice.status)) return 'Cancelled';
+    if (this.amountDue(invoice) === 0) return 'Paid';
+    return invoice.paidMinor > 0 ? 'Part paid' : 'To pay';
+  }
   payable(invoice: Invoice) {
     return invoice.currency === 'USD' && Number.isSafeInteger(this.available(invoice)) && this.available(invoice) > 0
       && !['VOID', 'CANCELLED'].includes(invoice.status);

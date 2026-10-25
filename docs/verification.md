@@ -1,5 +1,19 @@
 # Verification of the extracted repository
 
+## One "Amount due" for payers — 25 October 2026 (later)
+
+The payer's invoice list now has one number per invoice, **Amount due** (total minus paid), and a
+**Payment in progress** badge while a payment holds the invoice; that row cannot be chosen. Other rows say To pay,
+Part paid or Paid. Held and paid amounts remain on the finance screen, which is unchanged. The two new view tests
+failed first against the old Paid / In progress / Left to pay columns.
+
+| Check | Result |
+| --- | --- |
+| Frontend unit tests and production build | **70 tests** pass; build completes |
+| Java suite (`scripts/verify-container-tests.ps1`, no Java change) | **401 tests**, 0 failures, errors or skips |
+
+Evidence: `.tmp-notes/container-tests/20261025T053905281Z/` (git-ignored).
+
 ## Busy refusal before saving, a page that checks by itself, and a dry run — 25 October 2026 (later)
 
 - **Busy or failing Stripe is refused before anything is saved.** Before, when all 8 slots for Stripe calls on a
