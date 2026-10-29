@@ -10,10 +10,16 @@ public final class RecoveryLambdaHandler implements RequestHandler<Map<String,Ob
     private static RecoveryLambdaRuntime runtime;
     private final Runnable bootstrap;
     private final Supplier<RecoveryLambdaRuntime> runtimeSupplier;
-    public RecoveryLambdaHandler(){this(RecoveryBootstrap::ensureConnected,RecoveryLambdaHandler::runtime);}
+    public RecoveryLambdaHandler(){this(RecoveryBootstrap::ensureConnected,RecoveryLambdaHandler::runtime);prewarm(System.getenv());}
     // Package-private seam for the separately packaged fault entrypoint. The public runtime remains fixed.
     RecoveryLambdaHandler(Runnable bootstrap,Supplier<RecoveryLambdaRuntime> runtimeSupplier){
         this.bootstrap=Objects.requireNonNull(bootstrap);this.runtimeSupplier=Objects.requireNonNull(runtimeSupplier);
+    }
+    // Lambda constructs the handler in its init phase. Starting the tunnel and Spring there keeps cold-start cost out of the
+    // invocation budget that claim admission measures. Best-effort: each invocation repeats both and reports any failure.
+    void prewarm(Map<String,String> env){
+        if(!env.containsKey("AWS_LAMBDA_FUNCTION_NAME"))return;
+        try{bootstrap.run();runtimeSupplier.get();}catch(RuntimeException ignored){}
     }
     private static synchronized RecoveryLambdaRuntime runtime(){if(runtime==null)runtime=new RecoveryLambdaRuntime();return runtime;}
     public Map<String,Object> handleRequest(Map<String,Object> input,Context context){

@@ -5,6 +5,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import org.json.JSONObject;
 import software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
@@ -47,6 +48,8 @@ final class RecoveryBootstrap {
                 "--advertise-tags=tag:recovery-lab","--hostname=payments-recovery-"+UUID.randomUUID().toString().substring(0,12),"--accept-dns=false","--accept-routes=false"),10,false);}
             finally{Files.deleteIfExists(key);}
             if(!statusRunning())throw new IllegalStateException("Tunnel is not running");
+            String laptop=System.getenv("RECOVERY_LAPTOP_IP");
+            awaitPeer(()->ping(laptop),PEER_BUDGET,Duration.ofMillis(250));
         }catch(Exception failure){if(failure instanceof InterruptedException)Thread.currentThread().interrupt();if(daemon!=null)daemon.destroyForcibly();throw new IllegalStateException("Private recovery tunnel is unavailable");}
     }
     static Map<String,String> runtimeConfiguration(){
@@ -62,6 +65,20 @@ final class RecoveryBootstrap {
             String value=client.getParameter(GetParameterRequest.builder().name(name).withDecryption(true).build()).parameter().value();
             if(value==null||value.isBlank())throw new IllegalStateException("Runtime parameter unavailable");return value;
         }catch(RuntimeException failure){throw new IllegalStateException("Recovery runtime credentials unavailable");}
+    }
+    static final Duration PEER_BUDGET=Duration.ofSeconds(8);
+    /** "Running" means the control plane accepted the node, not that a WireGuard path to the laptop exists yet. */
+    static void awaitPeer(BooleanSupplier reachable,Duration budget,Duration pause)throws InterruptedException{
+        long until=System.nanoTime()+budget.toNanos();
+        while(!reachable.getAsBoolean()){
+            if(System.nanoTime()+pause.toNanos()>=until)throw new IllegalStateException("Database peer is unreachable through the tunnel");
+            Thread.sleep(pause.toMillis());
+        }
+    }
+    // TSMP crosses WireGuard to the peer's tailscaled; a disco pong alone does not prove the data path.
+    private static boolean ping(String ip){
+        try{run(List.of("/opt/bin/tailscale","--socket="+SOCKET,"ping","--tsmp","--until-direct=false","--c=1","--timeout=2s",ip),3,false);return true;}
+        catch(Exception failure){if(failure instanceof InterruptedException)Thread.currentThread().interrupt();return false;}
     }
     private static boolean statusRunning()throws Exception{return "Running".equals(new JSONObject(run(List.of("/opt/bin/tailscale","--socket="+SOCKET,"status","--json"),2,true)).optString("BackendState"));}
     private static String run(List<String> args,int seconds,boolean capture)throws Exception{

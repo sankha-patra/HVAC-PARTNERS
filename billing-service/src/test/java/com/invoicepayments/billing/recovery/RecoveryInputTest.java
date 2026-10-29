@@ -56,6 +56,26 @@ class RecoveryInputTest {
         var settings=new RecoverySettings(UUID.randomUUID(),"arn:aws:states:ap-southeast-2:123456789012:stateMachine:lab:7",8,16,100,1,Instant.now());
         assertThat(settings.executionArn("same-name")).isEqualTo("arn:aws:states:ap-southeast-2:123456789012:execution:lab:same-name");
     }
+    @Test void prewarmRunsOnlyInsideLambdaAndNeverFailsInit(){
+        var boot=new AtomicInteger();var runtimes=new AtomicInteger();
+        var handler=new RecoveryLambdaHandler(boot::incrementAndGet,()->{runtimes.incrementAndGet();return mock(RecoveryLambdaRuntime.class);});
+        handler.prewarm(Map.of());assertThat(boot).hasValue(0);assertThat(runtimes).hasValue(0);
+        handler.prewarm(Map.of("AWS_LAMBDA_FUNCTION_NAME","recovery-lab-recover"));assertThat(boot).hasValue(1);assertThat(runtimes).hasValue(1);
+        var failing=new RecoveryLambdaHandler(()->{throw new IllegalStateException("tunnel down");},()->{runtimes.incrementAndGet();return mock(RecoveryLambdaRuntime.class);});
+        assertThatCode(()->failing.prewarm(Map.of("AWS_LAMBDA_FUNCTION_NAME","recovery-lab-recover"))).doesNotThrowAnyException();
+        assertThat(runtimes).hasValue(1);
+    }
+    @Test void peerWaitReturnsOnceTheLaptopAnswers() throws Exception{
+        var attempts=new AtomicInteger();
+        RecoveryBootstrap.awaitPeer(()->attempts.incrementAndGet()>=3,java.time.Duration.ofSeconds(2),java.time.Duration.ofMillis(10));
+        assertThat(attempts).hasValue(3);
+    }
+    @Test void peerWaitIsBoundedWhenTheLaptopNeverAnswers(){
+        var attempts=new AtomicInteger();long start=System.nanoTime();
+        assertThatThrownBy(()->RecoveryBootstrap.awaitPeer(()->{attempts.incrementAndGet();return false;},java.time.Duration.ofMillis(200),java.time.Duration.ofMillis(20)))
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("unreachable");
+        assertThat(System.nanoTime()-start).isLessThan(java.time.Duration.ofSeconds(1).toNanos());assertThat(attempts.get()).isBetween(2,11);
+    }
     @Test void bootstrapAllowsOnlyTheExactReviewedTailnetDatabaseRoute(){
         var env=new HashMap<>(Map.of("AWS_REGION","ap-southeast-2","AWS_LAMBDA_FUNCTION_VERSION","2","RECOVERY_PRIVATE_ROUTE_READY","true","RECOVERY_CAMPAIGN_ID",UUID.randomUUID().toString(),"RECOVERY_LAPTOP_IP","100.100.20.30","RECOVERY_DATABASE","commerce_lab","RECOVERY_JDBC_URL","jdbc:postgresql://100.100.20.30:5432/commerce_lab"));
         assertThatCode(()->RecoveryBootstrap.validate(env)).doesNotThrowAnyException();
