@@ -190,12 +190,12 @@ These are emulator numbers with lab-sized waits, not production figures. Three f
 
 ## 11. First AWS run: cold-start connection failure (29 Oct 2026)
 
-The first Step Functions run failed before claiming the payment: the Lambda could not obtain a database connection. The order stayed saved with zero captures and stayed owned by review. Code changes after it:
+The first Step Functions run failed before claiming the payment. It was a **warm** Lambda resumed after an idle freeze: the log shows a Hikari clock-leap warning and a connection-acquisition timeout of about 3 s. The order stayed saved with zero captures and stayed owned by review. Code changes after it:
 
 - **No blanket eviction.** The connection gate no longer soft-evicts every idle connection per invocation. Hikari already validates a connection idle past its bypass window when it is borrowed, so the eviction only forced a new tunnel handshake each time.
 - **Wait for the peer, not just the daemon.** `tailscale status` reporting `Running` means the control plane accepted the node, not that a WireGuard path to the laptop exists. Bootstrap now TSMP-pings the laptop, retrying for up to 8 s, before any JDBC connect.
 - **Cold start in the init phase.** The handler starts the tunnel and the Spring context while Lambda constructs it, so that work no longer comes out of the invocation time that claim admission (≥ 20 s remaining) measures. Failures there are ignored and repeated, then reported, by the invocation.
 
-**Deployment change for the retest:** raise the Lambda timeout from 35 s to **60 s**. A cold invocation can spend up to ~8 s on peer wait and ~10 s on the pool before admission requires 20 s to remain; 35 s leaves no margin.
+**Deployment for the retest:** reuse the Codex kit in `Documents/Codex/2026-10-26/pl/work/aws-hybrid-runtime/application` (CloudFormation template, `recovery.asl.json`, deploy and run scripts). Its Lambda timeout is already 60 s; the pool's `connectionTimeout` is now 10 s instead of the 3 s that timed out.
 
 **Not yet verified on AWS.** Pass condition for the retest: a cold-start execution claims and resolves the payment without a connection error, and a forced tunnel outage still ends with zero captures and the case owned by review.
