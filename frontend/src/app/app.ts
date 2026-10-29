@@ -17,6 +17,7 @@ export class App implements OnInit, OnDestroy {
   private readonly routeUrl=signal(this.router.url);
   private routeSubscription?: Subscription;
   readonly user=this.auth.user;
+  readonly staffWorkspace=computed(()=>this.auth.staffWorkspace?.() ?? false);
   readonly pageBlurred=computed(()=>!!this.messages.message());
   readonly showChrome=computed(()=>this.auth.isLoggedIn() && !this.routeUrl().startsWith('/login'));
   ngOnInit() {

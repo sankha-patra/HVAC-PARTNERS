@@ -32,6 +32,7 @@ public class SecurityConfig {
                 .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/payments/webhook").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/billing/webhooks/stripe").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/v1/billing/webhooks/razorpay").permitAll()
                 .requestMatchers("/api/v1/settlements/**").hasRole("ADMIN")
                 .requestMatchers("/api/v1/payments/reconciliation/**").hasRole("ADMIN")
                 .requestMatchers("/api/v1/experiments/**").hasRole("ADMIN")

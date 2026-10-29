@@ -16,6 +16,8 @@ import static com.invoicepayments.billing.BillingStore.*;
 public class BillingService {
     private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(BillingService.class);
     private final BillingStore db;
+    private final BillingPaymentCommands commands;
+    private final BillingPaymentLocks locks;
     private final BillingProvider provider;
     private final boolean simulator;
     private final String publicUrl;
@@ -23,11 +25,15 @@ public class BillingService {
     public BillingService(BillingStore db,BillingProvider provider,Environment env,
         @Value("${billing.simulator-enabled:false}") boolean simulator,
         @Value("${billing.public-url:http://localhost:4200}") String publicUrl,
-        @Value("${billing.provider-merchant-id:10000000-0000-0000-0000-000000000001}") String merchant) {
-        this.db=db; this.provider=provider;
+        @Value("${billing.provider-merchant-id:10000000-0000-0000-0000-000000000001}") String merchant,BillingPaymentCommands commands,BillingPaymentLocks locks) {
+        this.db=db; this.provider=provider;this.commands=commands;this.locks=locks;
         this.simulator=simulator && !env.acceptsProfiles(Profiles.of("prod")); this.publicUrl=publicUrl;
         this.providerMerchant=id(merchant);
     }
+    BillingProvider configuredProvider(){return provider;}
+    String configuredMerchant(){return providerMerchant.toString();}
+    String configuredPublicUrl(){return publicUrl;}
+    boolean simulationEnabled(){return simulator;}
     public List<Map<String,Object>> accounts(String user) {
         return db.rows("SELECT a.id,a.name,a.merchant_id,m.role FROM billing.accounts a JOIN billing.memberships m ON m.account_id=a.id WHERE m.user_id=? ORDER BY a.name",user);
     }
@@ -44,56 +50,15 @@ public class BillingService {
     public List<Map<String,Object>> invoices(String user,UUID account) {
         authorize(user,account);
         return db.rows("""
-            SELECT id,number,currency,total_minor,paid_minor,reserved_minor,due_date,version,
-             CASE WHEN paid_minor=total_minor THEN 'PAID' WHEN reserved_minor>0 THEN 'PAYMENT_PENDING' ELSE 'OPEN' END status
-            FROM billing.invoices WHERE account_id=? ORDER BY due_date,id LIMIT 200
+            SELECT v.id,v.number,v.currency,v.total_minor,v.paid_minor,v.reserved_minor,v.due_date,v.version,
+             CASE WHEN v.paid_minor=v.total_minor THEN 'PAID' WHEN v.reserved_minor>0 THEN 'PAYMENT_PENDING' ELSE 'OPEN' END status
+            FROM billing.invoices v WHERE v.account_id=?
+             AND NOT EXISTS (SELECT 1 FROM commerce.order_bills b WHERE b.invoice_id=v.id)
+            ORDER BY v.due_date,v.id LIMIT 200
             """,account);
     }
     public Map<String,Object> create(String user,UUID account,String key,List<UUID> requested,String method) {
-        authorizePayer(user,account); validateKey(key);
-        if(requested==null || requested.isEmpty() || requested.size()>50 || requested.stream().anyMatch(Objects::isNull)
-            || new HashSet<>(requested).size()!=requested.size()) throw BillingProblem.invalid("Select between one and fifty distinct invoices");
-        if(!Set.of("CARD","ACH").contains(Objects.toString(method,""))) throw BillingProblem.invalid("Select CARD or ACH");
-        List<UUID> ids=requested.stream().sorted().toList();
-        String fingerprint=hash(method+":"+ids);
-        // Lock in PostgreSQL's uuid order (unsigned, the same as the text form), as every other path does.
-        // UUID.compareTo is signed, so its order can invert and deadlock. The fingerprint keeps its original order.
-        List<UUID> lockOrder=requested.stream().sorted(Comparator.comparing(UUID::toString)).toList();
-        return db.tx(() -> {
-            // A committed replay needs no account lock. An uncommitted repeat must not wait behind its first save.
-            var replay=db.rows("SELECT * FROM billing.intents WHERE account_id=? AND idempotency_key=?",account,key);
-            if(!replay.isEmpty()) {
-                if(!fingerprint.equals(replay.get(0).get("requestHash"))) throw new BillingProblem(409,"IDEMPOTENCY_CONFLICT","Idempotency key already belongs to a different request");
-                return view(replay.get(0));
-            }
-            db.requireCommandSlot("create:"+account+":"+key);
-            // Serialize different creation commands for the same account, not provider IO.
-            db.one("SELECT id FROM billing.accounts WHERE id=? FOR UPDATE",account);
-            var prior=db.rows("SELECT * FROM billing.intents WHERE account_id=? AND idempotency_key=?",account,key);
-            if(!prior.isEmpty()) {
-                if(!fingerprint.equals(prior.get(0).get("requestHash"))) throw new BillingProblem(409,"IDEMPOTENCY_CONFLICT","Idempotency key already belongs to a different request");
-                return view(prior.get(0));
-            }
-            List<Map<String,Object>> selected=new ArrayList<>(); long total=0;
-            for(UUID invoice:lockOrder) {
-                var row=db.one("SELECT * FROM billing.invoices WHERE id=? AND account_id=? FOR UPDATE",invoice,account);
-                long available=amount(row,"totalMinor")-amount(row,"paidMinor")-amount(row,"reservedMinor");
-                if(available<=0) throw new BillingProblem(409,"INVOICE_UNAVAILABLE","An invoice is already paid or reserved by another payment; no intent was created for this key");
-                total=Math.addExact(total,available); row.put("available",available); selected.add(row);
-            }
-            if(total>99_999_999L || ("STRIPE".equals(provider.name()) && total<50))
-                throw BillingProblem.invalid("This provider supports payments up to 99999999 cents; Stripe requires at least 50 cents");
-            UUID intent=UUID.randomUUID();
-            db.update("INSERT INTO billing.intents(id,account_id,idempotency_key,request_hash,amount_minor,currency,method,status,provider) VALUES(?,?,?,?,?,'USD',?,'CREATED',?)",
-                intent,account,key,fingerprint,total,method,provider.name());
-            for(var invoice:selected) {
-                UUID invoiceId=id(invoice.get("id")); long available=amount(invoice,"available");
-                db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor+?,version=version+1 WHERE id=?",available,invoiceId);
-                db.update("INSERT INTO billing.allocations(intent_id,invoice_id,amount_minor,state) VALUES(?,?,?,'RESERVED')",intent,invoiceId,available);
-            }
-            db.event(intent,"CREATED","Payment created and invoice amounts reserved; funds have not been collected");
-            return view(raw(intent));
-        });
+        BillingExecutionBudget.requireTime();return commands.create(user,account,key,requested,method,provider.name());
     }
     public Map<String,Object> get(String user,UUID intent) {
         var row=raw(intent); authorize(user,id(row.get("accountId"))); return view(row);
@@ -105,18 +70,7 @@ public class BillingService {
         return rows;
     }
     public Map<String,Object> cancel(String user,UUID intent) {
-        authorizePayer(user,id(raw(intent).get("accountId")));
-        return db.tx(()->{
-            var payment=locked(intent);
-            if("CANCELLED".equals(payment.get("status"))) return view(payment);
-            if(!"CREATED".equals(payment.get("status"))) throw BillingProblem.conflict("A submitted or uncertain payment cannot be cancelled locally");
-            for(var allocation:lockInvoices(intent)) if("RESERVED".equals(allocation.get("state")))
-                db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor-?,version=version+1 WHERE id=?",amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
-            db.update("UPDATE billing.allocations SET state='RELEASED' WHERE intent_id=?",intent);
-            db.update("UPDATE billing.intents SET status='CANCELLED',updated_at=NOW() WHERE id=?",intent);
-            db.event(intent,"CANCELLED","Unsubmitted payment cancelled and invoice reservations released; no provider operation was issued");
-            return view(raw(intent));
-        });
+        BillingExecutionBudget.requireTime();return commands.cancel(user,intent);
     }
     public Map<String,Object> submit(String user,UUID intent) {
         requireNoTransaction();
@@ -125,6 +79,24 @@ public class BillingService {
         // Only a new payment needs room at the provider. A payment already on its way is never refused.
         if(!"CREATED".equals(current.get("status"))) return get(user,intent);
         return submitNew(user,intent);
+    }
+    /** Browser callbacks only request this read-only provider verification; they are never capture evidence. */
+    public Map<String,Object> reconcile(String user,UUID intent) {
+        requireNoTransaction();BillingExecutionBudget.requireTime();
+        var row=raw(intent);authorizePayer(user,id(row.get("accountId")));requireProvider(row);
+        if(!"RAZORPAY".equals(provider.name()))throw BillingProblem.conflict("This verification route is for Razorpay test orders");
+        var attempts=db.rows("SELECT original_request,request_version,created_at FROM billing.attempts WHERE intent_id=?",intent);
+        if(attempts.isEmpty() || attempts.get(0).get("originalRequest")==null)throw BillingProblem.conflict("No submitted operation is available for verification");
+        var attempt=attempts.get(0);var saved=ProviderCommand.fromJson(text(attempt,"originalRequest"));
+        if(!intent.toString().equals(saved.intentId()) || !operationKey(intent).equals(saved.idempotencyKey())
+                || amount(row,"amountMinor")!=saved.amountMinor() || !text(row,"currency").equals(saved.currency()))
+            throw BillingProblem.conflict("The saved request does not match the payment");
+        ProviderResult result;
+        try { result=provider.recoverPayment(saved,text(attempt,"requestVersion"),Instant.parse(text(attempt,"createdAt")),text(row,"providerId")); }
+        catch(ProviderUncertainException uncertain) { return get(user,intent); }
+        // A browser lookup cannot clear another owner's live orchestration lease. Definitive capture is still recorded.
+        if("CAPTURED".equals(result.state()))recordResult(intent,null,result);
+        return get(user,intent);
     }
     /** Refused before anything is saved, so the payer can be told for certain that nothing was charged. */
     private ProviderPermit admitNewPayment(UUID intent) {
@@ -139,28 +111,11 @@ public class BillingService {
         var slot=new java.util.concurrent.atomic.AtomicReference<ProviderPermit>();
         Map<String,Object> work;
         try {
-            work=db.tx(() -> {
-                db.requireCommandSlot("submit:"+intent);
-                var row=locked(intent);
-                requireProvider(row);
-                if(!"CREATED".equals(row.get("status"))) return null;
-                // Existing money evidence remains recordable; a known older capture stops a new retry from being sent.
-                if(db.exists("SELECT 1 FROM billing.intents i JOIN billing.journals j ON j.effect_key='capture:'||i.id WHERE i.payment_reference=? AND i.id<>?",
-                        id(row.get("paymentReference")),intent))
-                    throw new BillingProblem(409,"ALREADY_PAID","An earlier attempt for this payment was received. This attempt was not sent. Check your payment history.");
-                // Asked only while this payment is locked and still new. Another click on it waits for the lock and is then
-                // shown the payment on its way, so "busy, nothing was charged" is only ever said of an unsent payment.
-                slot.set(admitNewPayment(intent));
-                db.update("UPDATE billing.intents SET status='SUBMITTING',lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds',updated_at=NOW() WHERE id=?",token,intent);
-                ProviderCommand command=new ProviderCommand(intent.toString(),operationKey(intent),amount(row,"amountMinor"),
-                    text(row,"currency"),text(row,"method"),publicUrl+"/invoices?intentId="+intent);
-                db.update("INSERT INTO billing.attempts(id,intent_id,provider,operation_key,status,original_request,request_version) VALUES(?,?,?,?,'SUBMITTING',?::jsonb,?)",
-                    UUID.randomUUID(),intent,provider.name(),operationKey(intent),command.toJson(),provider.paymentRequestVersion());
-                db.event(intent,"SUBMITTING","Payment submission prepared; provider acceptance is not yet known");
-                return db.one("SELECT a.original_request,a.request_version,a.created_at,i.lease_until FROM billing.attempts a JOIN billing.intents i ON i.id=a.intent_id WHERE a.intent_id=?",intent);
-            });
+            boolean shopOrder=db.exists("SELECT 1 FROM commerce.orders o JOIN billing.intents i ON i.payment_reference=o.payment_reference WHERE i.id=?",intent);
+            String returnUrl=publicUrl+(shopOrder?"/orders":"/invoices?intentId="+intent);
+            work=commands.prepareSubmission(intent,token,this::admitNewPayment,slot,provider.name(),provider.paymentRequestVersion(),returnUrl);
         } catch(RuntimeException|Error failure) {
-            // Saving failed or did not commit: hand the slot back. Nothing was sent.
+            // The proxy did not return successfully: release admission. Commit may be uncertain; recovery rereads saved state.
             if(slot.get()!=null) slot.get().close();
             throw failure;
         }
@@ -184,19 +139,7 @@ public class BillingService {
     }
     /** Rejection describes this request, not a provider operation another worker may have created. */
     private void recordInitialRejection(UUID intent,UUID token,ProviderRejectedException rejected) {
-        db.tx(() -> {
-            var row=locked(intent);
-            BillingProviderEvidence.record(db,intent,null,rejected.diagnostics());
-            if(!token.toString().equals(text(row,"leaseToken")) || !"SUBMITTING".equals(row.get("status"))
-                || row.get("providerId")!=null) {
-                db.event(intent,"STALE_REQUEST_REJECTION","A superseded submission was rejected; the current payment outcome was preserved");
-                return null;
-            }
-            // Expiry alone does not invalidate this proof: no replacement owner claimed the row and
-            // no provider operation has been recorded. The row lock prevents a simultaneous claim.
-            recordResult(intent,token,new ProviderResult(null,"FAILED",null,"The initial request was rejected before a payment was created"));
-            return null;
-        });
+        BillingExecutionBudget.requireTime();commands.recordInitialRejection(intent,token,rejected);
     }
     public Map<String,Object> simulate(String user,UUID intent,String outcome) {
         requireNoTransaction();
@@ -212,57 +155,13 @@ public class BillingService {
     /** States the provider never takes back: a superseded worker's answer of this kind is still booked. */
     static final Set<String> DEFINITIVE=Set.of("CAPTURED","FAILED","RETURNED");
     public void recordResult(UUID intent,UUID fence,ProviderResult result) {
-        db.tx(() -> {
-            var row=locked(intent);
-            BillingProviderEvidence.record(db,intent,null,result.diagnostics());
-            boolean owner=fence==null || fence.toString().equals(text(row,"leaseToken"));
-            // A superseded worker's uncertain answer is dropped. A definitive one is always booked: capture, failure and
-            // return are idempotent, and a capture after a release becomes unapplied cash with its own case.
-            if(!owner && !DEFINITIVE.contains(result.state())) return null;
-            String existing=text(row,"providerId");
-            if(result.providerId()!=null && existing!=null && !existing.equals(result.providerId()))
-                throw BillingProblem.conflict("Provider operation identity does not match the original payment");
-            if(result.providerId()!=null) {
-                db.update("UPDATE billing.intents SET provider_id=COALESCE(provider_id,?),checkout_url=COALESCE(?,checkout_url) WHERE id=?",result.providerId(),safeCheckout(result.checkoutUrl()),intent);
-                db.update("UPDATE billing.attempts SET provider_id=COALESCE(provider_id,?),updated_at=NOW() WHERE intent_id=?",result.providerId(),intent);
-            }
-            switch(result.state()) {
-                case "CAPTURED" -> capture(row);
-                case "FAILED" -> fail(row,"Provider confirmed failure; invoice reservations released");
-                case "RETURNED" -> returned(row);
-                case "UNKNOWN","PROCESSING","REQUIRES_ACTION" -> {
-                    if(!hasCapture(intent) && !Set.of("FAILED","RETURNED","REFUNDED").contains(text(row,"status"))) {
-                        db.update("UPDATE billing.intents SET status=? WHERE id=?",result.state(),intent);
-                        db.event(intent,result.state(),"Payment awaits a definitive provider outcome");
-                    }
-                }
-                default -> throw BillingProblem.invalid("Unsupported provider result");
-            }
-            // Only the lease owner returns the lease; a superseded worker leaves the current owner's lease alone.
-            if(owner) db.update("UPDATE billing.intents SET lease_token=NULL,lease_until=NULL,next_recovery_at=NOW()+INTERVAL '30 seconds',updated_at=NOW() WHERE id=?",intent);
-            else db.update("UPDATE billing.intents SET updated_at=NOW() WHERE id=?",intent);
-            db.update("UPDATE billing.attempts SET status=(SELECT status FROM billing.intents WHERE id=?),updated_at=NOW() WHERE intent_id=?",intent,intent);
-            // Evidence that ends the uncertainty also closes the stuck-payment cases it explains.
-            String current=text(db.one("SELECT status FROM billing.intents WHERE id=?",intent),"status");
-            if(!Set.of("UNKNOWN","SUBMITTING").contains(current))
-                db.resolveCases(intent.toString(),"PAYMENT_UNRESOLVED","PAYMENT_REPLAY_UNSAFE","system","PROVIDER_EVIDENCE","AUTO_RESOLVED",
-                    "Provider evidence recorded payment status "+current);
-            return null;
-        });
+        BillingExecutionBudget.requireTime();commands.recordResult(intent,fence,result);
     }
     /**
      * Fences out submission and recovery while a release asks the provider to prove there is no payment.
      * Refused while one of them is talking to the provider. Returns what the provider check needs.
      */
-    Map<String,Object> leaseForRelease(UUID intent,UUID token) {
-        locked(intent);
-        if(db.update("UPDATE billing.intents SET lease_token=?,lease_until=NOW()+INTERVAL '120 seconds',next_recovery_at=NOW()+INTERVAL '120 seconds' WHERE id=? AND (lease_until IS NULL OR lease_until<NOW())",token,intent)==0)
-            throw BillingProblem.conflict("Recovery is checking this payment with the provider right now. Try the release again in two minutes");
-        return db.one("""
-            SELECT i.id AS intent_id,i.amount_minor,i.currency,i.method,i.provider_id,i.created_at,i.lease_until,a.original_request,a.request_version,a.created_at AS prepared_at
-            FROM billing.intents i LEFT JOIN billing.attempts a ON a.intent_id=i.id WHERE i.id=?
-            """,intent);
-    }
+    Map<String,Object> leaseForRelease(UUID intent,UUID token) {return locks.leaseForRelease(intent,token);}
     /** The exact request that was saved before the first provider call, or, for legacy attempts, its identity. */
     ProviderCommand savedCommand(Map<String,Object> claim) {
         if(claim.get("originalRequest")!=null) return ProviderCommand.fromJson(text(claim,"originalRequest"));
@@ -276,17 +175,7 @@ public class BillingService {
      * becomes unapplied cash with its own case, never another invoice's money.
      */
     void releaseUnresolved(UUID intent,UUID fence,String message) {
-        db.tx(() -> {
-            var row=locked(intent);
-            if(!fence.toString().equals(text(row,"leaseToken")))
-                throw BillingProblem.conflict("Another process took over this payment during the release check; nothing was released. Try again");
-            if(!Set.of("UNKNOWN","SUBMITTING").contains(text(row,"status")) || hasCapture(intent))
-                throw BillingProblem.conflict("This payment is no longer unresolved; refresh the case");
-            db.update("UPDATE billing.intents SET lease_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=?",intent);
-            fail(row,message);
-            db.update("UPDATE billing.attempts SET status='FAILED',updated_at=NOW() WHERE intent_id=?",intent);
-            return null;
-        });
+        BillingExecutionBudget.requireTime();commands.releaseUnresolved(intent,fence,message);
     }
     /**
      * Releases invoices held by intents the customer created but never submitted. Row locks make
@@ -294,81 +183,25 @@ public class BillingService {
      * other sees the new status. No provider operation exists for a CREATED intent.
      */
     public int expireUnsubmitted(int ttlMinutes,int limit) {
-        if(ttlMinutes<5) throw new IllegalArgumentException("Unsubmitted intents must stay payable for at least five minutes");
-        return db.tx(() -> {
-            var due=db.rows("""
-                SELECT id FROM billing.intents WHERE status='CREATED' AND created_at<NOW()-(? * INTERVAL '1 minute')
-                ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT ?
-                """,ttlMinutes,Math.max(1,Math.min(limit,50)));
-            for(var item:due) {
-                UUID intent=id(item.get("id"));
-                for(var allocation:lockInvoices(intent)) if("RESERVED".equals(allocation.get("state")))
-                    db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor-?,version=version+1 WHERE id=?",amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
-                db.update("UPDATE billing.allocations SET state='RELEASED' WHERE intent_id=? AND state='RESERVED'",intent);
-                db.update("UPDATE billing.intents SET status='CANCELLED',updated_at=NOW() WHERE id=?",intent);
-                db.event(intent,"EXPIRED","Unsubmitted payment expired after "+ttlMinutes+" minutes; invoice reservations released; no provider operation was issued");
-            }
-            return due.size();
-        });
+        BillingExecutionBudget.requireTime();return commands.expireUnsubmitted(ttlMinutes,limit);
     }
-    private void capture(Map<String,Object> intent) {
-        UUID id=id(intent.get("id")); if(hasCapture(id)) return;
-        var allocations=lockInvoices(id);
-        boolean reserved=!allocations.isEmpty() && allocations.stream().mapToLong(a->amount(a,"amountMinor")).sum()==amount(intent,"amountMinor")
-            && allocations.stream().allMatch(a -> "RESERVED".equals(a.get("state")));
-        if(reserved) {
-            for(var allocation:allocations) db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor-?,paid_minor=paid_minor+?,version=version+1 WHERE id=?",
-                amount(allocation,"amountMinor"),amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
-            db.update("UPDATE billing.allocations SET state='POSTED' WHERE intent_id=?",id);
-        } else {
-            for(var allocation:allocations) if("RESERVED".equals(allocation.get("state")))
-                db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor-?,version=version+1 WHERE id=?",amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
-            db.update("UPDATE billing.allocations SET state='RELEASED' WHERE intent_id=? AND state='RESERVED'",id);
-            db.caseFor(id,"LATE_CAPTURE_UNAPPLIED",id.toString());
-        }
-        db.journal(intent,"capture:"+id,"PROVIDER_CLEARING",reserved?"CUSTOMER_RECEIVABLES":"UNAPPLIED_CASH",amount(intent,"amountMinor"));
-        db.update("UPDATE billing.intents SET status='CAPTURED' WHERE id=?",id);
-        db.event(id,"CAPTURED",reserved?"Capture confirmed and receipt allocated; bank settlement is separate":"Late capture recorded as unapplied cash for finance review");
-        db.publish(intent,"PAYMENT_CAPTURED");
-    }
-    private void fail(Map<String,Object> intent,String message) {
-        UUID id=id(intent.get("id")); if(hasCapture(id) || "FAILED".equals(intent.get("status"))) return;
-        for(var allocation:lockInvoices(id)) if("RESERVED".equals(allocation.get("state")))
-            db.update("UPDATE billing.invoices SET reserved_minor=reserved_minor-?,version=version+1 WHERE id=?",amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
-        db.update("UPDATE billing.allocations SET state='RELEASED' WHERE intent_id=? AND state='RESERVED'",id);
-        db.update("UPDATE billing.intents SET status='FAILED' WHERE id=?",id);
-        db.event(id,"FAILED",message); db.publish(intent,"PAYMENT_FAILED");
-    }
-    private void returned(Map<String,Object> intent) {
-        UUID id=id(intent.get("id"));
-        if(!"ACH".equals(intent.get("method"))) {db.escalate(id,null,"DISPUTE_REQUIRES_REVIEW",id.toString(),"New dispute evidence arrived for this card payment"); return;}
-        if(!hasCapture(id)) throw BillingProblem.conflict("A return cannot precede recorded payment evidence");
-        if(db.exists("SELECT 1 FROM billing.journals WHERE effect_key=?","return:"+id)) return;
-        boolean allocated=false;
-        for(var allocation:lockInvoices(id)) if("POSTED".equals(allocation.get("state"))) {
-            allocated=true;
-            db.update("UPDATE billing.invoices SET paid_minor=paid_minor-?,version=version+1 WHERE id=?",amount(allocation,"amountMinor"),id(allocation.get("invoiceId")));
-        }
-        db.update("UPDATE billing.allocations SET state='REVERSED',reversed_minor=amount_minor WHERE intent_id=? AND state='POSTED'",id);
-        db.journal(intent,"return:"+id,allocated?"CUSTOMER_RECEIVABLES":"UNAPPLIED_CASH","PROVIDER_CLEARING",amount(intent,"amountMinor"));
-        db.update("UPDATE billing.intents SET status='RETURNED' WHERE id=?",id);
-        db.event(id,"RETURNED","ACH return recorded; prior receipt retained and invoice balances reopened");
-        db.caseFor(id,"ACH_RETURN",id.toString()); db.publish(intent,"PAYMENT_RETURNED");
-    }
-    List<Map<String,Object>> lockInvoices(UUID intent) {
-        return db.rows("SELECT a.* FROM billing.allocations a JOIN billing.invoices v ON v.id=a.invoice_id WHERE a.intent_id=? ORDER BY v.id FOR UPDATE OF v,a",intent);
-    }
+
+    List<Map<String,Object>> lockInvoices(UUID intent) {return locks.lockInvoices(intent);}
     public boolean hasCapture(UUID intent) { return db.exists("SELECT 1 FROM billing.journals WHERE effect_key=?","capture:"+intent); }
     void requireProvider(Map<String,Object> payment) {
         if(!provider.name().equals(payment.get("provider"))) throw BillingProblem.conflict("The original payment provider must be restored before this operation can continue");
     }
     public Map<String,Object> raw(UUID intent) { return db.one("SELECT * FROM billing.intents WHERE id=?",intent); }
-    Map<String,Object> locked(UUID intent) { return db.one("SELECT * FROM billing.intents WHERE id=? FOR UPDATE",intent); }
+    Map<String,Object> locked(UUID intent) {return locks.locked(intent);}
     Map<String,Object> view(Map<String,Object> row) {
         UUID intent=id(row.get("id"));
         Map<String,Object> result=new LinkedHashMap<>();
         for(String key:List.of("id","accountId","amountMinor","currency","method","status","provider","checkoutUrl","createdAt","updatedAt","refundedMinor","paymentReference","retryOf")) result.put(key,row.get(key));
         result.put("simulatorEnabled",simulator && "SIMULATOR".equals(row.get("provider")));
+        if(provider instanceof RazorpayBillingProvider razorpay && "RAZORPAY".equals(row.get("provider"))
+                && text(row,"providerId")!=null && "REQUIRES_ACTION".equals(row.get("status")))
+            result.put("checkout",Map.of("provider","RAZORPAY","keyId",razorpay.publicKeyId(),"orderId",text(row,"providerId"),
+                "amountMinor",amount(row,"amountMinor"),"currency",text(row,"currency")));
         result.put("message",switch(text(row,"status")) {
             case "CAPTURED" -> "Payment captured. Bank settlement is tracked separately.";
             case "UNKNOWN","SUBMITTING" -> "Payment outcome is uncertain. Refresh this operation; do not start another payment.";

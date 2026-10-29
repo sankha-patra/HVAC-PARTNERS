@@ -55,12 +55,12 @@ class BillingPaymentRetryDatabaseTest {
 
     @BeforeEach void cleanAndSeedDedicatedDatabase() {
         jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");
-        db = new BillingStore(jdbc, transactions);
-        provider = new SimulatorBillingProvider(jdbc, transactions);
-        payments = new BillingService(db, provider, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());
-        var refunds = new BillingRefundService(db, payments, provider);
-        recovery = new BillingRecovery(db, payments, refunds, provider);
-        retries = new BillingPaymentRetry(db, payments);
+        db = new BillingStore(jdbc);
+        provider = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions);
+        payments = BillingTestWiring.payments(db, provider, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());
+        var refunds = BillingTestWiring.refunds(db, payments, provider);
+        recovery = BillingTestWiring.recovery(db, payments, refunds, provider);
+        retries = BillingTestWiring.retry(db, payments);
         db.update("INSERT INTO billing.merchants(id,name) VALUES(?,'Merchant one'),(?,'Merchant other')", MERCHANT, OTHER_MERCHANT);
         account(ACCOUNT, MERCHANT, "customer-one"); account(SECOND_ACCOUNT, MERCHANT, "customer-two");
         account(OTHER_ACCOUNT, OTHER_MERCHANT, "customer-other");
@@ -236,8 +236,8 @@ class BillingPaymentRetryDatabaseTest {
     @Test void retryReplayStillRequiresTheConfiguredMerchantsPayer() {
         UUID foreignInvoice=UUID.randomUUID();
         invoice(foreignInvoice,OTHER_ACCOUNT,10000);
-        var otherPayments=new BillingService(db,provider,new MockEnvironment(),true,"http://localhost:4200",OTHER_MERCHANT.toString());
-        var otherRetries=new BillingPaymentRetry(db,otherPayments);
+        var otherPayments=BillingTestWiring.payments(db,provider,new MockEnvironment(),true,"http://localhost:4200",OTHER_MERCHANT.toString());
+        var otherRetries=BillingTestWiring.retry(db,otherPayments);
         UUID first=id(otherPayments.create(OTHER_PAYER,OTHER_ACCOUNT,key(),List.of(foreignInvoice),"CARD").get("id"));
         otherPayments.submit(OTHER_PAYER,first);
         otherPayments.simulate(OTHER_PAYER,first,"FAILED");

@@ -1,0 +1,71 @@
+# Apply after both billing and workers files. Bootstrap blocks customer entry until CDC is ready.
+services:
+  kafka-cdc-topics:
+    image: apache/kafka:3.9.1
+    mem_limit: 192m
+    entrypoint: [bash, -ec]
+    command:
+      - |
+        export KAFKA_HEAP_OPTS='-Xms32m -Xmx64m'
+        for topic in billing.events.v1 billing.events.v1.DLT __debezium-heartbeat.billing_cdc; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic "$$topic" --partitions 6 --replication-factor 3 --config min.insync.replicas=2
+        done
+    depends_on:
+      kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+  postgres:
+    command: [postgres, -c, wal_level=logical, -c, max_replication_slots=4, -c, max_wal_senders=4, -c, max_slot_wal_keep_size=1024MB]
+  debezium:
+    image: quay.io/debezium/connect:3.6.3.Final@sha256:bb86eca40edbd3b9aaf52b60115f4d01abdc3f86d8f058c2022a8400ea07a275
+    mem_limit: 768m
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      GROUP_ID: billing-outbox-connect
+      CONFIG_STORAGE_TOPIC: billing-connect-config
+      OFFSET_STORAGE_TOPIC: billing-connect-offsets
+      STATUS_STORAGE_TOPIC: billing-connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 3
+      OFFSET_STORAGE_REPLICATION_FACTOR: 3
+      STATUS_STORAGE_REPLICATION_FACTOR: 3
+      OFFSET_FLUSH_INTERVAL_MS: 10000
+      REST_ADVERTISED_HOST_NAME: debezium
+      CONNECT_PLUGIN_PATH: /kafka/connect
+      KAFKA_HEAP_OPTS: -Xms128m -Xmx384m
+    depends_on:
+      kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, curl -fsS http://localhost:8083/connectors >/dev/null]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+  cdc-bootstrap:
+    build:
+      context: ./infra/cdc
+      dockerfile: Dockerfile.bootstrap
+    mem_limit: 128m
+    environment:
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGDATABASE: invoice_payments
+      PGUSER: invoice_local
+      PGPASSWORD: ${BILLING_DB_PASSWORD:?Set local database password}
+      BILLING_CDC_CONNECT_URL: http://debezium:8083
+    depends_on:
+      kafka-cdc-topics: {condition: service_completed_successfully}
+      billing-service: {condition: service_healthy}
+      debezium: {condition: service_healthy}
+    restart: 'no'
+  billing-worker:
+    environment:
+      BILLING_OUTBOX_PUBLISHER_ENABLED: 'false'
+      BILLING_REQUIRED_RELAY_MODE: CDC
+    depends_on:
+      cdc-bootstrap: {condition: service_completed_successfully}
+  api-gateway:
+    depends_on:
+      cdc-bootstrap: {condition: service_completed_successfully}

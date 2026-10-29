@@ -14,7 +14,7 @@ public class BillingRequestLimit {
     @Bean FilterRegistrationBean<OncePerRequestFilter> billingBodyLimit() {
         OncePerRequestFilter filter=new OncePerRequestFilter() {
             @Override protected boolean shouldNotFilter(HttpServletRequest request) {
-                return !request.getRequestURI().startsWith("/api/v1/billing/") || java.util.Set.of("GET","HEAD","OPTIONS").contains(request.getMethod());
+                return !(request.getRequestURI().startsWith("/api/v1/billing/") || request.getRequestURI().startsWith("/api/v1/commerce/")) || java.util.Set.of("GET","HEAD","OPTIONS").contains(request.getMethod());
             }
             @Override protected void doFilterInternal(HttpServletRequest request,HttpServletResponse response,FilterChain chain) throws IOException,ServletException {
                 if(request.getContentLengthLong()>262144) {response.sendError(413,"Request too large");return;}

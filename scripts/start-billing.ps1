@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$ValidateOnly)
+param([switch]$ValidateOnly,[switch]$DedicatedWorkers,[switch]$Cdc)
 $ErrorActionPreference='Stop'
 $projectRoot=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $settings=Join-Path $projectRoot '.env.billing.local'
@@ -20,6 +20,8 @@ if(!(Test-Path -LiteralPath $settings)) {
     Write-Host 'Created ignored local billing secrets. Values are not printed.'
 }
 $compose=@('compose','--project-name','invoice-payments','--env-file',$settings,'-f',(Join-Path $projectRoot 'docker-compose.billing.yml'))
+if($DedicatedWorkers -or $Cdc){$compose+=@('-f',(Join-Path $projectRoot 'docker-compose.workers.yml'))}
+if($Cdc){$compose+=@('-f',(Join-Path $projectRoot 'docker-compose.cdc.yml'))}
 & docker @compose config --quiet
 if($LASTEXITCODE -ne 0) {throw 'Billing Compose configuration is invalid'}
 if($ValidateOnly) {Write-Host 'Billing configuration is valid. No containers started.';return}
@@ -30,3 +32,4 @@ if($LASTEXITCODE -ne 0) {throw 'Billing stack startup failed; inspect the Compos
 Write-Host 'Invoice payments: http://localhost:4400 | Grafana: http://localhost:3200'
 Write-Host 'Local users: demo/demo123, other/other123, admin/admin123 (Carrier finance), reviewer/reviewer123 (Carrier approver), support/support123 (application team).'
 Write-Host 'These explicitly enabled demo identities never run under the prod profile.'
+

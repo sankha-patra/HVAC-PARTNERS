@@ -8,7 +8,7 @@ import org.springframework.context.annotation.*;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /** Invoice collection and financial operations service. */
-@SpringBootApplication(exclude=UserDetailsServiceAutoConfiguration.class)
+@SpringBootApplication(scanBasePackages={"com.invoicepayments.billing","com.invoicepayments.commerce"},exclude=UserDetailsServiceAutoConfiguration.class)
 @Import({JwtService.class,LocalMonitoringSecurityConfig.class})
 @Profile("billing")
 @EnableScheduling

@@ -52,12 +52,13 @@ class SimulatorBillingProviderDatabaseTest {
     }
 
     @BeforeEach void uniqueFixture() {
-        provider = new SimulatorBillingProvider(jdbc, transactions);
+        provider = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions);
         intentId = UUID.randomUUID().toString();
         key = "provider-test:" + intentId;
     }
 
     @AfterEach void deleteOnlyThisTestOperation() {
+        com.invoicepayments.billing.BillingTestWiring.closeContexts();
         jdbc.update("DELETE FROM billing.provider_operations WHERE intent_id=?::uuid", intentId);
     }
 
@@ -66,7 +67,7 @@ class SimulatorBillingProviderDatabaseTest {
         assertThat(results).hasSize(8).allMatch(r -> r.state().equals("PROCESSING"));
         assertThat(results.stream().map(ProviderResult::providerId).distinct()).hasSize(1);
         assertThat(jdbc.queryForObject("SELECT count(*) FROM billing.provider_operations WHERE intent_id=?::uuid", Long.class, intentId)).isEqualTo(1L);
-        var restarted = new SimulatorBillingProvider(jdbc, transactions);
+        var restarted = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions);
         assertThat(restarted.lookup(key, results.get(0).providerId())).isEqualTo(results.get(0));
     }
 
@@ -84,14 +85,14 @@ class SimulatorBillingProviderDatabaseTest {
             tx.setRollbackOnly();
             return null;
         });
-        assertThat(new SimulatorBillingProvider(jdbc, transactions).lookup(key, null).state()).isEqualTo("PROCESSING");
+        assertThat(com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions).lookup(key, null).state()).isEqualTo("PROCESSING");
     }
 
     @Test void timeoutAfterAcceptancePersistsCaptureBeforeThrowingAndRestartRecovers() {
         ProviderResult submitted = provider.submit(command("CARD"));
         assertThatThrownBy(() -> new TransactionTemplate(transactions).execute(tx ->
                 provider.simulateResult(intentId, "TIMEOUT_AFTER_ACCEPT"))).isInstanceOf(ProviderUncertainException.class);
-        ProviderResult recovered = new SimulatorBillingProvider(jdbc, transactions).lookup(key, submitted.providerId());
+        ProviderResult recovered = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions).lookup(key, submitted.providerId());
         assertThat(recovered.state()).isEqualTo("CAPTURED");
         assertThat(provider.submit(command("CARD")).providerId()).isEqualTo(submitted.providerId());
         assertThat(provider.submit(command("CARD")).state()).isEqualTo("CAPTURED");
@@ -109,7 +110,7 @@ class SimulatorBillingProviderDatabaseTest {
         provider.submit(command("ACH"));
         provider.simulateResult(intentId, "CAPTURED");
         provider.simulateResult(intentId, "RETURNED");
-        assertThat(new SimulatorBillingProvider(jdbc, transactions).lookup(key, null).state()).isEqualTo("RETURNED");
+        assertThat(com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions).lookup(key, null).state()).isEqualTo("RETURNED");
         assertThat(provider.submit(command("ACH")).state()).isEqualTo("RETURNED");
         assertThatThrownBy(() -> provider.simulateResult(intentId, "CAPTURED")).isInstanceOf(IllegalArgumentException.class);
     }
@@ -121,7 +122,7 @@ class SimulatorBillingProviderDatabaseTest {
         RefundCommand command = new RefundCommand(refundId, intentId, payment.providerId(), refundKey, 500, "USD");
         ProviderResult result = provider.refund(command);
         assertThat(result.state()).isEqualTo("REFUNDED");
-        var restarted = new SimulatorBillingProvider(jdbc, transactions);
+        var restarted = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions);
         assertThat(restarted.refund(command)).isEqualTo(result);
         assertThat(restarted.lookupRefund(refundKey, result.providerId())).isEqualTo(result);
         assertThatThrownBy(() -> provider.refund(new RefundCommand(refundId, intentId, payment.providerId(), refundKey, 501, "USD")))

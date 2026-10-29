@@ -1,0 +1,58 @@
+<section class="shop">
+  <header class="shop-header">
+    <div><p class="eyebrow">Parts & supplies</p><h1>{{ ordersView() ? 'My orders' : selected() ? 'Complete your order' : 'Shop parts & supplies' }}</h1><p>{{ ordersView() ? 'View your purchases, payments and refunds.' : 'Find essentials for your next job.' }}</p></div>
+    @if (accounts().length > 1) { <label>Shopping for<select aria-label="Buying company" [disabled]="busy()" [ngModel]="account()" (ngModelChange)="selectAccount($event)">
+      @for (company of accounts(); track company.id) { <option [value]="company.id">{{ company.name }}</option> }
+    </select></label> }
+  </header>
+  <p class="demo-note">Demo store · Sample products and test prices.</p>
+  @if (!accountsLoaded()) { <p role="status">Loading your shop…</p> }
+  @if (accountsLoaded() && !accounts().length && !error()) { <p class="notice">No purchasing company is available for this login.</p> }
+  @if (error()) { <p class="error" role="alert">{{ error() }}</p> }
+  @if (notice()) { <p class="notice" role="status">{{ notice() }}</p> }
+  @if (pending()) { <div class="notice"><strong>We're checking your order.</strong><p>Please check its status before placing another order.</p><button [disabled]="busy()" (click)="placeOrder()">Check order status</button></div> }
+  @if (!ordersView() && !selected()) {
+  <div class="shop-grid">
+    <section aria-label="Products"><h2>Products</h2><div class="products">
+      @for (product of products(); track product.id) {
+        <article class="product"><span class="category">{{ product.category }}</span><h3>{{ product.name }}</h3><p class="sku">Part no. {{ product.sku }}</p>
+          <p class="price">{{ product.unitPriceMinor / 100 | currency:currency() }}</p><p class="stock" [class.out-of-stock]="product.availableQty === 0">{{ product.availableQty > 0 ? 'In stock' : 'Out of stock' }}</p>
+          @if (count(product.id) === 0) { <button class="add-button" [disabled]="!canEdit() || product.availableQty === 0" (click)="changeQuantity(product.id, 1)">Add to basket</button> }
+          @else { <div class="quantity"><button [attr.aria-label]="'Remove one ' + product.name" [disabled]="!canEdit()" (click)="changeQuantity(product.id, count(product.id)-1)">−</button><span aria-live="polite">{{ count(product.id) }} in basket</span><button [attr.aria-label]="'Add one ' + product.name" [disabled]="!canEdit() || count(product.id) >= product.availableQty || count(product.id) >= 100" (click)="changeQuantity(product.id, count(product.id)+1)">+</button></div> }
+        </article>
+      }
+    </div></section>
+    <aside class="basket"><h2>Your basket <span class="count">{{ quantity() }}</span></h2>
+      @for (line of cart().lines; track line.productId) { <div class="basket-line"><p><span>{{ productName(line.productId) }}</span> <strong>× {{ line.quantity }}</strong></p><button class="text-button" [disabled]="!canEdit()" [attr.aria-label]="'Remove ' + productName(line.productId)" (click)="changeQuantity(line.productId, 0)">Remove</button></div> }
+      @if (!quantity()) { <p>Add products to start an order.</p> }
+      @if (!quote()) { <button class="primary" [disabled]="!canEdit() || !quantity()" (click)="review()">Review order</button> }
+      @if (quote(); as quote) {
+        <div class="quote"><h3>Order summary</h3>@for (line of quote.lines; track line.productId) { <p>{{ line.description }} × {{ line.quantity }}<strong>{{ line.lineTotalMinor / 100 | currency:quote.currency }}</strong></p> }
+          <p class="total">Total <strong>{{ quote.totalMinor / 100 | currency:quote.currency }}</strong></p><p class="muted">Payment is completed in the next step.</p>
+          <button class="primary" [disabled]="busy() || !!pending()" (click)="placeOrder()">Continue to payment</button>
+        </div>
+      }
+    </aside>
+  </div>
+  }
+  @if (ordersView()) {
+  <section class="order-area" id="orders" aria-label="Your orders"><div class="order-list">
+    @for (order of orders(); track order.id) { <button class="order-card" [disabled]="busy()" [class.selected]="selected()?.id === order.id" (click)="openOrder(order)"><span>{{ orderLabel(order) }}</span><strong>{{ order.totalMinor / 100 | currency:order.currency }}</strong><span class="status">{{ statusLabel(order) }}</span><span class="view-order">View order →</span></button> }
+    @empty { @if (ordersLoaded()) { <div class="empty-state"><h2>No orders yet</h2><p>Your purchases will appear here.</p><a class="link-button" routerLink="/shop">Browse products</a></div> } @else if (!error() && accounts().length) { <p role="status">Loading your orders…</p> } }
+  </div></section>
+  }
+  @if (selected(); as order) { <article class="order-detail" aria-label="Order details"><div class="order-title"><div><p class="eyebrow">{{ statusLabel(order) }}</p><h2>{{ orderLabel(order) }}</h2></div><strong>{{ order.totalMinor / 100 | currency:order.currency }}</strong></div>
+    <p class="order-status" role="status">{{ explanation(order) }}</p>
+    @for (line of order.lines; track line.productId) { <p class="order-line"><span>{{ line.description }} <span class="muted">× {{ line.quantity }}</span></span><strong>{{ line.lineTotalMinor / 100 | currency:order.currency }}</strong></p> }
+    @if ((order.paymentSummary?.refundedMinor ?? 0) > 0) { <p class="order-line"><span>Refund issued</span><strong>{{ order.paymentSummary!.refundedMinor / 100 | currency:order.paymentSummary!.currency }}</strong></p> }
+    @if (order.status === 'NEEDS_REVIEW' && (order.paymentSummary?.refundedMinor ?? 0) > 0) { <p class="muted">The store is reviewing the remaining order arrangements.</p> }
+    <div class="actions">
+      @if (canPay(order)) { <button class="primary" (click)="pay()">{{ order.payment.status === 'REQUIRES_ACTION' ? 'Continue payment' : 'Pay ' + (order.totalMinor / 100 | currency:order.currency) }}</button> }
+      @if (!paymentReceived(order) && order.status === 'PAYMENT_PENDING' && order.payment?.status === 'FAILED') { <button class="primary" [disabled]="busy()" (click)="retry()">Try payment again</button> }
+      <button [disabled]="checking() || busy()" (click)="refreshOrder()">{{ checking() ? 'Updating…' : 'Refresh status' }}</button>
+      @if (!paymentReceived(order) && order.status === 'PAYMENT_PENDING' && order.payment?.status === 'CREATED') { <button class="subtle" [disabled]="busy()" (click)="cancel()">Cancel order</button> }
+    </div>
+    @if (!paymentReceived(order) && order.payment?.simulatorEnabled && order.status === 'PAYMENT_PENDING' && (order.payment?.status === 'REQUIRES_ACTION' || order.payment?.status === 'PROCESSING')) { <details class="test-controls"><summary>Test payment controls</summary><p>This local demonstration does not charge a card.</p><button [disabled]="busy()" (click)="simulate()">Complete test payment</button></details> }
+    @if (!ordersView()) { <div class="order-links"><button class="text-button" [disabled]="busy()" (click)="backToShop()">Continue shopping</button><a routerLink="/orders">View my orders</a></div> }
+  </article> }
+</section>

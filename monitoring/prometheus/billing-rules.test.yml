@@ -54,7 +54,7 @@ tests:
           - exp_labels: {severity: warning, responder: app-team, decision: none, environment: local}
             exp_annotations:
               summary: Committed billing events are not reaching Kafka promptly
-              description: 'Check Kafka availability and publisher retries. Retain the outbox; duplicate delivery is safe for idempotent consumers.'
+              description: 'Check Kafka, the selected relay and CDC receipt consumers. Retain the outbox; duplicate delivery is safe for idempotent consumers.'
   - name: open-dead-letter-is-visible-after-grace
     interval: 1m
     input_series:
@@ -285,3 +285,4 @@ tests:
             exp_annotations:
               summary: A dispute or inquiry response is due within 48 hours
               description: "Carrier finance must respond in Carrier's Stripe Dashboard before the deadline shown in the finance workspace. An inquiry takes no money yet but can become a chargeback; an unanswered dispute is lost."
+

@@ -90,7 +90,7 @@ class BillingKafkaIntegrationTest {
         jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");
         store = new FaultingAuditStore(jdbc, new DataSourceTransactionManager(source));
         store.update("INSERT INTO billing.merchants(id,name) VALUES(?,'Kafka integration merchant')", MERCHANT);
-        events = new BillingEvents(store, MERCHANT.toString());
+        events = BillingTestWiring.events(store, MERCHANT.toString());
 
         broker = new EmbeddedKafkaKraftBroker(brokerCount, PARTITIONS);
         broker.adminTimeout(40);
@@ -134,7 +134,7 @@ class BillingKafkaIntegrationTest {
         beans.registerSingleton("integrationKafka", producer);
         @SuppressWarnings({"unchecked", "rawtypes"})
         ObjectProvider<KafkaTemplate<String, byte[]>> kafka = (ObjectProvider) beans.getBeanProvider(KafkaTemplate.class);
-        workers = new BillingWorkers(store, null, null, kafka); // Only the real outbox path is invoked.
+        workers = BillingTestWiring.workers(store, null, null, kafka); // Only the real outbox path is invoked.
         audit.start();
         erp.start();
         ContainerTestUtils.waitForAssignment(audit, PARTITIONS);
@@ -187,8 +187,8 @@ class BillingKafkaIntegrationTest {
         store.update("INSERT INTO billing.accounts(id,merchant_id,name,external_reference) VALUES(?,?,'Transport account',?)", account, MERCHANT, account.toString());
         store.update("INSERT INTO billing.memberships(account_id,user_id,role) VALUES(?,?,'PAYER')", account, payer);
         store.update("INSERT INTO billing.invoices(id,account_id,number,currency,total_minor,due_date) VALUES(?,?,'TRANSPORT-1','USD',12345,CURRENT_DATE)", invoice, account);
-        var adapter = new SimulatorBillingProvider(jdbc, new DataSourceTransactionManager(jdbc.getDataSource()));
-        var payments = new BillingService(store, adapter, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());
+        var adapter = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, new DataSourceTransactionManager(jdbc.getDataSource()));
+        var payments = BillingTestWiring.payments(store, adapter, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());
         UUID intent = id(payments.create(payer, account, UUID.randomUUID().toString(), List.of(invoice), "CARD").get("id"));
         payments.submit(payer, intent);
         payments.simulate(payer, intent, "CAPTURED");
@@ -270,12 +270,12 @@ class BillingKafkaIntegrationTest {
         return Objects.requireNonNull(jdbc.queryForObject(query, Long.class, args));
     }
 
-    private static final class FaultingAuditStore extends BillingStore {
+    static class FaultingAuditStore extends BillingStore {
         final AtomicBoolean failAudit = new AtomicBoolean();
         final AtomicInteger failedAuditAttempts = new AtomicInteger();
         volatile String blockedKey;
 
-        FaultingAuditStore(JdbcTemplate jdbc, DataSourceTransactionManager manager) { super(jdbc, manager); }
+        FaultingAuditStore(JdbcTemplate jdbc, DataSourceTransactionManager manager) { super(jdbc); }
 
         @Override public int update(String sql, Object... args) {
             if (failAudit.get() && sql.startsWith("INSERT INTO billing.dead_letters")

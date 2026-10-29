@@ -1,34 +1,53 @@
-# One payment flow with real Spring transaction proxies
+# Production Spring transaction boundaries and verification
 
-This proof runs the real payment service against an isolated PostgreSQL database. It uses a separate Spring bean with `@Transactional(propagation = REQUIRED, rollbackFor = Exception.class)` for the write steps.
+Updated 25 October 2026. The earlier hybrid one-flow proof is superseded: production billing now uses named
+`@Transactional` commands. There is no production `TransactionTemplate` reference or `BillingStore.tx` API.
+All 51 former transaction sites are extracted, and the simulator's 4 independent write units use separate proxies.
 
-Production payment orchestration still uses `TransactionTemplate`. The proof keeps its bounded outer transaction, so an annotated write method joins the same physical transaction and keeps the existing request deadline and PostgreSQL limits. A wider conversion has not been made.
+## Actual boundaries
 
-## The boundaries
+Unannotated payment/refund/recovery/publisher flows reject an ambient transaction or synchronization scope.
+They invoke injected public, non-final command beans through Spring's proxies. Commands use
+`@Transactional(transactionManager="transactionManager", propagation=REQUIRED, rollbackFor=Exception.class,
+timeout=10, label="billing")`. Shared financial/audit/event and lock participants use MANDATORY plus an actual
+transaction assertion. Reads do not create synchronization scopes.
 
-1. Start a short transaction with the remaining request time.
-2. Call the annotated write bean through its Spring proxy.
-3. Save the original command, key and lease, then commit.
-4. Call Stripe outside a transaction, with no database connection borrowed.
-5. Start another short transaction and record the result through the proxy.
-6. Commit the financial changes, event and outbox record together.
+Preparation commits before Stripe or Kafka I/O. Recording starts a separate transaction. When a recorder is
+called by inbox or case processing it joins that transaction, keeping money, case/inbox state and outbox atomic.
+Private helpers participate in the already active unit; they do not claim independently advised boundaries.
 
-The orchestrator retains `requireNoTransaction()`. Adding `NEVER` to it is not an equivalent replacement: Spring synchronization also matters to connection release.
+`BillingDeadlineTransactionManager` retains the remaining request/lease budget and PostgreSQL local limits only
+for billing-labelled definitions, with Boot customizers preserved. Setup statements have a query timeout before
+Spring installs its holder deadline. Setup failures roll back and return a clean connection. The flow owns an
+admission permit through the entire proxy invocation, including a commit failure after the method body returns.
 
-## What the five tests establish
+The simulator's separate `SimulatorOperationStore` uses unlabelled REQUIRES_NEW/timeout10 units. Its accepted
+operation commits before a simulated lost reply is thrown, so caller rollback cannot undo external state.
 
-| Check | Evidence |
-|---|---|
-| Advice really runs | The separate bean is a real Spring proxy and starts a transaction when called by itself. |
-| Checked exceptions roll back | A checked failure after an invoice write leaves the original version unchanged. |
-| Preparation commits before Stripe | A separate connection sees the saved attempt during the provider call; the Hikari pool has zero borrowed connections. Preparation and recording use different transaction IDs. |
-| Recording is atomic | A failure after capture effects rolls back the journal, outbox, allocation and payment changes. Later reconciliation records the capture once. |
-| Existing limits survive | A short request budget shortens the physical transaction deadline and the PostgreSQL statement/lock settings. |
+## Final evidence
 
-Tests: `BillingTransactionalProofDatabaseTest`. This is a compatibility proof for one flow, not evidence that changing an annotation alone improves throughput or replaces provider recovery.
+One clean Maven verify passed **485 tests in 31 classes**, zero failures/errors/skips, and packaged all 3 Java apps.
+All 155 compiled source/build inputs match the checkout, with no missing/extra inputs. All 33 UI source files match
+the earlier 80-test/build checkpoint, and all 22 migration inputs in the preserved manifest match byte-for-byte.
 
-## Why the outer bounded transaction remains
+| Dedicated checks | Count | Meaning |
+|---|---:|---|
+| BillingAnnotationHarnessDatabaseTest |8| Proxy ownership, physical joins, checked rollback, deadlines, local limits, begin-failure cleanup and unlabelled limits |
+| BillingTransactionalProofDatabaseTest |5| Actual production payment commands, committed preparation/connection release, atomic recording and commit-failure permit cleanup |
+| BillingInboxTransactionDatabaseTest / BillingCaseTransactionDatabaseTest |2/2| Separate receipt; joined financial, case and audit effects; failure bookkeeping after rollback |
+| BillingSimulatorTransactionDatabaseTest |1| Independent provider storage proxies |
+| BillingTransactionExtractionDatabaseTest |9| Refunds, recovery, outbox, reconciliation, retry and consumers |
+| BillingCommitAcknowledgmentDatabaseTest |2| Commit succeeds then acknowledgment is lost; persisted preparation/money must be re-read |
+| BillingProcessCrashDatabaseTest |1| Actual child JVM killed after fake Session creation; same-key recovery, then a separate paid-evidence race |
+| BillingTransactionPolicyTest |2| Effective attributes on production entries, proxyable methods, no flow/transport dependencies, no production template API |
 
-Spring `REQUIRED` joins an existing transaction. Its inner timeout does not replace the outer transaction's settings. A static annotation is also not the same thing as today's per-request remaining-time calculation. Keeping the current outer boundary makes those protections explicit while testing annotation-based write steps.
+These 32 checks are included in 485, not added to it. The process test distinguishes one fake Checkout Session from
+one local capture journal. It is not a live-provider or whole-machine power-loss guarantee. No throughput or
+fleet-capacity comparison is claimed. Eight permits remain per instance; a stalled-trial watchdog and recovery
+fairness need separate work. Missed events for terminal payments need the separately specified catch-up route.
 
-Sources: [Spring propagation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html), [Spring 6.1.1 Transactional attributes](https://docs.spring.io/spring-framework/docs/6.1.1/javadoc-api/org/springframework/transaction/annotation/Transactional.html).
+Durable logs, JUnit XML, input and artifact hashes: `.tmp-notes/annotation-migration-codex-final/`.
+The full results and historical baseline are recorded in [verification.md](verification.md).
+
+Framework sources: [Spring propagation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html),
+[Spring 6.1.1 annotation attributes](https://docs.spring.io/spring-framework/docs/6.1.1/javadoc-api/org/springframework/transaction/annotation/Transactional.html).

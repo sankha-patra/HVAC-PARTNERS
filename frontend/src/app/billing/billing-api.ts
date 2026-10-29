@@ -10,6 +10,7 @@ export interface Invoice {
   reservedMinor: number; status: string; dueDate: string;
 }
 export interface BillingIntent {
+  checkout?: { provider: 'RAZORPAY'; keyId: string; orderId: string; amountMinor: number; currency: string };
   id: string; accountId: string; currency: string; amountMinor: number; status: string;
   provider: string; simulatorEnabled?: boolean; checkoutUrl?: string; message?: string;
   method?: PaymentMethod;
@@ -48,9 +49,15 @@ export interface FinancePayment {
   provider?: string;
 }
 export interface FinanceRefund {
+  currency?: string;
   id: string; intentId: string; amountMinor: number; reason: string; requestedBy: string;
   approvedBy?: string; status: string; createdAt: string; canApprove?: boolean; canReject?: boolean;
   provider?: string;
+}
+export interface FinanceNotification {
+  id: string; merchantId: string; eventType: string; intentId: string; operationId: string;
+  state: 'PENDING' | 'IN_FLIGHT' | 'SENT' | 'REVIEW' | 'SUPPRESSED'; attempts: number;
+  createdAt: string; acceptedAt?: string; lastError?: string;
 }
 export interface FinanceMerchant { id: string; name: string; canImport: boolean; canConfirm: boolean; }
 export interface SettlementReport {
@@ -95,6 +102,7 @@ export class BillingApi {
     return this.http.post<BillingIntent>(`${this.base}/intents/${encodeURIComponent(id)}/simulate`, { outcome });
   }
   cases() { return this.http.get<FinanceCase[]>(`${this.base}/finance/cases`); }
+  notifications() { return this.http.get<FinanceNotification[]>(`${this.base}/finance/notifications`); }
   caseHistory(caseId: string) { return this.http.get<CaseAction[]>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/actions`); }
   verifyCaseReference(caseId: string, body: { reference: string; note: string }) {
     return this.http.post<FinanceCase>(`${this.base}/finance/cases/${encodeURIComponent(caseId)}/provider-reference`, body);

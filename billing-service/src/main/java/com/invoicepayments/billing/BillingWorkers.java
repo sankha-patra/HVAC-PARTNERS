@@ -11,72 +11,60 @@ import java.util.*;
 import java.util.concurrent.*;
 import static com.invoicepayments.billing.BillingStore.*;
 
+/** Background flows. Database work is in proxied commands; Kafka and provider I/O run with no transaction open. */
 @Component
 @Profile("billing")
 @ConditionalOnProperty(name="billing.workers-enabled",havingValue="true",matchIfMissing=true)
+@org.springframework.boot.autoconfigure.condition.ConditionalOnExpression("'${billing.role:combined}' != 'api'")
 public class BillingWorkers {
     private final BillingStore db; private final BillingRecovery recovery; private final BillingInbox inbox;
-    private final KafkaTemplate<String,byte[]> kafka;
+    private final KafkaTemplate<String,byte[]> kafka; private final BillingOutboxCommands outbox;
     private final ThreadPoolExecutor io=pool(4,4,"billing-recovery-");
     private final ThreadPoolExecutor publishers=pool(8,8,"billing-publisher-");
-    // Claims consume the budget, so repeated worker crashes cannot retry forever. A broker outage gives the
-    // claim back: the event is not at fault, so it waits (BillingOutboxNotDraining alerts) instead of being parked.
-    static final int MAX_OUTBOX_ATTEMPTS=50;
+    static final int MAX_OUTBOX_ATTEMPTS=BillingOutboxCommands.MAX_OUTBOX_ATTEMPTS;
     private boolean refundFirst;
-    public BillingWorkers(BillingStore db,BillingRecovery recovery,BillingInbox inbox,ObjectProvider<KafkaTemplate<String,byte[]>> kafka) {
-        this.db=db;this.recovery=recovery;this.inbox=inbox;this.kafka=kafka.getIfAvailable();
+    private volatile boolean stopping;
+    private BillingRuntimeSettings runtime=new BillingRuntimeSettings(new org.springframework.core.env.StandardEnvironment());
+    private long shutdownSeconds=60;
+    @org.springframework.beans.factory.annotation.Autowired
+    void configureRuntime(org.springframework.core.env.Environment env) {
+        runtime=new BillingRuntimeSettings(env);
+        shutdownSeconds=env.getProperty("billing.worker-shutdown-seconds",Long.class,60L);
+        if(shutdownSeconds<1||shutdownSeconds>90)throw new IllegalArgumentException("Worker drain must be between 1 and 90 seconds");
+    }
+    public BillingWorkers(BillingStore db,BillingRecovery recovery,BillingInbox inbox,ObjectProvider<KafkaTemplate<String,byte[]>> kafka,BillingOutboxCommands outbox) {
+        this.db=db;this.recovery=recovery;this.inbox=inbox;this.kafka=kafka.getIfAvailable();this.outbox=outbox;
     }
     @Scheduled(fixedDelayString="${billing.recovery-interval-ms:1000}")
-    public void recover() {
+    public synchronized void recover() {
+        if(stopping||!runtime.jobEnabled("recovery"))return;
         int available=io.getMaximumPoolSize()-io.getActiveCount()-io.getQueue().size();
         if(available<=0) return;
         refundFirst=!refundFirst;
         if(refundFirst) {
             var jobs=recovery.claimRefunds(available);available-=jobs.size();
-            for(var job:jobs) execute(io,()->recovery.recoverRefund(job));
+            for(var job:jobs) execute(io,()->recovery.recoverRefund(job),()->recovery.releaseUnstarted(job,true));
         }
         if(available>0) {
             var jobs=recovery.claimPayments(available);available-=jobs.size();
-            for(var job:jobs) execute(io,()->recovery.recoverPayment(job));
+            for(var job:jobs) execute(io,()->recovery.recoverPayment(job),()->recovery.releaseUnstarted(job,false));
         }
-        if(available>0 && !refundFirst) for(var job:recovery.claimRefunds(available)) execute(io,()->recovery.recoverRefund(job));
+        if(available>0 && !refundFirst) for(var job:recovery.claimRefunds(available)) execute(io,()->recovery.recoverRefund(job),()->recovery.releaseUnstarted(job,true));
     }
-    @Scheduled(fixedDelayString="${billing.inbox-interval-ms:1000}") public void receive() { inbox.drain(25); }
+    @Scheduled(fixedDelayString="${billing.inbox-interval-ms:1000}") public void receive() { if(!stopping&&runtime.jobEnabled("inbox"))inbox.drain(25); }
     // Unsubmitted intents hold invoice reservations; release them after this age (minutes).
     @org.springframework.beans.factory.annotation.Value("${billing.unsubmitted-ttl-minutes:30}") int unsubmittedTtlMinutes=30;
     @Scheduled(fixedDelayString="${billing.expiry-interval-ms:60000}")
-    public void expireUnsubmitted() { recovery.expireUnsubmitted(unsubmittedTtlMinutes,20); }
+    public void expireUnsubmitted() { if(!stopping&&runtime.jobEnabled("expiry"))recovery.expireUnsubmitted(unsubmittedTtlMinutes,20); }
     @Scheduled(fixedDelayString="${billing.outbox-interval-ms:100}")
-    public void publish() {
+    public synchronized void publish() {
+        if(stopping||!runtime.jobEnabled("publisher"))return;
         int available=publishers.getMaximumPoolSize()-publishers.getActiveCount()-publishers.getQueue().size();
         if(kafka==null || available<=0) return;
-        for(var work:claimOutbox(available)) execute(publishers,()->publishOne(work));
+        for(var work:claimOutbox(available)) execute(publishers,()->publishOne(work),()->outbox.releaseUnstarted(id(work.get("id")),id(work.get("leaseToken"))));
     }
     public List<Map<String,Object>> claimOutbox(int limit) {
-        return db.tx(() -> {
-            // Only the oldest unpublished event for each payment is eligible. A head
-            // that is leased, locked or waiting for retry blocks its successors.
-            var rows=db.rows("""
-                SELECT o.id,o.aggregate_id,o.payload::text AS payload,o.attempts,o.publish_sequence
-                FROM billing.outbox o
-                WHERE o.state IN ('NEW','IN_FLIGHT') AND o.next_attempt_at<=NOW()
-                  AND (o.lease_until IS NULL OR o.lease_until<NOW())
-                  AND NOT EXISTS (SELECT 1 FROM billing.outbox earlier
-                    WHERE earlier.aggregate_id=o.aggregate_id AND earlier.state IN ('NEW','IN_FLIGHT')
-                      AND earlier.publish_sequence<o.publish_sequence)
-                ORDER BY o.publish_sequence FOR UPDATE OF o SKIP LOCKED LIMIT ?
-                """,Math.max(0,Math.min(limit,50)));
-            List<Map<String,Object>> claimed=new ArrayList<>();
-            for(var row:rows) {
-                if(amount(row,"attempts")>=MAX_OUTBOX_ATTEMPTS) {
-                    quarantine(row,"AttemptLimitAfterExpiredLease");continue;
-                }
-                UUID token=UUID.randomUUID();row.put("leaseToken",token);
-                db.update("UPDATE billing.outbox SET state='IN_FLIGHT',attempts=attempts+1,lease_token=?,lease_until=NOW()+INTERVAL '30 seconds',next_attempt_at=NOW()+INTERVAL '30 seconds' WHERE id=?",token,id(row.get("id")));
-                claimed.add(row);
-            }
-            return claimed;
-        });
+        BillingExecutionBudget.requireTime();return outbox.claim(limit);
     }
     public void publishOne(Map<String,Object> work) {
         if(kafka==null) return;
@@ -100,58 +88,46 @@ public class BillingWorkers {
             failPublication(work,failure);
         }
     }
+    /** Classifies the failure here; the bookkeeping is its own unit, after any failed unit has rolled back. */
     private void failPublication(Map<String,Object> work,Exception failure) {
-        db.tx(() -> {
-            var owned=db.rows("""
-                SELECT id,aggregate_id,attempts FROM billing.outbox
-                WHERE id=? AND lease_token=? AND state='IN_FLIGHT' AND lease_until>NOW() FOR UPDATE
-                """,id(work.get("id")),id(work.get("leaseToken")));
-            if(owned.isEmpty()) return null;
-            var current=owned.get(0);
-            Throwable cause=failure;
-            while(cause.getCause()!=null && cause.getCause()!=cause) cause=cause.getCause();
-            boolean permanent=cause instanceof org.apache.kafka.common.errors.RecordTooLargeException
-                || cause instanceof org.apache.kafka.common.errors.SerializationException
-                || cause instanceof org.apache.kafka.common.errors.InvalidTopicException;
-            // Kafka marks transient cluster conditions as retriable; a send that times out waiting is the same.
-            boolean brokerUnavailable=cause instanceof org.apache.kafka.common.errors.RetriableException
-                || cause instanceof java.util.concurrent.TimeoutException || cause instanceof InterruptedException;
-            if(permanent || (!brokerUnavailable && amount(current,"attempts")>=MAX_OUTBOX_ATTEMPTS))
-                quarantine(current,cause.getClass().getSimpleName());
-            else db.update("UPDATE billing.outbox SET state='NEW',attempts=attempts-?,lease_token=NULL,lease_until=NULL,next_attempt_at=NOW()+INTERVAL '10 seconds' WHERE id=?",brokerUnavailable?1:0,id(current.get("id")));
-            return null;
-        });
-    }
-    // Caller holds the outbox row lock. Audit and terminal state commit together.
-    private void quarantine(Map<String,Object> work,String reason) {
-        UUID event=id(work.get("id"));
-        int reopened=db.update("UPDATE billing.dead_letters SET state='OPEN',failure_reason=? WHERE replay_outbox_id=?",reason,event);
-        if(reopened==0) {
-            int audited=db.update("""
-                INSERT INTO billing.dead_letters(id,merchant_id,topic,event_key,raw_payload,source_outbox_id,failure_reason)
-                SELECT ?,a.merchant_id,'billing.events.v1',o.aggregate_id::text,convert_to(o.payload::text,'UTF8'),o.id,?
-                FROM billing.outbox o JOIN billing.intents i ON i.id=o.aggregate_id
-                JOIN billing.accounts a ON a.id=i.account_id WHERE o.id=?
-                ON CONFLICT(source_outbox_id) DO NOTHING
-                """,UUID.randomUUID(),reason,event);
-            if(audited==0 && !db.exists("SELECT 1 FROM billing.dead_letters WHERE source_outbox_id=?",event))
-                throw new IllegalStateException("Cannot quarantine an outbox event without merchant ownership");
-        }
-        db.update("UPDATE billing.outbox SET state='DEAD_LETTER',lease_token=NULL,lease_until=NULL WHERE id=?",event);
+        Throwable cause=failure;
+        while(cause.getCause()!=null && cause.getCause()!=cause) cause=cause.getCause();
+        boolean permanent=cause instanceof org.apache.kafka.common.errors.RecordTooLargeException
+            || cause instanceof org.apache.kafka.common.errors.SerializationException
+            || cause instanceof org.apache.kafka.common.errors.InvalidTopicException;
+        // Kafka marks transient cluster conditions as retriable; a send that times out waiting is the same.
+        boolean brokerUnavailable=cause instanceof org.apache.kafka.common.errors.RetriableException
+            || cause instanceof java.util.concurrent.TimeoutException || cause instanceof InterruptedException;
+        outbox.recordFailure(id(work.get("id")),id(work.get("leaseToken")),cause.getClass().getSimpleName(),permanent,brokerUnavailable);
     }
     public void markPublished(UUID event,UUID token) {
-        db.tx(() -> {
-            int changed=db.update("UPDATE billing.outbox SET state='PUBLISHED',published_at=NOW(),lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=? AND state='IN_FLIGHT' AND lease_until>NOW()",event,token);
-            if(changed==1) db.update("UPDATE billing.dead_letters SET state='REPLAYED' WHERE replay_outbox_id=?",event);return null;
-        });
+        BillingExecutionBudget.requireTime();outbox.markPublished(event,token);
     }
     private static ThreadPoolExecutor pool(int size,int capacity,String name) {
         var count=new java.util.concurrent.atomic.AtomicInteger();
-        return new ThreadPoolExecutor(size,size,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(capacity),task->{var t=new Thread(task,name+count.incrementAndGet());t.setDaemon(true);return t;});
+        return new ThreadPoolExecutor(size,size,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(capacity),task->{var t=new Thread(task,name+count.incrementAndGet());t.setDaemon(false);return t;});
     }
-    private static void execute(ThreadPoolExecutor pool,Runnable task) {
-        try {pool.execute(()->{try{task.run();}catch(RuntimeException error){org.slf4j.LoggerFactory.getLogger(BillingWorkers.class).error("Billing background operation will be retried",error);}});}
-        catch(RejectedExecutionException ignored) { /* Durable fenced leases expire; no work is acknowledged. */ }
+    private static void execute(ThreadPoolExecutor pool,Runnable task,Runnable abandoned) {
+        var work=new ClaimedTask(task,abandoned);
+        try {pool.execute(work);}catch(RejectedExecutionException rejected){work.release();}
     }
-    @PreDestroy public void close() {io.shutdown();publishers.shutdown();}
+    static final class ClaimedTask implements Runnable {
+        private final Runnable action,abandoned;
+        private final java.util.concurrent.atomic.AtomicBoolean started=new java.util.concurrent.atomic.AtomicBoolean();
+        ClaimedTask(Runnable action,Runnable abandoned){this.action=action;this.abandoned=abandoned;}
+        public void run(){if(started.compareAndSet(false,true))try{action.run();}catch(RuntimeException failure){log(failure);}}
+        void release(){if(started.compareAndSet(false,true))try{abandoned.run();}catch(RuntimeException failure){log(failure);}}
+        private static void log(RuntimeException failure){org.slf4j.LoggerFactory.getLogger(BillingWorkers.class).error("Billing background operation remains durable and will be retried",failure);}
+    }
+    @PreDestroy public void close() {
+        synchronized(this){stopping=true;io.shutdown();publishers.shutdown();}
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(shutdownSeconds);
+        for(var executor:List.of(io,publishers)) {
+            try {if(!executor.awaitTermination(Math.max(0,deadline-System.nanoTime()),TimeUnit.NANOSECONDS))releaseQueued(executor.shutdownNow());}
+            catch(InterruptedException interrupted){releaseQueued(executor.shutdownNow());Thread.currentThread().interrupt();}
+        }
+        // Interrupted or abandoned external work remains uncertain. Its durable
+        // fenced lease, saved request and operation key survive this process.
+    }
+    private static void releaseQueued(List<Runnable> queued){for(var task:queued)if(task instanceof ClaimedTask claimed)claimed.release();}
 }

@@ -1,0 +1,5 @@
+FROM postgres:17-alpine
+RUN apk add --no-cache python3
+COPY connector.json /opt/billing-cdc/connector.json
+COPY bootstrap.py /opt/billing-cdc/bootstrap.py
+ENTRYPOINT ["python3", "/opt/billing-cdc/bootstrap.py"]

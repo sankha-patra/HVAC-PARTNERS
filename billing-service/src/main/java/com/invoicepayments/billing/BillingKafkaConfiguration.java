@@ -68,9 +68,11 @@ public class BillingKafkaConfiguration {
         factory.addListener(new MicrometerConsumerListener<>(registry));
         return factory;
     }
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnExpression("'${billing.role:combined}' != 'api' && ${billing.topics-enabled:true}")
     @Bean NewTopic billingEventsTopic(@Value("${kafka.topic.partitions:6}") int partitions,@Value("${kafka.topic.replicas:3}") int replicas,@Value("${kafka.topic.min-insync-replicas:2}") int minIsr) {
         return TopicBuilder.name("billing.events.v1").partitions(partitions).replicas(replicas).config("min.insync.replicas",Integer.toString(minIsr)).build();
     }
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnExpression("'${billing.role:combined}' != 'api' && ${billing.topics-enabled:true}")
     @Bean NewTopic billingDeadLetterTopic(@Value("${kafka.topic.partitions:6}") int partitions,@Value("${kafka.topic.replicas:3}") int replicas,@Value("${kafka.topic.min-insync-replicas:2}") int minIsr) {
         return TopicBuilder.name("billing.events.v1.DLT").partitions(partitions).replicas(replicas).config("min.insync.replicas",Integer.toString(minIsr)).build();
     }

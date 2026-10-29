@@ -54,7 +54,7 @@ team's own accounts.
   (`V14`), so a late provider success for a released refund is still recorded.
 - Existing transaction boundaries remain: provider calls happen outside a transaction;
   accepted evidence, financial effects and case audit commit together. Caller transactions
-  are rejected before provider I/O. `TransactionTemplate` remains the implementation.
+  are rejected before provider I/O. Named proxied `@Transactional` commands now own the production units; see `transactional-one-flow-proof.md` for the completed migration and verification.
 
 ## Where to read the code
 

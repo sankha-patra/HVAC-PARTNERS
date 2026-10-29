@@ -77,13 +77,13 @@ class BillingFinancialDatabaseTest {
     @BeforeEach void cleanAndSeedDedicatedDatabase() {
         // The hard allowlist above is mandatory: this test must never use an application datasource.
         jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");
-        db = new BillingStore(jdbc, transactions);
-        provider = new SimulatorBillingProvider(jdbc, transactions);
+        db = new BillingStore(jdbc);
+        provider = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions);
         payments = service(provider, MERCHANT);
-        refunds = new BillingRefundService(db, payments, provider);
-        inbox = new BillingInbox(db, payments, refunds, MERCHANT.toString());
-        recovery = new BillingRecovery(db, payments, refunds, provider);
-        events = new BillingEvents(db, MERCHANT.toString());
+        refunds = BillingTestWiring.refunds(db, payments, provider);
+        inbox = BillingTestWiring.inbox(db, payments, refunds, MERCHANT.toString());
+        recovery = BillingTestWiring.recovery(db, payments, refunds, provider);
+        events = BillingTestWiring.events(db, MERCHANT.toString());
         db.update("INSERT INTO billing.merchants(id,name) VALUES(?,'Merchant one'),(?,'Merchant other')", MERCHANT, OTHER_MERCHANT);
         account(ACCOUNT, MERCHANT, "customer-one"); account(SECOND_ACCOUNT, MERCHANT, "customer-two");
         account(OTHER_ACCOUNT, OTHER_MERCHANT, "customer-other");
@@ -98,6 +98,7 @@ class BillingFinancialDatabaseTest {
     }
 
     @AfterEach void removeOnlyTestFaultTrigger() {
+        BillingTestWiring.closeContexts();
         jdbc.execute("DROP TRIGGER IF EXISTS billing_test_reject_outbox ON billing.outbox");
         jdbc.execute("DROP FUNCTION IF EXISTS billing.test_reject_outbox()");
         removeTransientFault();
@@ -206,7 +207,7 @@ class BillingFinancialDatabaseTest {
     @Test void anIdenticalCreateIsAnsweredBeforeTheOriginalTransactionCommits() throws Exception {
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
-        var waitingStore = new BillingStore(jdbc, transactions) {
+        var waitingStore = new BillingStore(jdbc) {
             @Override public void event(UUID intent, String type, String message) {
                 super.event(intent, type, message);
                 if ("CREATED".equals(type)) {
@@ -216,7 +217,7 @@ class BillingFinancialDatabaseTest {
                 }
             }
         };
-        var firstService = new BillingService(waitingStore, provider, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());
+        var firstService = BillingTestWiring.payments(waitingStore, provider, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());
         var threads = Executors.newFixedThreadPool(2);
         String sameKey = key();
         try {
@@ -304,7 +305,7 @@ class BillingFinancialDatabaseTest {
         assertInvoice(INVOICE, 0, 10000); assertThat(count("billing.journals")).isZero();
         due(intent);
         var recoveredService = service(provider, MERCHANT);
-        var worker = new BillingRecovery(db, recoveredService, new BillingRefundService(db, recoveredService, provider), provider);
+        var worker = BillingTestWiring.recovery(db, recoveredService, BillingTestWiring.refunds(db, recoveredService, provider), provider);
         worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(recoveredService.raw(intent).get("status")).isEqualTo("CAPTURED");
         assertInvoice(INVOICE, 10000, 0);
@@ -358,8 +359,8 @@ class BillingFinancialDatabaseTest {
                 return delegate.recoverPayment(original,version,preparedAt,providerId);
             }
         };
-        var changed=new BillingService(db,restarted,new MockEnvironment(),true,"https://new.example",MERCHANT.toString());
-        var worker=new BillingRecovery(db,changed,new BillingRefundService(db,changed,restarted),restarted);
+        var changed=BillingTestWiring.payments(db,restarted,new MockEnvironment(),true,"https://new.example",MERCHANT.toString());
+        var worker=BillingTestWiring.recovery(db,changed,BillingTestWiring.refunds(db,changed,restarted),restarted);
         due(intent);worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(recoveries).hasValue(1);
         assertThat(count("billing.provider_operations")).isEqualTo(1);
@@ -374,7 +375,7 @@ class BillingFinancialDatabaseTest {
         };
         BillingService service=service(unsafe,MERCHANT);
         UUID intent=created("CARD");service.submit(PAYER,intent);
-        var worker=new BillingRecovery(db,service,new BillingRefundService(db,service,unsafe),unsafe);
+        var worker=BillingTestWiring.recovery(db,service,BillingTestWiring.refunds(db,service,unsafe),unsafe);
         for(int i=0;i<2;i++) {due(intent);worker.recoverPayment(worker.claimPayments(1).get(0));}
         assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
         assertInvoice(INVOICE,0,10000);
@@ -411,7 +412,7 @@ class BillingFinancialDatabaseTest {
             @Override public ProviderResult lookup(String key,String id) {calls.incrementAndGet();return super.lookup(key,id);}
         };
         var service=service(observed,MERCHANT);
-        var worker=new BillingRecovery(db,service,new BillingRefundService(db,service,observed),observed);
+        var worker=BillingTestWiring.recovery(db,service,BillingTestWiring.refunds(db,service,observed),observed);
         worker.recoverPayment(old);assertThat(calls).hasValue(0);
         worker.recoverPayment(current);assertThat(calls).hasValue(1);
     }
@@ -435,7 +436,7 @@ class BillingFinancialDatabaseTest {
     }
 
     void assertOutsideTransaction(Runnable action) {
-        db.tx(()->{
+        BillingTestTransactions.run(db,()->{
             assertThatThrownBy(action::run).isInstanceOf(org.springframework.transaction.IllegalTransactionStateException.class);
             return null;
         });
@@ -449,7 +450,7 @@ class BillingFinancialDatabaseTest {
         config.setPassword(System.getenv("BILLING_TEST_DB_PASSWORD"));
         config.setMaximumPoolSize(1);config.setMinimumIdle(0);
         try(var pool=new com.zaxxer.hikari.HikariDataSource(config)) {
-            var pooledStore=new BillingStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool));
+            var pooledStore=new BillingStore(new JdbcTemplate(pool));
             AtomicInteger calls=new AtomicInteger();
             BillingProvider observed=new DelegateProvider(provider) {
                 @Override public ProviderResult submit(ProviderCommand command) {
@@ -462,7 +463,7 @@ class BillingFinancialDatabaseTest {
                     return super.submit(command);
                 }
             };
-            var service=new BillingService(pooledStore,observed,new MockEnvironment(),true,"http://localhost:4200",MERCHANT.toString());
+            var service=BillingTestWiring.payments(pooledStore,observed,new MockEnvironment(),true,"http://localhost:4200",MERCHANT.toString());
             service.submit(PAYER,intent);
             assertThat(calls).hasValue(1);
             assertThat(pool.getHikariPoolMXBean().getActiveConnections()).isZero();
@@ -479,7 +480,7 @@ class BillingFinancialDatabaseTest {
         BillingService service = service(absent, MERCHANT);
         UUID intent = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
         service.submit(PAYER, intent);
-        BillingRecovery worker = new BillingRecovery(db, service, new BillingRefundService(db, service, absent), absent);
+        BillingRecovery worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, absent), absent);
         for (int i = 0; i < 6; i++) { due(intent); worker.recoverPayment(worker.claimPayments(1).get(0)); }
         service.submit(PAYER, intent);
         assertThat(submitted).hasValue(1);
@@ -530,7 +531,7 @@ class BillingFinancialDatabaseTest {
         BillingService changed = service(other, MERCHANT);
         assertProblem(409, () -> changed.submit(PAYER, intent));
         payments.submit(PAYER, intent); due(intent);
-        var worker = new BillingRecovery(db, changed, new BillingRefundService(db, changed, other), other);
+        var worker = BillingTestWiring.recovery(db, changed, BillingTestWiring.refunds(db, changed, other), other);
         worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(calls).hasValue(0);
         assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='ORIGINAL_PROVIDER_UNAVAILABLE' AND intent_id=?", intent)).isTrue();
@@ -662,7 +663,7 @@ class BillingFinancialDatabaseTest {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
         // Simulate a process exit after the approval transaction committed, before the provider call.
         db.update("UPDATE billing.refunds SET status='APPROVED',approved_by=?,next_recovery_at=NOW()-INTERVAL '1 second' WHERE id=?", APPROVER, refund);
-        var restarted = new BillingRecovery(db, payments, refunds, provider);
+        var restarted = BillingTestWiring.recovery(db, payments, refunds, provider);
         var work = restarted.claimRefunds(1);
         assertThat(work).hasSize(1); assertThat(work.get(0).get("status")).isEqualTo("APPROVED");
         restarted.recoverRefund(work.get(0));
@@ -801,7 +802,7 @@ class BillingFinancialDatabaseTest {
         captured("CARD");
         ObjectProvider<KafkaTemplate<String, byte[]>> empty = new DefaultListableBeanFactory()
                 .getBeanProvider(ResolvableType.forClassWithGenerics(KafkaTemplate.class, String.class, byte[].class));
-        BillingWorkers workers = new BillingWorkers(db, recovery, inbox, empty);
+        BillingWorkers workers = BillingTestWiring.workers(db, recovery, inbox, empty);
         try {
             var old = workers.claimOutbox(1).get(0); UUID event = id(old.get("id"));
             db.update("UPDATE billing.outbox SET lease_until=NOW()-INTERVAL '1 second',next_attempt_at=NOW()-INTERVAL '1 second' WHERE id=?", event);
@@ -815,7 +816,7 @@ class BillingFinancialDatabaseTest {
 
     @Test void unbalancedJournalIsRejectedAtCommitAndLeavesNoPartialFinancialRows() {
         UUID intent = created("CARD"); UUID journal = UUID.randomUUID(); AtomicBoolean bodyFinished = new AtomicBoolean();
-        assertThatThrownBy(() -> db.tx(() -> {
+        assertThatThrownBy(() -> BillingTestTransactions.run(db,() -> {
             db.update("INSERT INTO billing.journals(id,merchant_id,intent_id,effect_key,currency) VALUES(?,?,?,'unbalanced-test','USD')", journal, MERCHANT, intent);
             db.update("INSERT INTO billing.ledger_entries(journal_id,line,account,side,amount_minor) VALUES(?,1,'PROVIDER_CLEARING','DEBIT',100),(?,2,'CUSTOMER_RECEIVABLES','CREDIT',99)", journal, journal);
             bodyFinished.set(true); return null;
@@ -907,6 +908,43 @@ class BillingFinancialDatabaseTest {
         assertThat(db.exists("SELECT 1 FROM billing.ledger_entries WHERE account='BANK_CASH'")).isFalse();
         assertProblem(409, () -> reconciler.receive(FINANCE, report(intent, "provider-report-1", 10000, 126)));
         assertThat(count("billing.reconciliation_imports")).isEqualTo(1);
+    }
+
+    @Test void settlementPreservesInrCurrencyThroughIndependentBankConfirmation() {
+        db.update("UPDATE billing.invoices SET currency='INR' WHERE id=?",INVOICE);
+        UUID intent=captured("CARD");var reconciler=reconciliation();
+        var report=report(intent,"inr-bank-report",10000,125);
+        UUID settlement=id(reconciler.receive(FINANCE,report).get("id"));
+        assertThat(db.one("SELECT currency FROM billing.settlement_reports WHERE id=?",settlement)).containsEntry("currency","INR");
+        assertThat(reconciler.confirmBank(APPROVER,settlement,new BillingReconciliation.BankCredit(report.bankReference(),9875,"a".repeat(64))))
+            .containsEntry("status","MATCHED");
+        assertThat(db.one("SELECT currency FROM billing.journals WHERE effect_key=?","settlement:"+settlement)).containsEntry("currency","INR");
+    }
+
+    @Test void settlementRejectsMixedCurrenciesWithoutPostingCash() {
+        UUID usd=captured("CARD");
+        db.update("UPDATE billing.invoices SET currency='INR',total_minor=10000 WHERE id=?",INVOICE_TWO);
+        UUID inr=id(payments.create(PAYER,ACCOUNT,key(),List.of(INVOICE_TWO),"CARD").get("id"));
+        payments.submit(PAYER,inr);payments.simulate(PAYER,inr,"CAPTURED");
+        var mixed=new BillingReconciliation.Report(MERCHANT,"mixed-currency-report","SIMULATOR",20000,250,19750,
+            "BANK-mixed",List.of(new BillingReconciliation.Line(usd,10000),new BillingReconciliation.Line(inr,10000)));
+        assertThat(reconciliation().receive(FINANCE,mixed)).containsEntry("state","EXCEPTION");
+        assertThat(count("billing.settlement_reports")).isZero();
+        assertThat(db.exists("SELECT 1 FROM billing.ledger_entries WHERE account='BANK_CASH'")).isFalse();
+    }
+
+    @Test void settlementRejectsMixedProvidersWithoutPostingCash() {
+        UUID first=captured("CARD");db.update("UPDATE billing.invoices SET total_minor=10000 WHERE id=?",INVOICE_TWO);
+        UUID second=id(payments.create(PAYER,ACCOUNT,key(),List.of(INVOICE_TWO),"CARD").get("id"));
+        payments.submit(PAYER,second);payments.simulate(PAYER,second,"CAPTURED");
+        // Only the allowlisted disposable database: represent a second provider's normalized capture.
+        db.update("UPDATE billing.intents SET provider='STRIPE' WHERE id=?",second);
+        var mixed=new BillingReconciliation.Report(MERCHANT,"mixed-provider-report","PROVIDER",20000,250,19750,
+            "BANK-mixed-provider",List.of(new BillingReconciliation.Line(first,10000),new BillingReconciliation.Line(second,10000)));
+        assertThat(reconciliation().receive(FINANCE,mixed)).containsEntry("state","EXCEPTION");
+        assertThat(count("billing.settlement_reports")).isZero();
+        assertThat(count("billing.settlement_lines")).isZero();
+        assertThat(db.exists("SELECT 1 FROM billing.ledger_entries WHERE account='BANK_CASH'")).isFalse();
     }
 
     @Test void settlementUnknownAndMismatchedPaymentsRemainDurableExceptions() {
@@ -1019,14 +1057,14 @@ class BillingFinancialDatabaseTest {
         assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='DUPLICATE_BANK_CREDIT'")).isFalse();
     }
 
-    BillingReconciliation reconciliation() { return new BillingReconciliation(db, payments, new MockEnvironment(), true); }
+    BillingReconciliation reconciliation() { return BillingTestWiring.reconciliation(db, payments, new MockEnvironment(), true); }
     BillingReconciliation.Report report(UUID intent, String external, long gross, long fee) {
         return new BillingReconciliation.Report(MERCHANT, external, "SIMULATOR", gross, fee, gross - fee,
                 "BANK-" + external, List.of(new BillingReconciliation.Line(intent, gross)));
     }
 
     // Returns one scripted send result per call and repeats the last one. Needs no mocking agent.
-    static final class ScriptedKafka extends KafkaTemplate<String,byte[]> {
+    static class ScriptedKafka extends KafkaTemplate<String,byte[]> {
         private final Deque<CompletableFuture<org.springframework.kafka.support.SendResult<String,byte[]>>> results=new ArrayDeque<>();
         @SafeVarargs ScriptedKafka(CompletableFuture<org.springframework.kafka.support.SendResult<String,byte[]>>... results) {
             super(new org.springframework.kafka.core.DefaultKafkaProducerFactory<>(Map.of()));
@@ -1037,6 +1075,13 @@ class BillingFinancialDatabaseTest {
         }
     }
     BillingWorkers outboxWorker(KafkaTemplate<String,byte[]> kafka) {return outboxWorker(db,kafka);}
+    static void assertNoBrokerCalls(KafkaTemplate<String,byte[]> kafka) {
+        // A real Spring context initializes Aware/SmartInitializingSingleton callbacks on this mock.
+        // Permit only those callbacks: every send overload and other broker operation remains observable.
+        var lifecycle=Set.of("setBeanName","setApplicationContext","afterSingletonsInstantiated");
+        assertThat(org.mockito.Mockito.mockingDetails(kafka).getInvocations().stream()
+            .filter(call->!lifecycle.contains(call.getMethod().getName())).toList()).as("No broker calls").isEmpty();
+    }
     BillingWorkers outboxWorker(BillingStore store,KafkaTemplate<String,byte[]> kafka) {
         var beans=new DefaultListableBeanFactory();
         if(kafka!=null) beans.registerSingleton("testKafka",kafka);
@@ -1044,7 +1089,7 @@ class BillingFinancialDatabaseTest {
         // as in the real-Kafka integration fixture, rather than resolving to null.
         @SuppressWarnings({"unchecked","rawtypes"})
         ObjectProvider<KafkaTemplate<String,byte[]>> provider=(ObjectProvider)beans.getBeanProvider(KafkaTemplate.class);
-        return new BillingWorkers(store,recovery,inbox,provider);
+        return BillingTestWiring.workers(store,recovery,inbox,provider);
     }
     UUID enqueue(UUID payment) {
         UUID event=UUID.randomUUID();
@@ -1107,7 +1152,7 @@ class BillingFinancialDatabaseTest {
             var old=worker.claimOutbox(1).get(0);
             db.update("UPDATE billing.outbox SET lease_until=NOW()-INTERVAL '1 second',next_attempt_at=NOW()-INTERVAL '1 second' WHERE id=?",first);
             var current=worker.claimOutbox(1).get(0);worker.publishOne(old);
-            org.mockito.Mockito.verifyNoInteractions(kafka);
+            assertNoBrokerCalls(kafka);
             acknowledge(worker,current);
         } finally {worker.close();}
     }
@@ -1125,7 +1170,7 @@ class BillingFinancialDatabaseTest {
             pool.setJdbcUrl(System.getenv("BILLING_TEST_JDBC_URL"));pool.setUsername("billing_test");
             pool.setPassword(System.getenv("BILLING_TEST_DB_PASSWORD"));pool.setMaximumPoolSize(1);
             pool.setMinimumIdle(0);pool.setConnectionTimeout(1000);
-            var pooled=new BillingStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool));
+            var pooled=new BillingStore(new JdbcTemplate(pool));
             for(int i=0;i<8;i++) enqueue(UUID.randomUUID());
             var worker=outboxWorker(pooled,kafka);var threads=Executors.newFixedThreadPool(8);
             try {
@@ -1254,7 +1299,7 @@ class BillingFinancialDatabaseTest {
             assertThat(worker.claimOutbox(8)).isEmpty();
             assertThat(db.one("SELECT state FROM billing.outbox WHERE id=?",first).get("state")).isEqualTo("DEAD_LETTER");
             assertThat(id(worker.claimOutbox(8).get(0).get("id"))).isEqualTo(second);
-            org.mockito.Mockito.verifyNoInteractions(kafka);
+            assertNoBrokerCalls(kafka);
         } finally {worker.close();}
     }
 
@@ -1280,7 +1325,7 @@ class BillingFinancialDatabaseTest {
         UUID payment=UUID.randomUUID();var inserted=new CountDownLatch(1);var commit=new CountDownLatch(1);
         var threads=Executors.newFixedThreadPool(2);var worker=outboxWorker(null);
         try {
-            var first=threads.submit(()->db.tx(()->{
+            var first=threads.submit(()->BillingTestTransactions.run(db,()->{
                 UUID event=enqueue(payment);inserted.countDown();
                 try {if(!commit.await(10,TimeUnit.SECONDS)) throw new IllegalStateException("test commit timed out");}
                 catch(InterruptedException failure){Thread.currentThread().interrupt();throw new IllegalStateException(failure);}
@@ -1331,7 +1376,7 @@ class BillingFinancialDatabaseTest {
         BillingProvider stopped = new DelegateProvider(provider) {
             @Override public ProviderResult refund(RefundCommand command) { throw new AssertionError("Process stopped before network"); }
         };
-        var crashing = new BillingRefundService(db, service(stopped, MERCHANT), stopped);
+        var crashing = BillingTestWiring.refunds(db, service(stopped, MERCHANT), stopped);
         assertThatThrownBy(() -> crashing.approve(APPROVER, refund)).isInstanceOf(AssertionError.class);
         var saved = refunds.raw(refund);
         assertThat(saved.get("status")).isEqualTo("SUBMITTING");
@@ -1349,7 +1394,7 @@ class BillingFinancialDatabaseTest {
         BillingProvider lossy = new DelegateProvider(provider) {
             @Override public ProviderResult refund(RefundCommand command) { delegate.refund(command); throw new ProviderUncertainException("Response lost after acceptance"); }
         };
-        new BillingRefundService(db, service(lossy, MERCHANT), lossy).approve(APPROVER, refund);
+        BillingTestWiring.refunds(db, service(lossy, MERCHANT), lossy).approve(APPROVER, refund);
         assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
         assertThat(refunds.raw(refund).get("providerId")).isNull();
         assertThat(count("billing.journals")).isEqualTo(1);
@@ -1364,9 +1409,9 @@ class BillingFinancialDatabaseTest {
     @Test void refundPastTheSafeReplayWindowEscalatesAndKeepsItsAmountCommitted() {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 6000);
         BillingProvider unsafe = refundNeverSent(true);
-        var service = service(unsafe, MERCHANT); var refundService = new BillingRefundService(db, service, unsafe);
+        var service = service(unsafe, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, unsafe);
         refundService.approve(APPROVER, refund);
-        var worker = new BillingRecovery(db, service, refundService, unsafe);
+        var worker = BillingTestWiring.recovery(db, service, refundService, unsafe);
         for (int i = 0; i < 2; i++) { dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0)); }
         assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
         assertThat(db.rows("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund)).hasSize(1);
@@ -1383,9 +1428,9 @@ class BillingFinancialDatabaseTest {
                 recoveries.incrementAndGet(); return new ProviderResult(null, "UNKNOWN", null, "Still unknown");
             }
         };
-        var service = service(silent, MERCHANT); var refundService = new BillingRefundService(db, service, silent);
+        var service = service(silent, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, silent);
         refundService.approve(APPROVER, refund);
-        var worker = new BillingRecovery(db, service, refundService, silent);
+        var worker = BillingTestWiring.recovery(db, service, refundService, silent);
         for (int attempt = 1; attempt <= 6; attempt++) {
             dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
             assertThat(db.exists("SELECT 1 FROM billing.refunds WHERE id=? AND next_recovery_at>NOW()+INTERVAL '5 seconds'", refund)).isTrue();
@@ -1404,7 +1449,7 @@ class BillingFinancialDatabaseTest {
     @Test void staleRefundClaimCannotIssueAnyProviderRequest() {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 500);
         BillingProvider silent = refundNeverSent(false);
-        new BillingRefundService(db, service(silent, MERCHANT), silent).approve(APPROVER, refund);
+        BillingTestWiring.refunds(db, service(silent, MERCHANT), silent).approve(APPROVER, refund);
         dueRefund(refund); var old = recovery.claimRefunds(1).get(0);
         dueRefund(refund); var current = recovery.claimRefunds(1).get(0);
         AtomicInteger calls = new AtomicInteger();
@@ -1417,6 +1462,38 @@ class BillingFinancialDatabaseTest {
         worker.recoverRefund(current); assertThat(calls).hasValue(1);
         assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
         assertThat(refundOperations()).isEqualTo(1);
+    }
+
+    @ParameterizedTest @ValueSource(strings={"REQUESTED","APPROVED"})
+    void refundRequestIdentityCannotChangeBeforeSubmission(String state) {
+        UUID intent=captured("CARD"),refund=requestedRefund(intent,500);
+        try(var context=BillingTestWiring.context(db,provider,new MockEnvironment(),true,"http://localhost:4200",MERCHANT.toString())) {
+            context.refresh();
+            if("APPROVED".equals(state))context.getBean(BillingRefundCommands.class).approve(APPROVER,refund);
+            for(String assignment:List.of("id='ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid",
+                    "intent_id='ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid","amount_minor=501","reason='Changed request reason'",
+                    "requested_by='different-maker'","idempotency_key='changed-refund-key-0001'","request_hash=repeat('b',64)",
+                    "created_at=created_at+INTERVAL '1 day'")) {
+                assertThatThrownBy(()->db.update("UPDATE billing.refunds SET "+assignment+" WHERE id=?",refund))
+                    .isInstanceOf(org.springframework.dao.DataAccessException.class).hasMessageContaining("Original refund request is immutable");
+            }
+            assertThat(refunds.raw(refund)).containsEntry("status",state).containsEntry("amountMinor",500L)
+                .containsEntry("requestedBy",FINANCE).containsEntry("intentId",intent.toString());
+        }
+    }
+
+    @Test void refundApproverCannotBeReplacedAndUnsentApprovedRefundCanStillBeRejected() {
+        UUID intent=captured("CARD"),refund=requestedRefund(intent,500);
+        try(var context=BillingTestWiring.context(db,provider,new MockEnvironment(),true,"http://localhost:4200",MERCHANT.toString())) {
+            context.refresh();context.getBean(BillingRefundCommands.class).approve(APPROVER,refund);
+            for(String assignment:List.of("approved_by='second-checker'","approved_by=NULL"))
+                assertThatThrownBy(()->db.update("UPDATE billing.refunds SET "+assignment+" WHERE id=?",refund))
+                    .isInstanceOf(org.springframework.dao.DataAccessException.class).hasMessageContaining("Refund approver is immutable");
+            assertThat(refunds.reject(APPROVER,refund,"Customer withdrew before submission"))
+                .containsEntry("status","REJECTED").containsEntry("approvedBy",APPROVER).containsEntry("amountMinor",500L);
+            assertThat(refundOperations()).isZero();
+            assertThat(refunds.raw(requestedRefund(intent,10000))).containsEntry("status","REQUESTED");
+        }
     }
 
     @Test void savedRefundRequestCannotBeChangedOrRetimed() {
@@ -1515,9 +1592,9 @@ class BillingFinancialDatabaseTest {
         UUID stuckCase = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
         assertProblem(409, () -> stuck.cases().close(FINANCE, stuckCase, "Looked at it and it seems fine"));
         UUID paid = capturedInvoice(INVOICE_TWO);
-        db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
+        BillingTestTransactions.run(db,() -> {db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());return null;});
         UUID review = caseId("DISPUTE_REQUIRES_REVIEW", paid);
-        var cases = new BillingCaseService(db, payments, refunds, provider);
+        var cases = BillingTestWiring.cases(db, payments, refunds, provider);
         assertProblem(400, () -> cases.close(FINANCE, review, "  "));
         assertProblem(404, () -> cases.close(PAYER, review, "Customer dispute reviewed with the bank"));
         var closed = cases.close(FINANCE, review, "Dispute evidence submitted through the provider dashboard");
@@ -1563,7 +1640,7 @@ class BillingFinancialDatabaseTest {
             }
         };
         var service = service(revokedAfterTakeover, MERCHANT);
-        var refundService = new BillingRefundService(db, service, revokedAfterTakeover);
+        var refundService = BillingTestWiring.refunds(db, service, revokedAfterTakeover);
         refundService.approve(APPROVER, refund);
         assertThat(refundService.raw(refund)).containsEntry("status", "PROCESSING").containsEntry("providerId", "sim_ref_created_by_recovery");
         assertThat(db.exists("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='REFUND_REQUEST_REJECTION_IGNORED'", intent)).isTrue();
@@ -1601,7 +1678,7 @@ class BillingFinancialDatabaseTest {
         var stuck = stuckPayment(false);
         UUID stuckCase = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
         UUID paid = capturedInvoice(INVOICE_TWO);
-        db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
+        BillingTestTransactions.run(db,() -> {db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());return null;});
         UUID review = caseId("DISPUTE_REQUIRES_REVIEW", paid);
         String note = "Stripe request timed out twice; provider evidence attached for finance";
         assertProblem(403, () -> stuck.cases().verifyProviderReference("operator", stuckCase, "sim_pay_any_reference", note));
@@ -1741,12 +1818,12 @@ class BillingFinancialDatabaseTest {
             }
             @Override public ProviderResult findRefund(RefundCommand saved, String id) { return emptySearch(); }
         };
-        var service = service(lost, MERCHANT); var refundService = new BillingRefundService(db, service, lost);
+        var service = service(lost, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, lost);
         refundService.approve(APPROVER, refund);
-        var worker = new BillingRecovery(db, service, refundService, lost);
+        var worker = BillingTestWiring.recovery(db, service, refundService, lost);
         dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
         UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
-        var cases = new BillingCaseService(db, service, refundService, lost);
+        var cases = BillingTestWiring.cases(db, service, refundService, lost);
         cases.recordExternalConfirmation(FINANCE, caseId, withField(confirmation(java.time.Instant.now()),
                 "searched", "Searched refunds on the original PaymentIntent for this amount"));
         assertThat(cases.approveRelease("second-checker", caseId)).containsEntry("resolution", "RELEASED_EXTERNAL_CONFIRMATION");
@@ -1763,7 +1840,7 @@ class BillingFinancialDatabaseTest {
         BillingService service = service(absent, MERCHANT);
         UUID intent = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
         service.submit(PAYER, intent);
-        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, absent), absent);
+        var worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, absent), absent);
         for (int i = 0; i < 5; i++) { due(intent); worker.recoverPayment(worker.claimPayments(1).get(0)); }
         UUID caseId = caseId("PAYMENT_UNRESOLVED", intent);
         service.recordResult(intent, null, new ProviderResult("cs_test_late", "PROCESSING", null, "Signed webhook"));
@@ -1779,9 +1856,9 @@ class BillingFinancialDatabaseTest {
 
     @Test void caseAuditHistoryAndResolutionRulesAreEnforcedByTheDatabase() {
         UUID paid = capturedInvoice(INVOICE);
-        db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());
-        db.caseFor(paid, "ACH_RETURN", paid.toString());
-        new BillingCaseService(db, payments, refunds, provider).close(FINANCE, caseId("DISPUTE_REQUIRES_REVIEW", paid), "Dispute evidence submitted to the provider");
+        BillingTestTransactions.run(db,() -> {db.caseFor(paid, "DISPUTE_REQUIRES_REVIEW", paid.toString());return null;});
+        BillingTestTransactions.run(db,() -> {db.caseFor(paid, "ACH_RETURN", paid.toString());return null;});
+        BillingTestWiring.cases(db, payments, refunds, provider).close(FINANCE, caseId("DISPUTE_REQUIRES_REVIEW", paid), "Dispute evidence submitted to the provider");
         assertThatThrownBy(() -> db.update("UPDATE billing.case_actions SET actor='someone-else'")).isInstanceOf(org.springframework.dao.DataAccessException.class);
         assertThatThrownBy(() -> db.update("DELETE FROM billing.case_actions")).isInstanceOf(org.springframework.dao.DataAccessException.class);
         assertThatThrownBy(() -> db.update("UPDATE billing.cases SET status='RESOLVED' WHERE id=?", caseId("ACH_RETURN", paid)))
@@ -1792,12 +1869,12 @@ class BillingFinancialDatabaseTest {
     @Test void approvedRefundReleaseFreesCapacityForAReplacementRefund() {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 6000);
         BillingProvider unsafe = refundNeverSent(true);
-        var service = service(unsafe, MERCHANT); var refundService = new BillingRefundService(db, service, unsafe);
+        var service = service(unsafe, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, unsafe);
         refundService.approve(APPROVER, refund);
-        var worker = new BillingRecovery(db, service, refundService, unsafe);
+        var worker = BillingTestWiring.recovery(db, service, refundService, unsafe);
         dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
         UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
-        var cases = new BillingCaseService(db, service, refundService, unsafe);
+        var cases = BillingTestWiring.cases(db, service, refundService, unsafe);
         assertProblem(409, () -> requestedRefund(intent, 6000));
         cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request");
         cases.approveRelease(APPROVER, caseId);
@@ -1811,12 +1888,12 @@ class BillingFinancialDatabaseTest {
     @Test void releasedRefundIsNotAProviderFailureAndStillRecordsLateSuccess() {
         UUID intent = captured("CARD"); UUID refund = requestedRefund(intent, 6000);
         BillingProvider unsafe = refundNeverSent(true);
-        var service = service(unsafe, MERCHANT); var refundService = new BillingRefundService(db, service, unsafe);
+        var service = service(unsafe, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, unsafe);
         refundService.approve(APPROVER, refund);
-        var worker = new BillingRecovery(db, service, refundService, unsafe);
+        var worker = BillingTestWiring.recovery(db, service, refundService, unsafe);
         dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
         UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
-        var cases = new BillingCaseService(db, service, refundService, unsafe);
+        var cases = BillingTestWiring.cases(db, service, refundService, unsafe);
         cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request");
         cases.approveRelease(APPROVER, caseId);
         assertThat(refunds.raw(refund).get("status")).isEqualTo("RELEASED");
@@ -1837,7 +1914,7 @@ class BillingFinancialDatabaseTest {
         UUID intent = created("CARD"); service.submit(PAYER, intent);
         assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
         assertLogged(serviceLog, Level.WARN, intent.toString(), "HTTP 401");
-        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, lost), lost);
+        var worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, lost), lost);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertLogged(recoveryLog, Level.WARN, intent.toString(), "timed out");
     }
@@ -1851,7 +1928,7 @@ class BillingFinancialDatabaseTest {
         BillingService service = service(contradictory, MERCHANT);
         UUID intent = created("CARD"); service.submit(PAYER, intent);
         db.update("UPDATE billing.intents SET provider_id='sim_original_payment' WHERE id=?", intent);
-        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, contradictory), contradictory);
+        var worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, contradictory), contradictory);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(db.exists("SELECT 1 FROM billing.cases WHERE reason='RECOVERY_EVIDENCE_MISMATCH' AND intent_id=?", intent)).isTrue();
         assertLogged(recoveryLog, Level.ERROR, intent.toString(), "does not match");
@@ -1866,11 +1943,11 @@ class BillingFinancialDatabaseTest {
                 throw new ProviderUncertainException("Stripe operation timed out or was unavailable; acceptance is unknown");
             }
         };
-        var service = service(lost, MERCHANT); var refundService = new BillingRefundService(db, service, lost);
+        var service = service(lost, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, lost);
         refundService.approve(APPROVER, refund);
         assertThat(refunds.raw(refund).get("status")).isEqualTo("UNKNOWN");
         assertLogged(refundLog, Level.WARN, refund.toString(), "HTTP 500");
-        var worker = new BillingRecovery(db, service, refundService, lost);
+        var worker = BillingTestWiring.recovery(db, service, refundService, lost);
         dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
         assertLogged(recoveryLog, Level.WARN, refund.toString(), "timed out");
     }
@@ -1897,7 +1974,7 @@ class BillingFinancialDatabaseTest {
         BillingService service = service(settled, MERCHANT);
         UUID intent = created("CARD"); service.submit(PAYER, intent);
         injectTransientFault("CAPTURED");
-        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, settled), settled);
+        var worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, settled), settled);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
         assertThat(count("billing.cases")).isZero();
@@ -1947,7 +2024,7 @@ class BillingFinancialDatabaseTest {
         BillingProvider rejecting = new DelegateProvider(provider) {
             @Override public ProviderResult refund(RefundCommand command) { throw new ProviderRejectedException("Stripe rejected this operation (HTTP 400); it was not performed"); }
         };
-        var service = service(rejecting, MERCHANT); new BillingRefundService(db, service, rejecting).approve(APPROVER, refund);
+        var service = service(rejecting, MERCHANT); BillingTestWiring.refunds(db, service, rejecting).approve(APPROVER, refund);
         assertThat(refunds.raw(refund).get("status")).isEqualTo("FAILED");
         assertThat(refunds.raw(requestedRefund(intent, 10000)).get("status")).isEqualTo("REQUESTED");
         assertThat(count("billing.journals")).isEqualTo(1);
@@ -1960,7 +2037,7 @@ class BillingFinancialDatabaseTest {
         };
         BillingService service = service(lostThenRejected, MERCHANT);
         UUID intent = created("CARD"); service.submit(PAYER, intent);
-        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, lostThenRejected), lostThenRejected);
+        var worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, lostThenRejected), lostThenRejected);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN"); assertInvoice(INVOICE, 0, 10000);
     }
@@ -1974,10 +2051,10 @@ class BillingFinancialDatabaseTest {
         BillingService service = service(contradictory, MERCHANT);
         UUID intent = created("CARD"); service.submit(PAYER, intent);
         db.update("UPDATE billing.intents SET provider_id='sim_original_payment' WHERE id=?", intent);
-        var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, contradictory), contradictory);
+        var worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, contradictory), contradictory);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         UUID mismatch = caseId("RECOVERY_EVIDENCE_MISMATCH", intent);
-        new BillingCaseService(db, service, refunds, contradictory).close(FINANCE, mismatch, "Checked the provider dashboard; looked like a one-off");
+        BillingTestWiring.cases(db, service, refunds, contradictory).close(FINANCE, mismatch, "Checked the provider dashboard; looked like a one-off");
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(db.one("SELECT status FROM billing.cases WHERE id=?", mismatch).get("status")).isEqualTo("OPEN");
         assertThat(db.rows("SELECT action FROM billing.case_actions WHERE case_id=? ORDER BY created_at,id", mismatch)).extracting(row -> row.get("action"))
@@ -2014,16 +2091,12 @@ class BillingFinancialDatabaseTest {
     }
 
     // Timeouts: every transaction has a deadline, and PostgreSQL bounds lock waits, statements and idle sessions.
-    @Test void transactionsCarryADeadlineAndLockStatementAndIdleLimits() {
-        var limits = db.tx(() -> {
-            var holder = (org.springframework.jdbc.datasource.ConnectionHolder)
-                    org.springframework.transaction.support.TransactionSynchronizationManager.getResource(jdbc.getDataSource());
-            var row = db.one("SELECT current_setting('lock_timeout') AS lock_limit,current_setting('statement_timeout') AS statement_limit,"
-                    + "current_setting('idle_in_transaction_session_timeout') AS idle_limit");
-            row.put("deadline", holder.hasTimeout()); return row;
-        });
-        assertThat(limits).containsEntry("lockLimit", "3s").containsEntry("statementLimit", "10s")
-                .containsEntry("idleLimit", "20s").containsEntry("deadline", true);
+    @Test void transactionsCarryADeadlineAndLockStatementAndIdleLimits() throws Exception {
+        try(var context=BillingAnnotationHarnessDatabaseTest.context(jdbc.getDataSource())) {
+            var limits=context.getBean(BillingAnnotationHarnessDatabaseTest.ProbeCommand.class).state();
+            assertThat(limits).containsEntry("locks","3s").containsEntry("statements","10s").containsEntry("idle","20s");
+            assertThat(((Number)limits.get("ttl")).longValue()).isPositive();
+        }
     }
 
     @Test void waitingForAHeldRowLockFailsFastAsATemporaryErrorAndChangesNothing() throws Exception {
@@ -2069,7 +2142,7 @@ class BillingFinancialDatabaseTest {
         BillingProvider unsure = new DelegateProvider(provider) {
             @Override public ProviderResult closePayment(ProviderCommand c, String v, java.time.Instant p, String id) { throw new ProviderUncertainException("Provider unavailable"); }
         };
-        var cases = new BillingCaseService(db, stuck.service(), refunds, unsure);
+        var cases = BillingTestWiring.cases(db, stuck.service(), refunds, unsure);
         UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
         cases.requestRelease(FINANCE, caseId, "Provider dashboard has no payment for this intent");
         assertThatThrownBy(() -> cases.approveRelease(APPROVER, caseId)).isInstanceOfSatisfying(BillingProblem.class,
@@ -2089,7 +2162,7 @@ class BillingFinancialDatabaseTest {
                 return new ProviderResult(null, "ABSENT", null, "Nothing in this other system");
             }
         };
-        var cases = new BillingCaseService(db, stuck.service(), refunds, otherSystem);
+        var cases = BillingTestWiring.cases(db, stuck.service(), refunds, otherSystem);
         UUID caseId = caseId("PAYMENT_REPLAY_UNSAFE", stuck.intent());
         cases.requestRelease(FINANCE, caseId, "Provider dashboard has no payment for this intent");
         assertProblem(409, () -> cases.approveRelease(APPROVER, caseId));
@@ -2115,10 +2188,10 @@ class BillingFinancialDatabaseTest {
         BillingProvider lost = new DelegateProvider(provider) {
             @Override public ProviderResult refund(RefundCommand command) { throw new ProviderUncertainException("No response"); }
         };
-        var service = service(lost, MERCHANT); var refundService = new BillingRefundService(db, service, lost);
+        var service = service(lost, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, lost);
         refundService.approve(APPROVER, refund);
-        db.tx(() -> { db.escalate(intent, refund, "REFUND_UNRESOLVED", refund.toString(), "Five recovery attempts were inconclusive"); return null; });
-        var cases = new BillingCaseService(db, service, refundService, lost);
+        BillingTestTransactions.run(db,() -> { db.escalate(intent, refund, "REFUND_UNRESOLVED", refund.toString(), "Five recovery attempts were inconclusive"); return null; });
+        var cases = BillingTestWiring.cases(db, service, refundService, lost);
         UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_UNRESOLVED' AND refund_id=?", refund).get("id"));
         assertThat(cases.list(FINANCE)).filteredOn(row -> caseId.toString().equals(row.get("id"))).singleElement()
                 .satisfies(row -> assertThat(row.get("canRequestRelease")).isEqualTo(false));
@@ -2132,12 +2205,12 @@ class BillingFinancialDatabaseTest {
             @Override public ProviderResult refund(RefundCommand command) { delegate.refund(command); throw new ProviderUncertainException("Response lost after acceptance"); }
             @Override public ProviderResult recoverRefund(RefundCommand c, String v, java.time.Instant p, String id) { throw new ProviderReplayUnsafeException("Replay window elapsed"); }
         };
-        var service = service(lostThenUnsafe, MERCHANT); var refundService = new BillingRefundService(db, service, lostThenUnsafe);
+        var service = service(lostThenUnsafe, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, lostThenUnsafe);
         refundService.approve(APPROVER, refund);
-        var worker = new BillingRecovery(db, service, refundService, lostThenUnsafe);
+        var worker = BillingTestWiring.recovery(db, service, refundService, lostThenUnsafe);
         dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
         UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
-        var cases = new BillingCaseService(db, service, refundService, lostThenUnsafe);
+        var cases = BillingTestWiring.cases(db, service, refundService, lostThenUnsafe);
         cases.requestRelease(FINANCE, caseId, "Provider dashboard shows no refund for this request");
         assertThatThrownBy(() -> cases.approveRelease(APPROVER, caseId)).isInstanceOfSatisfying(BillingProblem.class,
                 problem -> assertThat(problem.code()).isEqualTo("PROVIDER_HAS_OPERATION"));
@@ -2200,7 +2273,7 @@ class BillingFinancialDatabaseTest {
         BillingService service = service(observing, MERCHANT);
         UUID intent = created("CARD"); service.submit(PAYER, intent);
         assertThat(seconds.get()).isBetween(110.0, 121.0);
-        due(intent); new BillingRecovery(db, service, new BillingRefundService(db, service, observing), observing).claimPayments(1);
+        due(intent); BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, observing), observing).claimPayments(1);
         assertThat(jdbc.queryForObject("SELECT EXTRACT(EPOCH FROM lease_until-NOW()) FROM billing.intents WHERE id=?", Double.class, intent))
                 .isBetween(110.0, 121.0);
     }
@@ -2257,13 +2330,13 @@ class BillingFinancialDatabaseTest {
                 throw new ProviderReplayUnsafeException("Replay window elapsed");
             }
         };
-        var service = service(lossy, MERCHANT); var refundService = new BillingRefundService(db, service, lossy);
+        var service = service(lossy, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, lossy);
         refundService.approve(APPROVER, refund);
-        var worker = new BillingRecovery(db, service, refundService, lossy);
+        var worker = BillingTestWiring.recovery(db, service, refundService, lossy);
         dueRefund(refund); worker.recoverRefund(worker.claimRefunds(1).get(0));
         UUID caseId = id(db.one("SELECT id FROM billing.cases WHERE reason='REFUND_REPLAY_UNSAFE' AND refund_id=?", refund).get("id"));
         String reference = text(db.one("SELECT provider_id FROM billing.provider_operations WHERE operation_kind='REFUND'"), "providerId");
-        new BillingCaseService(db, service, refundService, lossy)
+        BillingTestWiring.cases(db, service, refundService, lossy)
                 .verifyProviderReference(FINANCE, caseId, reference, "Found the refund in the provider dashboard");
         assertThat(refunds.raw(refund).get("status")).isEqualTo("REFUNDED");
         assertThat(count("billing.journals")).isEqualTo(2); assertInvoice(INVOICE, 9500, 0);
@@ -2334,14 +2407,14 @@ class BillingFinancialDatabaseTest {
                 return releaseCheck.get().get();
             }
         };
-        var service = service(searchable, MERCHANT); var refundService = new BillingRefundService(db, service, searchable);
+        var service = service(searchable, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, searchable);
         UUID intent = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
         service.submit(PAYER, intent);
-        var worker = new BillingRecovery(db, service, refundService, searchable);
+        var worker = BillingTestWiring.recovery(db, service, refundService, searchable);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
         preparedHoursAgo(intent, preparedHoursAgo);
-        return new Stuck(intent, service, new BillingCaseService(db, service, refundService, searchable));
+        return new Stuck(intent, service, BillingTestWiring.cases(db, service, refundService, searchable));
     }
     /** The attempt's creation time is immutable in production; only this test helper moves it, to stand in for elapsed time. */
     void preparedHoursAgo(UUID intent, int hours) {
@@ -2378,13 +2451,13 @@ class BillingFinancialDatabaseTest {
                 throw new ProviderReplayUnsafeException();
             }
         };
-        var service = service(blind, MERCHANT); var refundService = new BillingRefundService(db, service, blind);
+        var service = service(blind, MERCHANT); var refundService = BillingTestWiring.refunds(db, service, blind);
         UUID intent = id(service.create(PAYER, ACCOUNT, key(), List.of(INVOICE), "CARD").get("id"));
         service.submit(PAYER, intent);
-        var worker = new BillingRecovery(db, service, refundService, blind);
+        var worker = BillingTestWiring.recovery(db, service, refundService, blind);
         due(intent); worker.recoverPayment(worker.claimPayments(1).get(0));
         assertThat(service.raw(intent).get("status")).isEqualTo("UNKNOWN");
-        return new Stuck(intent, service, new BillingCaseService(db, service, refundService, blind));
+        return new Stuck(intent, service, BillingTestWiring.cases(db, service, refundService, blind));
     }
     /** Refund POST never reaches the provider; replay is either refused (unsafe) or keeps returning nothing. */
     BillingProvider refundNeverSent(boolean replayUnsafe) {
@@ -2405,7 +2478,7 @@ class BillingFinancialDatabaseTest {
     long refundOperations() { return count("billing.provider_operations WHERE operation_kind='REFUND'"); }
     BillingRecovery worker(BillingProvider adapter) {
         var service = service(adapter, MERCHANT);
-        return new BillingRecovery(db, service, new BillingRefundService(db, service, adapter), adapter);
+        return BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, adapter), adapter);
     }
 
     // ---- Dry run: one $100.00 invoice (10000 cents) through each failure point. -------------------------
@@ -2668,7 +2741,7 @@ class BillingFinancialDatabaseTest {
         inbox.receive("SIMULATOR", dispute("evt_dispute1", "dp_disputed1", "needs_response", inFiveDays, 100));
         inbox.process("SIMULATOR", "evt_dispute1");
         assertThat(db.one("SELECT state FROM billing.webhook_inbox WHERE event_id='evt_dispute1'")).containsEntry("state", "PROCESSED");
-        var cases = new BillingCaseService(db, payments, refunds, provider);
+        var cases = BillingTestWiring.cases(db, payments, refunds, provider);
         var row = cases.list(FINANCE).stream().filter(item -> "DISPUTE".equals(item.get("reason"))).findFirst().orElseThrow();
         assertThat(row).containsEntry("status", "OPEN").containsEntry("disputeStatus", "needs_response")
             .containsEntry("paymentReference", "pi_disputed1").containsEntry("disputeReason", "fraudulent");
@@ -2715,7 +2788,7 @@ class BillingFinancialDatabaseTest {
         deliver(disputeAt("evt_same3", "du_same1", "won", due, at.plusSeconds(60)));
         deliver(disputeAt("evt_same4", "du_same1", "lost", due, at.plusSeconds(60)));
         assertThat(db.one("SELECT status_unclear FROM billing.disputes WHERE id='du_same1'")).containsEntry("statusUnclear", true);
-        var row = new BillingCaseService(db, payments, refunds, provider).list(FINANCE).stream()
+        var row = BillingTestWiring.cases(db, payments, refunds, provider).list(FINANCE).stream()
             .filter(item -> "DISPUTE".equals(item.get("reason"))).findFirst().orElseThrow();
         assertThat(row).containsEntry("statusUnclear", true).containsEntry("status", "OPEN");
         var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
@@ -2740,7 +2813,7 @@ class BillingFinancialDatabaseTest {
             VALUES('SIMULATOR',?,?,'lost',NOW()-INTERVAL '90 days',?,NOW()-INTERVAL '80 days')""", "du_old" + i, MERCHANT, "evt_old" + i);
         deliver(dispute("evt_current", "du_current1", "needs_response",
             java.time.Instant.now().plus(java.time.Duration.ofDays(3)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS), 10));
-        var disputes = new BillingCaseService(db, payments, refunds, provider).list(FINANCE).stream()
+        var disputes = BillingTestWiring.cases(db, payments, refunds, provider).list(FINANCE).stream()
             .filter(item -> "DISPUTE".equals(item.get("reason"))).toList();
         assertThat(disputes.get(0)).containsEntry("id", "dispute:SIMULATOR:du_current1");
     }
@@ -2764,7 +2837,7 @@ class BillingFinancialDatabaseTest {
     @Test void aDisputeAmountWeCouldNotReadStaysUnknown() {
         deliver(new ProviderWebhookEvent("evt_noamount", "du_noamount1", null, "REVIEW", 0, "USD", null,
             new ProviderDispute(null, null, null, null, null, "needs_response", null, java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS))));
-        var row = new BillingCaseService(db, payments, refunds, provider).list(FINANCE).stream()
+        var row = BillingTestWiring.cases(db, payments, refunds, provider).list(FINANCE).stream()
             .filter(item -> "DISPUTE".equals(item.get("reason"))).findFirst().orElseThrow();
         assertThat(row.get("amountMinor")).isNull();
         assertThat(row.get("currency")).isNull();
@@ -2774,7 +2847,7 @@ class BillingFinancialDatabaseTest {
     @Test void onlyThatCompanysFinanceStaffSeeItsDisputes() {
         deliver(dispute("evt_private", "du_private1", "needs_response",
             java.time.Instant.now().plus(java.time.Duration.ofDays(3)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS), 10));
-        var cases = new BillingCaseService(db, payments, refunds, provider);
+        var cases = BillingTestWiring.cases(db, payments, refunds, provider);
         assertProblem(403, () -> cases.list(PAYER));
         assertThat(cases.list("other-finance")).noneMatch(item -> "DISPUTE".equals(item.get("reason")));
         assertThat(cases.list(FINANCE)).anyMatch(item -> "DISPUTE".equals(item.get("reason")));
@@ -2797,7 +2870,7 @@ class BillingFinancialDatabaseTest {
         }
         void recover() {
             BillingService service = service(this, MERCHANT);
-            var worker = new BillingRecovery(db, service, new BillingRefundService(db, service, this), this);
+            var worker = BillingTestWiring.recovery(db, service, BillingTestWiring.refunds(db, service, this), this);
             worker.recoverPayment(worker.claimPayments(1).get(0));
         }
     }
@@ -2838,7 +2911,7 @@ class BillingFinancialDatabaseTest {
     }
 
     BillingService service(BillingProvider adapter, UUID merchant) {
-        return new BillingService(db, adapter, new MockEnvironment(), true, "http://localhost:4200", merchant.toString());
+        return BillingTestWiring.payments(db, adapter, new MockEnvironment(), true, "http://localhost:4200", merchant.toString());
     }
     void account(UUID account, UUID merchant, String name) {
         db.update("INSERT INTO billing.accounts(id,merchant_id,name,external_reference) VALUES(?,?,?,?)", account, merchant, name, name);

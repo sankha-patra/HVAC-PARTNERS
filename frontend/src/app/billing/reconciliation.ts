@@ -22,7 +22,7 @@ interface SavedBankCheck { reportId: string; bankReference: string; amountMinor:
     <div class="billing-page">
       <header class="page-heading"><p class="eyebrow">Merchant cash operations</p><h1>Settlement reconciliation</h1>
         <p>Import a manually normalized capture report, then have a separate authorized reviewer match the reported net credit to independently checked bank evidence.</p></header>
-      <p class="notice">This screen does not connect to Stripe, a bank, or an ERP. Entered report details are evidence supplied by staff; the app does not verify the source document. A match records the reviewed reference, amount, and statement SHA-256 digest.</p>
+      <p class="notice">Enter details from a payment-provider report and an independently checked bank statement. This workspace records your review; it does not connect to your bank or verify the source document.</p>
       @if (loading() || busy()) { <mat-progress-bar mode="indeterminate" aria-label="Loading reconciliation" /> }
       @if (error()) { <p class="notice error" role="alert">{{ error() }}</p> }
       @if (message()) { <p class="notice" role="status">{{ message() }}</p> }
@@ -38,16 +38,19 @@ interface SavedBankCheck { reportId: string; bankReference: string; amountMinor:
           <mat-card class="panel"><mat-card-content>
             <h2>Import normalized capture report</h2>
             <p>Choose captured payment rows from this merchant. The report total is calculated from their original capture amounts; enter the report fee and provider/accounting references.</p>
+            <mat-form-field appearance="outline"><mat-label>Report currency</mat-label><mat-select [value]="reportCurrency()" (selectionChange)="selectCurrency($event.value)" [disabled]="busy() || !!savedImport()">
+              @for (currency of reportCurrencies(); track currency) { <mat-option [value]="currency">{{ currency }}</mat-option> }
+            </mat-select></mat-form-field>
             <p class="muted">A simulator source is marked SIMULATOR. A PROVIDER source is still a manual assertion and does not mean the application fetched a provider settlement report.</p>
             @if (!capturedPayments().length) { <p>No captured payments are available in this authorized merchant scope.</p> }
             @else { <div class="table-scroll"><table><thead><tr><th scope="col">Select</th><th scope="col">Payment</th><th scope="col">Provider</th><th scope="col">Captured gross</th></tr></thead><tbody>
               @for (payment of capturedPayments(); track payment.id) { <tr><td><input type="checkbox" [aria-label]="'Include payment ' + payment.id" [checked]="selectedPayments().includes(payment.id)" [disabled]="busy() || !!savedImport()" (change)="togglePayment(payment.id, $any($event.target).checked)"></td><th scope="row" class="reference">{{ payment.id }}</th><td>{{ payment.provider }}</td><td>{{ payment.amountMinor / 100 | currency:payment.currency }}</td></tr> }
             </tbody></table></div> }
-            <p><strong>Gross:</strong> {{ selectedGrossMinor() / 100 | currency:'USD' }} · <strong>Net:</strong> {{ computedNetMinor() / 100 | currency:'USD' }} · <strong>Payments:</strong> {{ selectedPayments().length }}</p>
+            <p><strong>Gross:</strong> {{ selectedGrossMinor() / 100 | currency:reportCurrency() }} · <strong>Net:</strong> {{ computedNetMinor() / 100 | currency:reportCurrency() }} · <strong>Payments:</strong> {{ selectedPayments().length }}</p>
             <div class="form-row">
               <mat-form-field appearance="outline"><mat-label>Report reference</mat-label><input matInput [(ngModel)]="externalId" maxlength="150" [disabled]="busy() || !!savedImport()"></mat-form-field>
               <mat-form-field appearance="outline"><mat-label>Bank deposit reference</mat-label><input matInput [(ngModel)]="bankReference" maxlength="150" [disabled]="busy() || !!savedImport()"></mat-form-field>
-              <mat-form-field appearance="outline"><mat-label>Provider fee (USD)</mat-label><input matInput inputmode="decimal" [(ngModel)]="feeAmount" placeholder="0.00" [disabled]="busy() || !!savedImport()"></mat-form-field>
+              <mat-form-field appearance="outline"><mat-label>Provider fee ({{ reportCurrency() }})</mat-label><input matInput inputmode="decimal" [(ngModel)]="feeAmount" placeholder="0.00" [disabled]="busy() || !!savedImport()"></mat-form-field>
             </div>
             @if (savedImport()) { <p class="notice">The report response was interrupted. Retry the same report reference and exact saved evidence; do not create a replacement report.</p>
               <button mat-flat-button (click)="submitImport()" [disabled]="busy()">Recover this report import</button>
@@ -64,7 +67,7 @@ interface SavedBankCheck { reportId: string; bankReference: string; amountMinor:
             <p class="reference">Report: {{ confirmReport()!.externalId }} · Net {{ confirmReport()!.netMinor / 100 | currency:confirmReport()!.currency }}</p>
             <div class="form-row">
               <mat-form-field appearance="outline"><mat-label>Statement bank reference</mat-label><input matInput [(ngModel)]="confirmationReference" maxlength="150" [disabled]="busy() || !!savedBankCheck()"></mat-form-field>
-              <mat-form-field appearance="outline"><mat-label>Confirmed credit (USD)</mat-label><input matInput inputmode="decimal" [(ngModel)]="confirmationAmount" [disabled]="busy() || !!savedBankCheck()"></mat-form-field>
+              <mat-form-field appearance="outline"><mat-label>Confirmed credit ({{ confirmReport()!.currency }})</mat-label><input matInput inputmode="decimal" [(ngModel)]="confirmationAmount" [disabled]="busy() || !!savedBankCheck()"></mat-form-field>
               <mat-form-field appearance="outline" class="hash-field"><mat-label>Statement SHA-256 digest</mat-label><input matInput [(ngModel)]="evidenceHash" maxlength="64" [disabled]="busy() || !!savedBankCheck()"></mat-form-field>
             </div>
             @if (savedBankCheck()) { <p class="notice">The confirmation response was interrupted. Retry the exact saved bank evidence or refresh the report status.</p>
@@ -97,6 +100,7 @@ export class ReconciliationComponent implements OnInit, OnDestroy {
   readonly payments = signal<FinancePayment[]>([]);
   readonly reports = signal<SettlementReport[]>([]);
   readonly selectedPayments = signal<string[]>([]);
+  readonly reportCurrency = signal('USD');
   readonly loading = signal(true);
   readonly busy = signal(false);
   readonly error = signal('');
@@ -105,7 +109,8 @@ export class ReconciliationComponent implements OnInit, OnDestroy {
   readonly savedImport = signal<SavedImport | null>(null);
   readonly savedBankCheck = signal<SavedBankCheck | null>(null);
   readonly selectedMerchant = computed(() => this.merchants().find(m => m.id === this.merchantId()) || null);
-  readonly capturedPayments = computed(() => this.payments().filter(p => p.merchantId === this.merchantId() && p.status === 'CAPTURED' && p.currency === 'USD'));
+  readonly reportCurrencies = computed(() => [...new Set(this.payments().filter(p => p.merchantId === this.merchantId() && p.status === 'CAPTURED' && ['INR','USD'].includes(p.currency)).map(p => p.currency))].sort());
+  readonly capturedPayments = computed(() => this.payments().filter(p => p.merchantId === this.merchantId() && p.status === 'CAPTURED' && p.currency === this.reportCurrency()));
   readonly selectedGrossMinor = computed(() => this.capturedPayments().filter(p => this.selectedPayments().includes(p.id)).reduce((sum,p)=>sum+p.amountMinor,0));
   computedNetMinor() { return Math.max(0,this.selectedGrossMinor()-(this.parseMinor(this.feeAmount) ?? 0)); }
   externalId: string = crypto.randomUUID();
@@ -130,17 +135,22 @@ export class ReconciliationComponent implements OnInit, OnDestroy {
     if(this.savedImport() || !this.capturedPayments().some(p=>p.id===id)) return;
     this.selectedPayments.update(ids=>checked?[...new Set([...ids,id])]:ids.filter(x=>x!==id));
   }
+  selectCurrency(currency: string) {
+    if(this.busy() || this.savedImport() || !this.reportCurrencies().includes(currency)) return;
+    this.reportCurrency.set(currency);this.selectedPayments.set([]);this.feeAmount='0.00';
+  }
   canImport() {
     const merchant=this.selectedMerchant(), ids=this.selectedPayments();
     const fee=this.parseMinor(this.feeAmount);const gross=this.selectedGrossMinor();
     return !!merchant?.canImport && ids.length>0 && ids.every(id=>this.capturedPayments().some(p=>p.id===id))
+      && new Set(this.capturedPayments().filter(p=>ids.includes(p.id)).map(p=>p.provider || 'UNKNOWN')).size===1
       && Number.isSafeInteger(gross) && fee!==null && fee>=0 && fee<gross && this.computedNetMinor()>0
       && this.validReference(this.bankReference) && this.validReference(this.externalId);
   }
   submitImport() {
     if(this.busy()) return;
     if(!this.savedImport()) {
-      if(!this.canImport()) {this.error.set('Select captured payments from one merchant, enter a valid report and bank reference, and keep provider fees below the captured gross.');return;}
+      if(!this.canImport()) {this.error.set('Select captured payments from one merchant, currency and provider, enter a valid report and bank reference, and keep provider fees below the captured gross.');return;}
       const chosen=this.capturedPayments().filter(p=>this.selectedPayments().includes(p.id));
       const source: 'SIMULATOR'|'PROVIDER'=chosen.every(p=>p.provider==='SIMULATOR')?'SIMULATOR':'PROVIDER';
       if(chosen.some(p=>(p.provider==='SIMULATOR') !== (source==='SIMULATOR'))) {this.error.set('A report must contain captures from one provider source.');return;}
@@ -197,7 +207,10 @@ export class ReconciliationComponent implements OnInit, OnDestroy {
   }
   private loadPayments() {
     this.api.financePayments().pipe(takeUntil(this.destroyed)).subscribe({
-      next:rows=>{this.payments.set(rows);this.selectedPayments.update(ids=>ids.filter(id=>rows.some(p=>p.id===id&&p.merchantId===this.merchantId()&&p.status==='CAPTURED')));},
+      next:rows=>{this.payments.set(rows);this.selectedPayments.update(ids=>ids.filter(id=>rows.some(p=>p.id===id&&p.merchantId===this.merchantId()&&p.status==='CAPTURED')));
+        const savedCurrency=rows.find(p=>this.selectedPayments().includes(p.id))?.currency;
+        if(savedCurrency && this.reportCurrencies().includes(savedCurrency)) this.reportCurrency.set(savedCurrency);
+        else if(!this.reportCurrencies().includes(this.reportCurrency())) this.reportCurrency.set(this.reportCurrencies()[0] || 'USD');},
       error:()=>this.error.set('Captured payment evidence could not be loaded. No report can be prepared until it is available.')
     });
   }

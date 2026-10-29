@@ -16,6 +16,8 @@ Java 17 / Spring Boot, Angular, PostgreSQL, Kafka, Prometheus and Grafana. AWS i
 
 ## Run locally
 
+For separate API/worker deployments and the optional Debezium relay, see [Payment worker and CDC](docs/payment-worker-cdc.md). The default relay stays `POLL` until a guarded database handover; the cloud resources are not deployed.
+
 Install Docker Desktop with Compose and PowerShell. From this repository:
 
 ```powershell

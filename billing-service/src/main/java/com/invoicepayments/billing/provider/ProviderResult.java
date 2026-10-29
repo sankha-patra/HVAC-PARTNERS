@@ -6,11 +6,15 @@ package com.invoicepayments.billing.provider;
  * they only make a case eligible for release on recorded Stripe confirmation. Null otherwise.
  */
 public record ProviderResult(String providerId, String state, String checkoutUrl, String message,
-        ProviderDiagnostics diagnostics, String finding) {
+        ProviderDiagnostics diagnostics, String finding, String sourcePaymentId) {
     /** The provider searched the original account and request window and found no matching operation. */
     public static final String SEARCH_EMPTY = "SEARCH_EMPTY";
     /** The credentials changed since the request was sent, so the provider could not search the original account. */
     public static final String CREDENTIALS_CHANGED = "CREDENTIALS_CHANGED";
+    public ProviderResult(String providerId, String state, String checkoutUrl, String message,
+            ProviderDiagnostics diagnostics, String finding) {
+        this(providerId,state,checkoutUrl,message,diagnostics,finding,null);
+    }
 
     public ProviderResult(String providerId, String state, String checkoutUrl, String message,
             ProviderDiagnostics diagnostics) {

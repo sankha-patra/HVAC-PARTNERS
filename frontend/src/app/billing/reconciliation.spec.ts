@@ -67,4 +67,21 @@ describe('Settlement reconciliation',()=>{
     expect(component.canImport()).toBe(false);component.feeAmount='125.25';expect(component.canImport()).toBe(false);
     component.feeAmount='1.25';expect(component.canImport()).toBe(true);
   });
+  it('supports Razorpay INR reports without silently excluding their captures',()=>{
+    const rupee={...payment,currency:'INR',provider:'RAZORPAY'};
+    component.ngOnInit();http.expectOne(`${base}/merchants`).flush([merchant]);
+    http.expectOne(`${base}/payments`).flush([rupee]);http.expectOne(`${base}/settlements`).flush([]);
+    expect(component.reportCurrency()).toBe('INR');expect(component.capturedPayments()).toEqual([rupee]);
+    component.togglePayment(rupee.id,true);component.bankReference='BANK-INR';component.feeAmount='1.25';
+    expect(component.canImport()).toBe(true);component.submitImport();
+    const request=http.expectOne(`${base}/reconciliation/import`);expect(request.request.body.source).toBe('PROVIDER');expect(request.request.body.grossMinor).toBe(12525);
+    request.flush({}, {status:503,statusText:'Unavailable'});
+  });
+  it('keeps currencies separate and rejects a report mixing payment providers',()=>{
+    initialize();component.payments.set([payment,{...payment,id:'inr',currency:'INR'},{...payment,id:'other-provider',provider:'STRIPE'}]);
+    component.togglePayment(payment.id,true);component.bankReference='BANK-MIX';
+    component.togglePayment('inr',true);expect(component.selectedPayments()).toEqual([payment.id]);
+    component.togglePayment('other-provider',true);expect(component.canImport()).toBe(false);
+    component.selectCurrency('INR');expect(component.selectedPayments()).toEqual([]);expect(component.capturedPayments().map(p=>p.id)).toEqual(['inr']);
+  });
 });

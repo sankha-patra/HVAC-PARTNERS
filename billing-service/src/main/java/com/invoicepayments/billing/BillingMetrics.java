@@ -55,8 +55,14 @@ public class BillingMetrics {
         // Saved events whose latest attempt failed for a technical reason and are retrying. Payments engineering.
         register(registry,"billing.webhooks.retrying", "SELECT COUNT(*) FROM billing.webhook_inbox WHERE state<>'PROCESSED' AND last_error='"+BillingInbox.TEMPORARY_ERROR+"'");
         register(registry,"billing.webhooks.retrying.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(received_at)),0) FROM billing.webhook_inbox WHERE state<>'PROCESSED' AND last_error='"+BillingInbox.TEMPORARY_ERROR+"'");
-        register(registry,"billing.outbox.pending", "SELECT COUNT(*) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");
-        register(registry,"billing.outbox.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT')");
+        register(registry,"billing.outbox.pending", "SELECT COUNT(*) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT','CDC_PENDING')");
+        register(registry,"billing.outbox.oldest.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.outbox WHERE state IN ('NEW','IN_FLIGHT','CDC_PENDING')");
+        register(registry,"billing.recovery.due.oldest.seconds", "SELECT COALESCE(GREATEST(EXTRACT(EPOCH FROM NOW()-MIN(next_recovery_at)),0),0) FROM billing.intents WHERE status IN ('UNKNOWN','SUBMITTING','PROCESSING','REQUIRES_ACTION') AND next_recovery_at<=NOW() AND (lease_until IS NULL OR lease_until<NOW())");
+        register(registry,"billing.refunds.due.oldest.seconds", "SELECT COALESCE(GREATEST(EXTRACT(EPOCH FROM NOW()-MIN(next_recovery_at)),0),0) FROM billing.refunds WHERE status IN ('APPROVED','UNKNOWN','SUBMITTING','PROCESSING') AND next_recovery_at<=NOW() AND (lease_until IS NULL OR lease_until<NOW())");
+        register(registry,"billing.outbox.cdc.pending", "SELECT COUNT(*) FROM billing.outbox WHERE state='CDC_PENDING'");
+        register(registry,"billing.cdc.expected", "SELECT CASE WHEN mode='CDC' THEN 1 ELSE 0 END FROM billing.outbox_relay_control WHERE id");
+        register(registry,"billing.cdc.slot.active", "SELECT COALESCE(MAX(CASE WHEN active THEN 1 ELSE 0 END),0) FROM pg_replication_slots WHERE slot_name='billing_outbox_cdc'");
+        register(registry,"billing.cdc.wal.retained.bytes", "SELECT COALESCE(MAX(pg_wal_lsn_diff(pg_current_wal_lsn(),restart_lsn)),0) FROM pg_replication_slots WHERE slot_name='billing_outbox_cdc'");
         register(registry,"billing.cases.open", "SELECT COUNT(*) FROM billing.cases WHERE status='OPEN'");
         register(registry,"billing.deadletters.open", "SELECT COUNT(*) FROM billing.dead_letters WHERE state<>'REPLAYED'");
         // Bank disputes and inquiries waiting for Carrier finance's answer (or whose result is unclear and needs a look),

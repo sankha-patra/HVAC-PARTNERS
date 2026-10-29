@@ -1,7 +1,7 @@
 <div class="login-page">
   <form class="glass-panel login-card" (ngSubmit)="submit()">
     <h1>Welcome back</h1>
-    <p class="sub">Sign in to continue to Invoice Payments</p>
+    <p class="sub">Sign in to shop and view your orders</p>
 
     <mat-form-field appearance="outline" class="full">
       <mat-label>Username or email</mat-label>
@@ -20,7 +20,7 @@
       />
     </mat-form-field>
 
-    <p class="hint">Buyer: <code>demo</code> / <code>demo123</code> · Admin: <code>admin</code> / <code>admin123</code></p>
+    <details class="hint"><summary>Local demo access</summary><p>The sample buyer is filled in for this local demo. No real payments are made by the simulator.</p></details>
     <p class="error" *ngIf="error">{{ error }}</p>
 
     <button mat-flat-button color="primary" type="submit" class="submit" [disabled]="loading">

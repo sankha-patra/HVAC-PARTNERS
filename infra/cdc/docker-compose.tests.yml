@@ -1,0 +1,91 @@
+# Disposable real CDC transport. No host ports, app data, secrets or production credentials.
+services:
+  postgres-test:
+    image: postgres:17-alpine
+    mem_limit: 512m
+    environment:
+      POSTGRES_DB: invoice_payments_test
+      POSTGRES_USER: billing_test
+      POSTGRES_PASSWORD: disposable-test-only
+    command: [postgres, -p, '15432', -c, wal_level=logical, -c, max_replication_slots=4, -c, max_wal_senders=4, -c, max_slot_wal_keep_size=256MB]
+    volumes:
+      - cdc-postgres:/var/lib/postgresql/data
+      - ../../scripts/test-databases.sql:/docker-entrypoint-initdb.d/test-databases.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U billing_test -d invoice_payments_test -p 15432]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  kafka:
+    image: apache/kafka:3.9.1
+    mem_limit: 640m
+    environment:
+      CLUSTER_ID: aW52b2ljZS1jZGMtdGVzdA
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_HEAP_OPTS: -Xms128m -Xmx256m
+    healthcheck:
+      test: [CMD-SHELL, "KAFKA_HEAP_OPTS='-Xms32m -Xmx64m' /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+  connect:
+    image: quay.io/debezium/connect:3.6.3.Final@sha256:bb86eca40edbd3b9aaf52b60115f4d01abdc3f86d8f058c2022a8400ea07a275
+    mem_limit: 768m
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: billing-cdc-test-connect
+      CONFIG_STORAGE_TOPIC: billing-cdc-test-config
+      OFFSET_STORAGE_TOPIC: billing-cdc-test-offsets
+      STATUS_STORAGE_TOPIC: billing-cdc-test-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_FLUSH_INTERVAL_MS: 600000
+      KAFKA_HEAP_OPTS: -Xms128m -Xmx384m
+      REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_PLUGIN_PATH: /kafka/connect
+    depends_on:
+      postgres-test: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, curl -fsS http://localhost:8083/connectors >/dev/null]
+      interval: 5s
+      timeout: 3s
+      # The image scans every bundled connector at startup; on a loaded machine that alone took over 3 minutes.
+      retries: 60
+      start_period: 240s
+  tests:
+    image: invoice-payments-tests-claude-retries-tests:latest
+    profiles: [verification]
+    mem_limit: 1536m
+    network_mode: service:postgres-test
+    depends_on:
+      connect: {condition: service_healthy}
+    environment:
+      MAVEN_OPTS: -Xmx256m
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=50
+      BILLING_TEST_JDBC_URL: jdbc:postgresql://127.0.0.1:15432/invoice_payments_test
+      BILLING_TEST_DB_USER: billing_test
+      BILLING_TEST_DB_PASSWORD: disposable-test-only
+      BILLING_CDC_TEST_CONNECT_URL: http://connect:8083
+      BILLING_CDC_TEST_KAFKA: kafka:9092
+      BILLING_CDC_TEST_EVIDENCE: /evidence
+    volumes:
+      - ../../billing-service/src:/source/billing-service/src:ro
+      - ./connector.json:/source/billing-service/src/test/resources/cdc-connector.json:ro
+      - ../../scripts/cdc/run-integration.sh:/run-cdc-integration.sh:ro
+    command: [bash, /run-cdc-integration.sh]
+volumes:
+  cdc-postgres:

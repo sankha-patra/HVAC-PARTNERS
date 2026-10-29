@@ -150,7 +150,7 @@ class BillingCaseReferenceDatabaseTest {
             }
         };
         Map<String, String> before = snapshot();
-        assertThatThrownBy(() -> f.db.tx(() -> verify(cases(observed), operation)))
+        assertThatThrownBy(() -> BillingTestTransactions.run(f.db,() -> verify(cases(observed), operation)))
                 .isInstanceOf(IllegalTransactionStateException.class);
         assertThat(calls).hasValue(0);
         assertUnchangedAndOpen(before, operation);
@@ -214,9 +214,9 @@ class BillingCaseReferenceDatabaseTest {
         UUID refund = f.requestedRefund(intent, 500);
         BillingProvider silent = f.refundNeverSent(true);
         BillingService payments = f.service(silent, MERCHANT);
-        BillingRefundService refunds = new BillingRefundService(f.db, payments, silent);
+        BillingRefundService refunds = BillingTestWiring.refunds(f.db, payments, silent);
         refunds.approve(APPROVER, refund);
-        BillingRecovery recovery = new BillingRecovery(f.db, payments, refunds, silent);
+        BillingRecovery recovery = BillingTestWiring.recovery(f.db, payments, refunds, silent);
         f.dueRefund(refund);
         recovery.recoverRefund(recovery.claimRefunds(1).get(0));
         ProviderResult accepted = f.provider.refund(new RefundCommand(refund.toString(), intent.toString(), f.providerId(intent),
@@ -228,7 +228,7 @@ class BillingCaseReferenceDatabaseTest {
 
     private BillingCaseService cases(BillingProvider provider) {
         BillingService payments = f.service(provider, MERCHANT);
-        return new BillingCaseService(f.db, payments, new BillingRefundService(f.db, payments, provider), provider);
+        return BillingTestWiring.cases(f.db, payments, BillingTestWiring.refunds(f.db, payments, provider), provider);
     }
 
     private Map<String, Object> verify(BillingCaseService service, Unresolved operation) {

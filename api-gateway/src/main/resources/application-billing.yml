@@ -8,7 +8,7 @@ spring:
         - id: billing
           uri: ${BILLING_SERVICE_URL:http://127.0.0.1:8084}
           predicates:
-            - Path=/api/v1/billing,/api/v1/billing/**
+            - Path=/api/v1/billing,/api/v1/billing/**,/api/v1/commerce,/api/v1/commerce/**
         - id: identity
           uri: ${AUTH_SERVICE_URL:http://127.0.0.1:8081}
           predicates:

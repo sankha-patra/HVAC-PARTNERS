@@ -17,19 +17,26 @@ export class AuthService {
 
   readonly user = signal<UserDto | null>(null);
   readonly ready = signal(false);
+  readonly staffWorkspace = signal(false);
 
   /** True only right after a successful login in this tab session (for one-time greeting). */
   private greetPending = false;
+  private sessionGeneration = 0;
 
   bootstrap(): Observable<boolean> {
+    const generation = this.sessionGeneration;
     return this.http.get<UserDto>(`${this.apiUrl}/auth/me`, { withCredentials: true }).pipe(
       tap((u) => {
+        if (generation !== this.sessionGeneration) return;
         this.user.set(u);
+        this.loadWorkspace(u);
         this.ready.set(true);
       }),
-      map(() => true),
+      map(() => this.isLoggedIn()),
       catchError(() => {
+        if (generation !== this.sessionGeneration) return of(this.isLoggedIn());
         this.user.set(null);
+        this.staffWorkspace.set(false);
         this.ready.set(true);
         return of(false);
       })
@@ -37,6 +44,7 @@ export class AuthService {
   }
 
   login(username: string, password: string): Observable<LoginResponse> {
+    const generation = ++this.sessionGeneration;
     return this.http
       .post<LoginResponse>(
         `${this.apiUrl}/auth/login`,
@@ -45,7 +53,9 @@ export class AuthService {
       )
       .pipe(
         tap((res) => {
+          if (generation !== this.sessionGeneration) return;
           this.user.set(res.user);
+          this.loadWorkspace(res.user);
           this.greetPending = true;
           this.ready.set(true);
         })
@@ -53,9 +63,10 @@ export class AuthService {
   }
 
   logout(): void {
+    const generation = ++this.sessionGeneration;
     this.http.post(`${this.apiUrl}/auth/logout`, {}, { withCredentials: true }).subscribe({
-      next: () => this.afterLogout(),
-      error: () => this.afterLogout()
+      next: () => { if (generation === this.sessionGeneration) this.afterLogout(); },
+      error: () => { if (generation === this.sessionGeneration) this.afterLogout(); }
     });
   }
 
@@ -81,7 +92,16 @@ export class AuthService {
 
   private afterLogout() {
     this.user.set(null);
+    this.staffWorkspace.set(false);
     this.greetPending = false;
     this.router.navigateByUrl('/login');
+  }
+
+  private loadWorkspace(user: UserDto) {
+    this.staffWorkspace.set(false);
+    this.http.get<{staffWorkspace: boolean}>(`${this.apiUrl}/billing/access`, {withCredentials:true})
+      .pipe(catchError(()=>of({staffWorkspace:false}))).subscribe(access=>{
+        if(this.user()===user)this.staffWorkspace.set(access.staffWorkspace===true);
+      });
   }
 }

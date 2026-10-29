@@ -78,7 +78,8 @@ public class BillingConfiguration {
     BillingProvider billingProvider(JdbcTemplate jdbc, PlatformTransactionManager manager, Environment env,
         io.micrometer.core.instrument.MeterRegistry registry,
         @Value("${billing.provider:SIMULATOR}") String name,
-        @Value("${billing.stripe.secret-key:}") String stripeKey) {
+        @Value("${billing.stripe.secret-key:}") String stripeKey,
+        org.springframework.beans.factory.ObjectProvider<SimulatorOperationStore> simulatorOperations) {
         boolean prod=env.acceptsProfiles(Profiles.of("prod"));
         if(prod && (env.getProperty("billing.demo-enabled",Boolean.class,false)
             || env.getProperty("billing.simulator-enabled",Boolean.class,false)
@@ -87,7 +88,7 @@ public class BillingConfiguration {
         return switch(name) {
             case "SIMULATOR" -> {
                 if(prod) throw new IllegalStateException("Production cannot use a simulated payment provider");
-                yield new SimulatorBillingProvider(jdbc,manager);
+                yield new SimulatorBillingProvider(simulatorOperations.getObject());
             }
             case "STRIPE" -> {
                 if(stripeKey.isBlank()) throw new IllegalStateException("Selecting Stripe requires a non-empty test-mode API key");
@@ -95,11 +96,18 @@ public class BillingConfiguration {
                     env.getProperty("billing.stripe.max-concurrent",Integer.class,8),
                     providerAdmissionWait(env));
             }
+            case "RAZORPAY" -> new RazorpayBillingProvider(env.getProperty("billing.razorpay.key-id", ""),
+                    env.getProperty("billing.razorpay.key-secret", ""));
             default -> throw new IllegalStateException("Unknown billing provider");
         };
     }
     @Bean
     StripeWebhookVerifier stripeWebhookVerifier(@Value("${billing.stripe.webhook-secret:}") String secret) {
         return new StripeWebhookVerifier(secret);
+    }
+    @Bean
+    RazorpayWebhookVerifier razorpayWebhookVerifier(@Value("${billing.razorpay.webhook-secret:}") String secret,
+            @Value("${billing.razorpay.account-id:}") String accountId) {
+        return new RazorpayWebhookVerifier(secret, accountId);
     }
 }

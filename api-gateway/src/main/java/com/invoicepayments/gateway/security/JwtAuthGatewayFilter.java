@@ -51,7 +51,8 @@ public class JwtAuthGatewayFilter implements GlobalFilter, Ordered {
             || path.startsWith("/fallback/")
             || path.equals("/api/v1/auth/login")
             || path.equals("/api/v1/auth/logout")
-            || path.equals("/api/v1/billing/webhooks/stripe");
+            || path.equals("/api/v1/billing/webhooks/stripe")
+            || path.equals("/api/v1/billing/webhooks/razorpay");
     }
 
     private String extractToken(ServerHttpRequest request) {

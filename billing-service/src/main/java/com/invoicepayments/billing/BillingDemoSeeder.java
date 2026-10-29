@@ -13,8 +13,9 @@ import java.util.UUID;
 public class BillingDemoSeeder implements ApplicationRunner {
     private final BillingStore db;
     public BillingDemoSeeder(BillingStore db) {this.db=db;}
+    @org.springframework.transaction.annotation.Transactional(transactionManager="transactionManager",propagation=org.springframework.transaction.annotation.Propagation.REQUIRED,rollbackFor=Exception.class,timeout=10,label="billing")
     @Override public void run(ApplicationArguments args) {
-        db.tx(()->{
+        BillingExecutionBudget.requireTime();BillingStore.requireTransaction();
             UUID merchant=UUID.fromString("10000000-0000-0000-0000-000000000001");
             UUID primary=UUID.fromString("20000000-0000-0000-0000-000000000001"),other=UUID.fromString("20000000-0000-0000-0000-000000000002");
             db.update("INSERT INTO billing.merchants(id,name) VALUES(?,'Northstar Commercial HVAC — fictional merchant') ON CONFLICT DO NOTHING",merchant);
@@ -27,7 +28,6 @@ public class BillingDemoSeeder implements ApplicationRunner {
             db.update("INSERT INTO billing.staff(merchant_id,user_id,role) SELECT ?,id::text,'REFUND_APPROVER' FROM identity.app_users WHERE username='reviewer' ON CONFLICT DO NOTHING",merchant);
             for(int i=1;i<=4;i++) db.update("INSERT INTO billing.invoices(id,account_id,number,currency,total_minor,due_date) VALUES(?,?,?,'USD',?,CURRENT_DATE+?) ON CONFLICT DO NOTHING",
                 UUID.fromString("30000000-0000-0000-0000-00000000000"+i),i==4?other:primary,"DEMO-INV-10"+i,new long[]{0,112550,87525,14000,22500}[i],i*7);
-            return null;
-        });
+
     }
 }

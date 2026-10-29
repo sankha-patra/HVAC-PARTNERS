@@ -10,10 +10,12 @@ import static com.invoicepayments.billing.BillingStore.*;
 
 @RestController
 @Profile("billing")
+@org.springframework.boot.autoconfigure.condition.ConditionalOnExpression("'${billing.role:combined}' != 'worker'")
 @RequestMapping("/api/v1/billing")
 public class BillingController {
     private final BillingService payments; private final BillingRefundService refunds;
     private final BillingInbox inbox; private final StripeWebhookVerifier verifier; private final BillingStore db;
+    @org.springframework.beans.factory.annotation.Autowired private RazorpayWebhookVerifier razorpayVerifier;
     private final BillingReconciliation reconciliation;
     private final BillingCaseService cases;
     private final BillingPaymentRetry retries;
@@ -30,6 +32,10 @@ public class BillingController {
     public record RefundRequest(long amountMinor,String reason) {}
     public record CaseNote(String note) {}
     public record ProviderReference(String reference,String note) {}
+    /** Navigation hint only; each staff operation still enforces its own merchant permission. */
+    @GetMapping("/access") public Object access(Authentication auth) {
+        return Map.of("staffWorkspace",db.exists("SELECT 1 FROM billing.staff WHERE user_id=? AND role IN ('FINANCE','REFUND_APPROVER','OPS')",user(auth)));
+    }
     @GetMapping("/accounts") public Object accounts(Authentication auth) { return payments.accounts(user(auth)); }
     @GetMapping("/accounts/{account}/invoices") public Object invoices(Authentication auth,@PathVariable UUID account) {return payments.invoices(user(auth),account);}
     @PostMapping("/accounts/{account}/intents") public Object create(Authentication auth,@PathVariable UUID account,
@@ -51,6 +57,7 @@ public class BillingController {
         return retries.retry(user(auth),intent,key,request==null ? null : request.method());
     }
     @PostMapping("/intents/{intent}/submit") public Object submit(Authentication auth,@PathVariable UUID intent) {return payments.submit(user(auth),intent);}
+    @PostMapping("/intents/{intent}/reconcile") public Object reconcile(Authentication auth,@PathVariable UUID intent) {return payments.reconcile(user(auth),intent);}
     @PostMapping("/intents/{intent}/simulate") public Object simulate(Authentication auth,@PathVariable UUID intent,@RequestBody Simulation request) {
         if(!Set.of("CAPTURED","FAILED","PROCESSING","RETURNED","TIMEOUT_AFTER_ACCEPT").contains(Objects.toString(request.outcome(),""))) throw BillingProblem.invalid("Unsupported simulator outcome");
         return payments.simulate(user(auth),intent,request.outcome());
@@ -58,6 +65,12 @@ public class BillingController {
     @PostMapping("/webhooks/stripe") public ResponseEntity<?> webhook(@RequestBody byte[] raw,@RequestHeader("Stripe-Signature") String signature) {
         var event=verifier.verify(raw,signature);
         event.ifPresent(value -> inbox.receive("STRIPE",value));
+        return ResponseEntity.accepted().body(Map.of("outcome",event.isPresent()?"DURABLY_RECEIVED":"IGNORED"));
+    }
+    @PostMapping("/webhooks/razorpay") public ResponseEntity<?> razorpayWebhook(@RequestBody byte[] raw,
+            @RequestHeader("X-Razorpay-Signature") String signature,@RequestHeader("X-Razorpay-Event-Id") String eventId) {
+        var event=razorpayVerifier.verify(raw,signature,eventId);
+        event.ifPresent(value -> inbox.receive("RAZORPAY",value));
         return ResponseEntity.accepted().body(Map.of("outcome",event.isPresent()?"DURABLY_RECEIVED":"IGNORED"));
     }
     @GetMapping("/finance/cases") public Object cases(Authentication auth) { return cases.list(user(auth)); }
@@ -130,7 +143,7 @@ public class BillingController {
     @GetMapping("/finance/settlements") public Object settlements(Authentication auth) {
         String user=user(auth);refunds.requireAnyStaff(user);
         var rows=db.rows("""
-            SELECT i.id,i.merchant_id,'USD' AS currency,i.external_id,i.source,
+            SELECT i.id,i.merchant_id,COALESCE(r.currency,(SELECT p.currency FROM billing.intents p WHERE p.id=(i.evidence->'lines'->0->>'intentId')::uuid)) AS currency,i.external_id,i.source,
               COALESCE(r.gross_minor,(i.evidence->>'grossMinor')::BIGINT) AS gross_minor,
               COALESCE(r.fee_minor,(i.evidence->>'feeMinor')::BIGINT) AS fee_minor,
               COALESCE(r.net_minor,(i.evidence->>'netMinor')::BIGINT) AS net_minor,

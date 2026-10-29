@@ -6,7 +6,7 @@ The older lists describe earlier checkpoints. This update separates completed wo
 
 | Earlier finding | Current position |
 |---|---|
-| Transaction annotation conversion was only a proposal | A real Spring-proxy proof now covers one complete payment flow, checked-exception rollback, committed preparation before provider IO, no held connection, atomic recording and preserved deadlines. Production retains its bounded TransactionTemplate orchestration; a wholesale conversion was not made. |
+| Transaction annotation conversion was only a proposal | Production migration completed: all 51 transaction sites use named proxied commands, with dynamic deadlines and guarded I/O. The clean485-test/31-class run includes32dedicated boundary/crash checks. The earlier hybrid proof is superseded; see transactional-one-flow-proof.md and verification.md. |
 | Circuit-breaker reset and trial ownership needed correction | Fixed. Only successful Checkout creation resets it. A trial owns its permit, late cleanup cannot clear another trial, and requests recheck the pause after waiting for capacity. |
 | Concurrent clicks could say “nothing was charged” while a payment was already moving | Fixed. The payment is checked under its lock before admission. A duplicate during preparation now gets an explicit in-progress response, without waiting for the original row lock or provider call. |
 | Disputes needed ID, ordering, compatibility and deadline safeguards | Fixed: documented du_ IDs, same-second ambiguity, no invented event time, compatible enrichment of old inbox records, readable amount/charge evidence, actionable-first finance listing and deadline alerts. |

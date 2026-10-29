@@ -1,5 +1,11 @@
 # New financial workflow owns only the versioned billing schema.
 spring:
+  data:
+    redis:
+      host: ${COMMERCE_REDIS_HOST:127.0.0.1}
+      port: ${COMMERCE_REDIS_PORT:6379}
+      timeout: 100ms
+      connect-timeout: 100ms
   datasource:
     hikari:
       # Pool waiting consumes the same request budget as SQL and provider work.
@@ -45,10 +51,39 @@ logging:
     org.hibernate.orm.jdbc.bind: "OFF"
     org.hibernate.type.descriptor.sql.BasicBinder: "OFF"
 billing:
+  notifications:
+    enabled: ${BILLING_NOTIFICATIONS_ENABLED:false}
+    test-mode: ${BILLING_NOTIFICATIONS_TEST_MODE:false}
+    test-recipient: ${BILLING_NOTIFICATIONS_TEST_RECIPIENT:}
+    smtp-host: ${BILLING_NOTIFICATIONS_SMTP_HOST:}
+    smtp-port: ${BILLING_NOTIFICATIONS_SMTP_PORT:587}
+    smtp-username: ${BILLING_NOTIFICATIONS_SMTP_USERNAME:}
+    smtp-password: ${BILLING_NOTIFICATIONS_SMTP_PASSWORD:}
+    from: ${BILLING_NOTIFICATIONS_FROM:}
+  aws-recovery:
+    enabled: ${BILLING_AWS_RECOVERY_ENABLED:false}
+  role: ${BILLING_ROLE:combined}
+  require-separated-role: ${BILLING_REQUIRE_SEPARATED_ROLE:false}
+  worker-shutdown-seconds: ${BILLING_WORKER_SHUTDOWN_SECONDS:60}
+  jobs:
+    recovery-enabled: ${BILLING_RECOVERY_ENABLED:true}
+    inbox-enabled: ${BILLING_INBOX_ENABLED:true}
+    expiry-enabled: ${BILLING_EXPIRY_ENABLED:true}
+    publisher-enabled: ${BILLING_OUTBOX_PUBLISHER_ENABLED:true}
+  consumers:
+    notifications-enabled: ${BILLING_NOTIFICATION_CONSUMER_ENABLED:true}
+    dlt-enabled: ${BILLING_DLT_CONSUMER_ENABLED:true}
+    cdc-enabled: ${BILLING_CDC_RECEIPTS_ENABLED:true}
+    erp-enabled: ${BILLING_ERP_SIMULATOR_ENABLED:false}
   # Cooperative full-route budget; provider work leaves 5 seconds for recording/response.
   request-budget: ${BILLING_REQUEST_BUDGET:25s}
   enabled: true
   provider: ${BILLING_PROVIDER:SIMULATOR}
+  razorpay:
+    key-id: ${BILLING_RAZORPAY_KEY_ID:}
+    key-secret: ${BILLING_RAZORPAY_KEY_SECRET:}
+    webhook-secret: ${BILLING_RAZORPAY_WEBHOOK_SECRET:}
+    account-id: ${BILLING_RAZORPAY_ACCOUNT_ID:}
   simulator-enabled: ${BILLING_SIMULATOR_ENABLED:false}
   demo-enabled: ${BILLING_DEMO_ENABLED:false}
   erp-simulator-enabled: ${BILLING_ERP_SIMULATOR_ENABLED:false}
@@ -60,12 +95,16 @@ billing:
   events-topic: billing.events.v1
   kafka-enabled: ${BILLING_KAFKA_ENABLED:true}
   stripe:
+    fleet-concurrency-budget: ${BILLING_STRIPE_FLEET_CONCURRENCY_BUDGET:0}
+    maximum-fleet-tasks: ${BILLING_STRIPE_MAXIMUM_FLEET_TASKS:0}
     # Divide the account's safe concurrency by the maximum deployed replica count.
     max-concurrent: ${BILLING_STRIPE_MAX_CONCURRENT:8}
     admission-wait: ${BILLING_STRIPE_ADMISSION_WAIT:100ms}
     secret-key: ${BILLING_STRIPE_SECRET_KEY:}
     webhook-secret: ${BILLING_STRIPE_WEBHOOK_SECRET:}
   provider-merchant-id: ${BILLING_PROVIDER_MERCHANT_ID:10000000-0000-0000-0000-000000000001}
+commerce:
+  cache-enabled: ${COMMERCE_CACHE_ENABLED:false}
 management:
   server:
     port: 9090

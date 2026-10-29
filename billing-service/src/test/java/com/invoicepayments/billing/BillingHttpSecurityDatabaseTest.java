@@ -46,6 +46,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         "billing.workers-enabled=false", "billing.kafka-enabled=false", "billing.demo-enabled=false",
         "billing.erp-simulator-enabled=false", "billing.simulator-enabled=true", "billing.provider=SIMULATOR",
         "billing.public-url=http://localhost:4200", "billing.stripe.secret-key=", "billing.stripe.webhook-secret=",
+        "billing.razorpay.webhook-secret=synthetic-http-signature-fixture-only", "billing.razorpay.account-id=acc_httpfixture",
         "management.server.port=0", "management.tracing.enabled=false", "management.health.redis.enabled=false",
         "spring.data.redis.repositories.enabled=false", "spring.cache.type=none",
         "spring.cloud.discovery.enabled=false", "eureka.client.enabled=false",
@@ -137,6 +138,17 @@ class BillingHttpSecurityDatabaseTest {
     @Test
     void anonymousBillingAccessReturnsUnauthorized() throws Exception {
         assertThat(send("GET", "/api/v1/billing/accounts", null).statusCode()).isEqualTo(401);
+        assertThat(send("GET", "/api/v1/billing/access", null).statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    void workspaceHintUsesAssignedMerchantPermissionsInsteadOfLegacyJwtRole() throws Exception {
+        var buyer=send("GET","/api/v1/billing/access",null,"Authorization","Bearer "+bearer);
+        var reviewer=send("GET","/api/v1/billing/access",null,"Authorization","Bearer "+reviewerBearer);
+        var unassignedAdmin=send("GET","/api/v1/billing/access",null,"Authorization","Bearer "+token(user,"ADMIN"));
+        assertThat(new JSONObject(buyer.body()).getBoolean("staffWorkspace")).isFalse();
+        assertThat(new JSONObject(reviewer.body()).getBoolean("staffWorkspace")).isTrue();
+        assertThat(new JSONObject(unassignedAdmin.body()).getBoolean("staffWorkspace")).isFalse();
     }
 
     @Test
@@ -298,6 +310,29 @@ class BillingHttpSecurityDatabaseTest {
             "Idempotency-Key", UUID.randomUUID().toString()).statusCode()).isEqualTo(404);
     }
 
+    @Test void commerceReadUsesRealJwtMembershipInsteadOfTheDefaultDenyRule() throws Exception {
+        String cart="/api/v1/commerce/accounts/"+account+"/cart";
+        assertThat(send("GET",cart,null).statusCode()).isEqualTo(401);
+        var allowed=send("GET",cart,null,"Authorization","Bearer "+bearer);
+        assertThat(allowed.statusCode()).isEqualTo(200);
+        assertThat(new JSONObject(allowed.body()).getJSONArray("lines").length()).isZero();
+        assertThat(send("GET","/api/v1/commerce/accounts/"+otherAccount+"/cart",null,"Authorization","Bearer "+bearer).statusCode()).isEqualTo(404);
+    }
+    @Test void commerceBrowserPreflightAllowsBasketPutAndCheckoutIdentityHeader() throws Exception {
+        var response=send("OPTIONS","/api/v1/commerce/accounts/"+account+"/cart",null,
+            "Origin","http://localhost:4200","Access-Control-Request-Method","PUT","Access-Control-Request-Headers","Content-Type,Checkout-Key,X-XSRF-TOKEN");
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Access-Control-Allow-Methods").orElse("")).contains("PUT");
+        assertThat(response.headers().firstValue("Access-Control-Allow-Headers").orElse("")).containsIgnoringCase("Checkout-Key");
+    }
+    @Test void commerceBodiesAreBoundedAndCookieCommandsRemainCsrfProtected() throws Exception {
+        String cart="/api/v1/commerce/accounts/"+account+"/cart";
+        assertThat(send("PUT",cart,"{\"version\":0,\"lines\":[]}","Cookie","IP_AUTH="+bearer).statusCode()).isEqualTo(403);
+        assertThat(send("PUT",cart,"{\"padding\":\""+"x".repeat(262145)+"\"}","Authorization","Bearer "+bearer).statusCode()).isEqualTo(413);
+    }
+    @Test void unsignedRazorpayWebhookReachesSignatureVerificationWithoutAJwt() throws Exception {
+        assertThat(send("POST","/api/v1/billing/webhooks/razorpay","{}","X-Razorpay-Signature","0".repeat(64),"X-Razorpay-Event-Id","evt_unsigned_http").statusCode()).isEqualTo(400);
+    }
     private String token(String subject, String role) {
         return Jwts.builder().subject(subject).claim("role", role)
             .issuedAt(Date.from(Instant.now().minusSeconds(5))).expiration(Date.from(Instant.now().plusSeconds(300)))

@@ -19,6 +19,16 @@ resource "aws_db_parameter_group" "billing" {
     name  = "rds.force_ssl"
     value = "1"
   }
+  parameter {
+    name         = "rds.logical_replication"
+    value        = var.cdc_enabled ? "1" : "0"
+    apply_method = "pending-reboot"
+  }
+  parameter {
+    name         = "max_slot_wal_keep_size"
+    value        = "1024"
+    apply_method = "pending-reboot"
+  }
   lifecycle { create_before_destroy = true }
 }
 resource "random_id" "snapshot" { byte_length = 4 }

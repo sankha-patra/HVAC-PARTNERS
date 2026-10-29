@@ -66,6 +66,7 @@ override_resource {
 }
 
 variables {
+  worker_database_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-worker-abcdef"
   route53_zone_id     = "ZTESTONLY"
   api_origin_hostname = "billing-origin.example.com"
   frontend_hostname   = "billing.example.com"
@@ -152,12 +153,12 @@ run "application_has_bounded_identity_and_access" {
     error_message = "Secrets must be referenced, and auth must not receive provider credentials."
   }
   assert {
-    condition     = alltrue([for statement in jsondecode(aws_iam_role_policy.payment_kafka[0].policy).Statement : endswith(statement.Resource, "/billing.events.v1.DLT") if contains(statement.Action, "kafka-cluster:ReadData")])
-    error_message = "The runtime audit listener may read only the DLT, not arbitrary event topics."
+    condition     = alltrue(flatten([for statement in jsondecode(aws_iam_role_policy.payment_kafka[0].policy).Statement : [for resource in flatten([statement.Resource]) : endswith(resource, "/billing.events.v1.DLT") || endswith(resource, "/billing.events.v1")] if contains(statement.Action, "kafka-cluster:ReadData")]))
+    error_message = "Runtime consumers may read only billing events and their DLT, never arbitrary topics."
   }
   assert {
-    condition     = alltrue([for statement in jsondecode(aws_iam_role_policy.payment_kafka[0].policy).Statement : endswith(statement.Resource, "/billing-dlt-audit-v1") if contains(statement.Action, "kafka-cluster:AlterGroup")])
-    error_message = "The runtime consumer must be restricted to its exact DLT audit group."
+    condition     = alltrue(flatten([for statement in jsondecode(aws_iam_role_policy.payment_kafka[0].policy).Statement : [for resource in flatten([statement.Resource]) : endswith(resource, "/billing-dlt-audit-v1") || endswith(resource, "/billing-cdc-receipts-v1")] if contains(statement.Action, "kafka-cluster:AlterGroup")]))
+    error_message = "Runtime consumers must remain restricted to the exact audit and CDC receipt groups."
   }
   assert {
     condition     = anytrue([for env in jsondecode(aws_ecs_task_definition.application["billing"].container_definitions)[0].environment : env.name == "BILLING_PROVIDER_MERCHANT_ID" && env.value == var.provider_merchant_id]) && alltrue([for definition in aws_ecs_task_definition.application : anytrue([for env in jsondecode(definition.container_definitions)[0].environment : env.name == "APP_JWT_COOKIE_SECURE" && env.value == "true"]) && anytrue([for env in jsondecode(definition.container_definitions)[0].environment : env.name == "BILLING_PUBLIC_URL" && env.value == "https://${var.frontend_hostname}"])])

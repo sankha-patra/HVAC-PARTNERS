@@ -23,8 +23,9 @@ describe('Invoice application shell',()=>{
     events.next(new NavigationEnd(2,'/login','/login'));expect(app.showChrome()).toBe(false);
     http.verify();app.ngOnDestroy();
   });
-  it('contains only login and invoice/finance routes',()=>{
-    expect(routes.map(route=>route.path)).toEqual(['login','','invoices','finance','reconciliation','**']);
-    expect(routes.find(route=>route.path==='')?.redirectTo).toBe('/invoices');
+  it('contains the authenticated shop and the existing billing routes',()=>{
+    expect(routes.map(route=>route.path)).toEqual(['login','','shop','orders','invoices','finance','reconciliation','**']);
+    expect(routes.find(route=>route.path==='shop')?.canActivate).toHaveLength(1);
+    expect(routes.find(route=>route.path==='')?.redirectTo).toBe('/shop');
   });
 });

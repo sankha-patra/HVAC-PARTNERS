@@ -1,16 +1,20 @@
 @if (showChrome()) {
   <div class="app-shell" [class.app-shell--dimmed]="pageBlurred()">
     <mat-toolbar class="top-bar frost-nav">
-      <span class="brand">Invoice payments</span>
-      <nav class="nav">
-        <a mat-button routerLink="/invoices" routerLinkActive="active" class="nav-pill">Invoice payments</a>
+      <a class="brand" routerLink="/shop">Carrier shop</a>
+      <nav class="nav" aria-label="Main navigation">
+        <a mat-button routerLink="/shop" routerLinkActive="active" class="nav-pill">Shop</a>
+        <a mat-button routerLink="/orders" routerLinkActive="active" class="nav-pill">My orders</a>
+        @if (staffWorkspace()) {
+        <a mat-button routerLink="/invoices" routerLinkActive="active" class="nav-pill">Billing workspace</a>
         <a mat-button routerLink="/finance" routerLinkActive="active" class="nav-pill">Finance</a>
         <a mat-button routerLink="/reconciliation" routerLinkActive="active" class="nav-pill">Reconciliation</a>
+        }
         <span class="user-chip" *ngIf="user() as u">
           <span class="user-chip-name">{{ u.displayName }}</span>
           <span class="user-chip-email">{{ u.email }}</span>
         </span>
-        <button mat-button type="button" class="nav-pill" (click)="logout()">Logout</button>
+        <button mat-button type="button" class="nav-pill" (click)="logout()">Sign out</button>
       </nav>
     </mat-toolbar>
 

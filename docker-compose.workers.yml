@@ -1,0 +1,62 @@
+# Apply after docker-compose.billing.yml. API and worker use the same billing image.
+services:
+  billing-service:
+    environment:
+      BILLING_ROLE: api
+      BILLING_WORKERS_ENABLED: 'false'
+      BILLING_STRIPE_MAX_CONCURRENT: '4'
+      BILLING_STRIPE_FLEET_CONCURRENCY_BUDGET: '8'
+      BILLING_STRIPE_MAXIMUM_FLEET_TASKS: '2'
+      SPRING_KAFKA_ADMIN_AUTO_CREATE: 'false'
+  billing-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.java
+      target: billing
+    mem_limit: 768m
+    stop_grace_period: 110s
+    environment:
+      SPRING_PROFILES_ACTIVE: billing,local-observability
+      BILLING_ROLE: worker
+      BILLING_REQUIRE_SEPARATED_ROLE: 'true'
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/invoice_payments
+      SPRING_DATASOURCE_USERNAME: invoice_local
+      SPRING_DATASOURCE_PASSWORD: ${BILLING_DB_PASSWORD:?Set local database password}
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: '12'
+      SPRING_FLYWAY_ENABLED: 'false'
+      APP_JWT_SECRET: ${BILLING_JWT_SECRET:?Set local JWT secret}
+      APP_JWT_COOKIE_SECURE: 'false'
+      BILLING_PUBLIC_URL: http://localhost:${BILLING_FRONTEND_PORT:-4400}
+      BILLING_SIMULATOR_ENABLED: 'true'
+      BILLING_ERP_SIMULATOR_ENABLED: 'true'
+      BILLING_DEMO_ENABLED: 'false'
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-SIMULATOR}
+      BILLING_STRIPE_SECRET_KEY: ${BILLING_STRIPE_SECRET_KEY:-}
+      BILLING_STRIPE_WEBHOOK_SECRET: ${BILLING_STRIPE_WEBHOOK_SECRET:-}
+      BILLING_STRIPE_MAX_CONCURRENT: '4'
+      BILLING_STRIPE_FLEET_CONCURRENCY_BUDGET: '8'
+      BILLING_STRIPE_MAXIMUM_FLEET_TASKS: '2'
+      KAFKA_BOOTSTRAP: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      SERVER_SHUTDOWN: graceful
+      SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE: 100s
+      SPRING_TASK_SCHEDULING_SHUTDOWN_AWAIT_TERMINATION: 'true'
+      SPRING_TASK_SCHEDULING_SHUTDOWN_AWAIT_TERMINATION_PERIOD: 30s
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -Djava.io.tmpdir=/tmp
+    depends_on:
+      billing-service: {condition: service_healthy}
+      kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:9090/actuator/health/readiness]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 40s
+    restart: unless-stopped
+  api-gateway:
+    depends_on:
+      billing-worker: {condition: service_healthy}
+  prometheus:
+    volumes:
+      - ./monitoring/prometheus/billing-workers.yml:/etc/prometheus/prometheus.yml:ro

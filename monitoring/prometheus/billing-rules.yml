@@ -32,7 +32,28 @@ groups:
         labels: {severity: warning, responder: app-team, decision: none, environment: local}
         annotations:
           summary: Committed billing events are not reaching Kafka promptly
-          description: Check Kafka availability and publisher retries. Retain the outbox; duplicate delivery is safe for idempotent consumers.
+          description: Check Kafka, the selected relay and CDC receipt consumers. Retain the outbox; duplicate delivery is safe for idempotent consumers.
+      - alert: BillingRecoveryWorkNotClaimed
+        expr: max(billing_recovery_due_oldest_seconds) > 180 or max(billing_refunds_due_oldest_seconds) > 180
+        for: 5m
+        labels: {severity: warning, responder: app-team, decision: none, environment: local}
+        annotations:
+          summary: Due payment or refund recovery work is not being claimed
+          description: Check worker health, capacity, database waits and provider budgets. Future backoff times are excluded. Preserve the saved operation identity.
+      - alert: BillingCdcSlotInactive
+        expr: max(billing_cdc_expected) == 1 and max(billing_cdc_slot_active) == 0
+        for: 2m
+        labels: {severity: critical, responder: app-team, decision: none, environment: local}
+        annotations:
+          summary: CDC is selected but its replication slot is absent or inactive
+          description: Inspect connector state and retained events. Do not drop a slot or reset source offsets without the reviewed rebuild procedure.
+      - alert: BillingCdcWalRetained
+        expr: max(billing_cdc_wal_retained_bytes) > 536870912
+        for: 5m
+        labels: {severity: critical, responder: app-team, decision: none, environment: local}
+        annotations:
+          summary: The CDC slot is retaining more than 512 MiB of WAL
+          description: Check connector and Kafka availability before the configured retention cap invalidates the slot. Preserve source events for a reviewed rebuild.
       - alert: BillingDeadLetterNeedsReview
         expr: billing_deadletters_open > 0
         for: 2m

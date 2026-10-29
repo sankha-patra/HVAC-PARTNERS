@@ -78,7 +78,7 @@ a SHA-256 fingerprint of the configured test credential; the credential itself
 is not stored. This deliberately blocks missing-ID replay even after same-account
 key rotation. Changing request serialization requires a format-version change.
 Legacy and blocked requests can still be resolved by correlated, verified
-webhook evidence. A complete employee resolution workflow remains outstanding.
+webhook evidence. The employee resolution workflow is documented in payment-lifecycle-completion.md.
 
 The simulator keeps its keys indefinitely and can replay the saved command
 without Stripe's retention deadline. That is a property of the local simulator,
@@ -86,14 +86,13 @@ not a promise about an external provider.
 
 ## Why propagation mattered in the interview
 
-`TransactionTemplate` normally uses REQUIRED. If the caller already opened a
-transaction, its blocks join that transaction. Returning from the first block
-then does not necessarily commit the write or release the connection.
+The production command beans use `@Transactional(REQUIRED)`. If their caller already has a transaction,
+commands join it. Returning from a joined method does not commit the outer transaction or release its connection.
 
 Payment submission, simulation, refund approval/submission and recovery entry
 points now reject an existing transaction or synchronization scope before doing
-work. The short `BillingStore.tx` blocks can still join each other for atomic
-database operations. The guard works for direct Java calls as well as Spring
+work. The short proxied command methods deliberately join each other for atomic database operations;
+the production template helper has been removed. The guard works for direct Java calls as well as Spring
 proxy calls.
 
 Changing every block to REQUIRES_NEW would not solve the connection-holding

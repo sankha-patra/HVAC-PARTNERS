@@ -1,5 +1,11 @@
 # Payment dry run: one $100 invoice, step by step
 
+Production transaction ownership now uses named Spring command proxies; the invoice/payment behavior below
+is preserved. See [the actual boundaries and crash proofs](transactional-one-flow-proof.md). A lost commit
+acknowledgment is uncertain, a created Checkout Session is not capture, and duplicate requests can receive an
+in-progress response during the first save. Same-key replay is bounded by the adapter's 23-hour safety policy;
+cached server errors and empty discovery can remain unresolved. Never delete an uncertain payment.
+
 Every number below was worked out by hand first, then checked by a test that runs the real code against a real
 PostgreSQL database: `BillingFinancialDatabaseTest`, tests `dryRun1` to `dryRun9`. Each test step prints the actual
 rows (log lines starting `DRYRUN|`). All 9 tests and all 27 steps pass (25 Oct 2026).

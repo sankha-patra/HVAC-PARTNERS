@@ -6,21 +6,29 @@ final class ProviderValidation {
     private ProviderValidation() {}
 
     static void payment(ProviderCommand command) {
+        payment(command,false);
+    }
+    static void simulatorPayment(ProviderCommand command) { payment(command,true); }
+    private static void payment(ProviderCommand command,boolean inr) {
         if (command == null) throw new IllegalArgumentException("Payment command is required");
         uuid(command.intentId());
         key(command.idempotencyKey());
-        amount(command.amountMinor(), command.currency());
+        amount(command.amountMinor(), command.currency(),inr);
         if (!"CARD".equals(command.method()) && !"ACH".equals(command.method())) {
             throw new IllegalArgumentException("Payment method must be CARD or ACH");
         }
     }
 
     static void refund(RefundCommand command) {
+        refund(command,false);
+    }
+    static void simulatorRefund(RefundCommand command) { refund(command,true); }
+    private static void refund(RefundCommand command,boolean inr) {
         if (command == null) throw new IllegalArgumentException("Refund command is required");
         uuid(command.refundId());
         uuid(command.intentId());
         key(command.idempotencyKey());
-        amount(command.amountMinor(), command.currency());
+        amount(command.amountMinor(), command.currency(),inr);
         if (command.providerPaymentId() == null || command.providerPaymentId().isBlank()) {
             throw new IllegalArgumentException("Original provider payment is required");
         }
@@ -43,8 +51,11 @@ final class ProviderValidation {
     }
 
     static void amount(long value, String currency) {
-        if (value <= 0 || value > 99_999_999L || !"USD".equals(currency)) {
-            throw new IllegalArgumentException("A positive USD amount of at most 99999999 cents is required");
+        amount(value,currency,false);
+    }
+    private static void amount(long value,String currency,boolean inr) {
+        if (value <= 0 || value > 99_999_999L || !("USD".equals(currency) || (inr && "INR".equals(currency)))) {
+            throw new IllegalArgumentException("A positive supported-currency amount of at most 99999999 minor units is required");
         }
     }
 }

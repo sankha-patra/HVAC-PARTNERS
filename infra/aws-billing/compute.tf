@@ -73,7 +73,7 @@ resource "aws_iam_role" "task" {
 }
 resource "aws_iam_role_policy" "payment_kafka" {
   count = var.application_enabled ? 1 : 0
-  role  = aws_iam_role.task["billing"].id
+  role  = aws_iam_role.worker[0].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -84,11 +84,11 @@ resource "aws_iam_role_policy" "payment_kafka" {
       },
       {
         Effect   = "Allow", Action = ["kafka-cluster:ReadData"]
-        Resource = "${replace(aws_msk_cluster.billing.arn, ":cluster/", ":topic/")}/billing.events.v1.DLT"
+        Resource = [for topic in ["billing.events.v1", "billing.events.v1.DLT"] : "${replace(aws_msk_cluster.billing.arn, ":cluster/", ":topic/")}/${topic}"]
       },
       {
         Effect   = "Allow", Action = ["kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
-        Resource = "${replace(aws_msk_cluster.billing.arn, ":cluster/", ":group/")}/billing-dlt-audit-v1"
+        Resource = [for group in ["billing-dlt-audit-v1", "billing-cdc-receipts-v1"] : "${replace(aws_msk_cluster.billing.arn, ":cluster/", ":group/")}/${group}"]
       }
     ]
   })
@@ -106,6 +106,8 @@ locals {
     BILLING_PUBLIC_URL                                 = "https://${var.frontend_hostname}"
     SERVER_FORWARD_HEADERS_STRATEGY                    = "none"
     SERVER_SHUTDOWN                                    = "graceful"
+    SPRING_TASK_SCHEDULING_SHUTDOWN_AWAIT_TERMINATION = "true"
+    SPRING_TASK_SCHEDULING_SHUTDOWN_AWAIT_TERMINATION_PERIOD = "30s"
     SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE        = "30s"
     MANAGEMENT_SERVER_PORT                             = "9090"
     MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE          = "health,info"
@@ -126,7 +128,14 @@ locals {
       BILLING_SIMULATOR_ENABLED                                              = "false"
       BILLING_DEMO_ENABLED                                                   = "false"
       BILLING_ERP_SIMULATOR_ENABLED                                          = "false"
-      BILLING_WORKERS_ENABLED                                                = "true"
+      BILLING_WORKERS_ENABLED                                                = "false"
+      BILLING_ROLE                                                           = "api"
+      BILLING_REQUIRE_SEPARATED_ROLE                                         = "true"
+      BILLING_REQUIRED_RELAY_MODE                                            = var.cdc_enabled ? "CDC" : "POLL"
+      BILLING_STRIPE_MAX_CONCURRENT                                          = tostring(local.stripe_slots_per_task)
+      BILLING_STRIPE_FLEET_CONCURRENCY_BUDGET                                = tostring(var.stripe_fleet_concurrency_budget)
+      BILLING_STRIPE_MAXIMUM_FLEET_TASKS                                     = tostring(local.maximum_payment_fleet_tasks)
+      SPRING_KAFKA_ADMIN_AUTO_CREATE                                         = "false"
       KAFKA_BOOTSTRAP_SERVERS                                                = aws_msk_cluster.billing.bootstrap_brokers_sasl_iam
       SPRING_KAFKA_BOOTSTRAP_SERVERS                                         = aws_msk_cluster.billing.bootstrap_brokers_sasl_iam
       SPRING_KAFKA_PRODUCER_ACKS                                             = "all"
@@ -249,3 +258,5 @@ resource "aws_appautoscaling_policy" "cpu" {
     predefined_metric_specification { predefined_metric_type = "ECSServiceAverageCPUUtilization" }
   }
 }
+
+

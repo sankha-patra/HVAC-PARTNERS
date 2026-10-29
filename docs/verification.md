@@ -1,8 +1,31 @@
 # Verification of the extracted repository
 
+## Production transaction migration — 25 October 2026
+
+Current verified source checkpoint, superseding the one-flow/hybrid transaction proof below. All 51 former
+transaction sites and the simulator's 4 independent writes now use injected Spring transaction proxies. Production
+contains no TransactionTemplate reference or db.tx call. REQUIRED command joins and MANDATORY participants retain
+financial/inbox/case/outbox atomicity; guarded flows keep provider I/O outside database transactions. Dynamic
+request/lease deadlines, localSQL limits and permit cleanup through commit remain enforced.
+
+| Check | Final result |
+|---|---|
+| Clean Java verify/build | **485 tests in 31 classes**, no failures/errors/skips; billing459, identity26; all 3 apps packaged |
+| Dedicated boundary/crash checks |32 included; actual child-process kill/restart, separate Session/money assertions, lost commit acknowledgments, physical joins, setup cleanup and attribute policy |
+| Inventory and source identity | All 31 source classes reported once; all 155 Java/build inputs match; no extra/missing source |
+| Frontend preservation |33 source files match the earlier 80-test/build snapshot; no fresh frontend run claimed |
+| Migration preservation | All 22 migration inputs in the baseline manifest remain byte-identical |
+| Repository/whitespace | Passed |
+
+Evidence: `.tmp-notes/annotation-migration-codex-final/`. Source is based on 4ce9ea0 with uncommitted migration
+changes. No push, deployment, live-provider call or running-demo restart. Earlier monitoring/infra checks below
+remain historical evidence for unchanged files. Per-instance8 permit admission is not fleet-capacity proof;
+event catch-up for missed terminal-payment events remains a separate increment. See
+[the boundary/proof document](transactional-one-flow-proof.md).
+
 ## Payment references, prompt duplicate replies and transaction proof — 25 October 2026
 
-Current verified checkpoint. The earlier pending retry checkpoint is superseded.
+Historical 4ce9ea0 checkpoint. Its transaction-ownership status is superseded by the production migration above; the earlier pending retry checkpoint remains superseded.
 
 - A duplicate create/submit while its first save is in progress gets HTTP409 REQUEST_IN_PROGRESS and Retry-After: 1,
   without waiting on that save's row lock/provider call. A committed create replay returns the original intent.

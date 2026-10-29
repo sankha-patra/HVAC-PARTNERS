@@ -8,7 +8,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { Subject, takeUntil } from 'rxjs';
 import { AuthService } from '../shared/auth.service';
-import { BillingApi, CaseAction, CaseCommand, ExternalConfirmation, FinanceCase, FinancePayment, FinanceRefund, ProviderEvidence } from './billing-api';
+import { BillingApi, CaseAction, CaseCommand, ExternalConfirmation, FinanceCase, FinancePayment, FinanceRefund, FinanceNotification, ProviderEvidence } from './billing-api';
 
 /** The Stripe-confirmation form as typed; the ticket stays a string until it is sent. */
 interface ConfirmationDraft {
@@ -18,6 +18,7 @@ interface ConfirmationDraft {
 const ACCOUNT_DIGITS = /(?:\d[ -]?){12,18}\d/;
 
 interface SavedRefundRequest {
+  currency?: string;
   intentId: string; key: string; amountMinor: number; reason: string;
   refundId?: string; definitiveRejection?: boolean;
 }
@@ -44,8 +45,8 @@ interface SavedRefundRequest {
           <h2>{{ refundRequest() ? 'Refund request recovery' : 'Request a card refund' }}</h2>
           <p class="reference">Payment reference: {{ refundRequest()?.intentId || draftPayment()?.id }}</p>
           @if (!refundRequest()) {
-            <p>Available to request: {{ draftPayment()!.availableRefundMinor / 100 | currency:'USD' }}. The server checks existing refund requests again.</p>
-            <mat-form-field appearance="outline"><mat-label>Refund amount (USD)</mat-label>
+            <p>Available to request: {{ draftPayment()!.availableRefundMinor / 100 | currency:draftPayment()!.currency }}. The server checks existing refund requests again.</p>
+            <mat-form-field appearance="outline"><mat-label>Refund amount ({{ draftPayment()!.currency }})</mat-label>
               <input matInput inputmode="decimal" [(ngModel)]="refundAmount" [disabled]="actionBusy()" placeholder="25.00" autocomplete="off">
             </mat-form-field>
             <mat-form-field appearance="outline" class="refund-reason"><mat-label>Reason for refund</mat-label>
@@ -55,7 +56,7 @@ interface SavedRefundRequest {
             <div class="actions"><button mat-flat-button (click)="sendRefundRequest()" [disabled]="actionBusy() || !!storageError()">Request approval</button>
               <button mat-button (click)="closeRefundPanel()" [disabled]="actionBusy()">Cancel draft</button></div>
           } @else {
-            <p>{{ refundRequest()!.amountMinor / 100 | currency:'USD' }} · {{ refundRequest()!.reason }}</p>
+            <p>{{ refundRequest()!.amountMinor / 100 | currency:(refundRequest()!.currency || 'USD') }} · {{ refundRequest()!.reason }}</p>
             <p class="reference">Request reference: {{ refundRequest()!.key }}</p>
             @if (refundRequest()!.refundId) {
               <p class="reference">Refund reference: {{ refundRequest()!.refundId }}</p>
@@ -107,7 +108,7 @@ interface SavedRefundRequest {
         @if (refundsLoaded()) {
           @if (!refunds().length) { <p>No refund requests were returned for your authorized scope.</p> }
           @else { <div class="table-scroll"><table><thead><tr><th scope="col">Refund / payment</th><th scope="col">Amount</th><th scope="col">Reason</th><th scope="col">Requested by</th><th scope="col">Approved by</th><th scope="col">Status</th><th scope="col">Action</th></tr></thead><tbody>
-            @for (refund of refunds(); track refund.id) { <tr><th scope="row" class="reference">{{ refund.id }}<p>{{ refund.intentId }}</p></th><td>{{ refund.amountMinor / 100 | currency:'USD' }}</td>
+            @for (refund of refunds(); track refund.id) { <tr><th scope="row" class="reference">{{ refund.id }}<p>{{ refund.intentId }}</p></th><td>{{ refund.amountMinor / 100 | currency:(refund.currency || 'USD') }}</td>
               <td class="reason-cell">{{ refund.reason }}</td><td>{{ refund.requestedBy }}</td><td>{{ refund.approvedBy || 'Not recorded' }}</td><td>{{ refund.status }}<p class="muted">{{ refund.provider || 'Provider not reported' }}</p></td>
               <td>@if (refund.canApprove === true) { <button mat-stroked-button (click)="approveRefund(refund.id)" [disabled]="actionBusy() || !!storageError() || uncertainApprovals().includes(refund.id)">Approve refund</button> }
               @if (refund.canReject === true) { <button mat-button (click)="beginRefundRejection(refund.id)" [disabled]="actionBusy()">Reject request</button> }
@@ -123,6 +124,16 @@ interface SavedRefundRequest {
         }
       </mat-card-content></mat-card>
       @if (error()) { <p class="notice error" role="alert">{{ error() }}</p> }
+      <mat-card class="panel"><mat-card-content>
+        <div class="section-heading"><h2>Approval and refund emails</h2><button mat-stroked-button (click)="loadNotifications()" [disabled]="notificationsLoading()">Refresh email status</button></div>
+        <p class="muted">Email helps staff follow up. Decisions require sign-in and a different authorized approver. Mail-server acceptance does not confirm inbox delivery or a completed refund.</p>
+        @if (notificationsError()) { <p class="notice error" role="alert">{{ notificationsError() }}</p> }
+        @if (notificationsLoaded() && !notifications().length) { <p>No email deliveries were recorded for your assigned scope. A notification route must be configured before events occur.</p> }
+        @for (notice of notifications(); track notice.id) {
+          <p>{{ notificationTitle(notice.eventType) }} · {{ notificationStatus(notice.state) }}<br><span class="muted">{{ notice.createdAt | date:'medium' }}</span></p>
+          <details><summary>Delivery details</summary><p class="reference">Reference {{ notice.operationId }} · Attempts {{ notice.attempts }}</p></details>
+        }
+      </mat-card-content></mat-card>
       <mat-card class="panel"><mat-card-content>
         <div class="section-heading"><h2>Cases requiring review</h2><button mat-stroked-button (click)="load()" [disabled]="loading() || actionBusy()">Refresh cases</button></div>
         <p class="muted">Resolving a case never marks a payment paid. Attach a provider reference that the server verifies with the provider, or request a release that a different approver confirms. Every action is recorded.</p>
@@ -210,6 +221,12 @@ interface SavedRefundRequest {
   `
 })
 export class FinanceComponent implements OnInit, OnDestroy {
+  notificationTitle(event: string): string {
+    return ({REFUND_REQUESTED:'Refund approval requested',REFUND_APPROVED:'Refund approved',REFUND_REJECTED:'Refund request declined',REFUND_REFUNDED:'Refund issued',REFUND_FAILED:'Refund needs review',REFUND_RELEASED:'Refund review updated',CASE_REQUESTED_RELEASE:'Review approval requested',CASE_APPROVED_RELEASE:'Review approved',CASE_REJECTED_RELEASE:'Review declined',CASE_REOPENED:'Review reopened',FINANCE_REVIEW:'Payment needs review'} as Record<string,string>)[event] || 'Finance update';
+  }
+  notificationStatus(state: string): string {
+    return ({SENT:'Accepted by mail server',REVIEW:'Delivery needs review',PENDING:'Waiting to send',IN_FLIGHT:'Sending',SUPPRESSED:'Not sent'} as Record<string,string>)[state] || 'Status unavailable';
+  }
   readonly evidenceFor = signal<string | null>(null);
   readonly providerEvidence = signal<ProviderEvidence[]>([]);
   readonly evidenceLoading = signal(false);
@@ -219,6 +236,10 @@ export class FinanceComponent implements OnInit, OnDestroy {
   private readonly destroyed = new Subject<void>();
   readonly cases = signal<FinanceCase[]>([]);
   readonly loading = signal(false);
+  readonly notifications = signal<FinanceNotification[]>([]);
+  readonly notificationsLoading = signal(false);
+  readonly notificationsLoaded = signal(false);
+  readonly notificationsError = signal('');
   readonly loaded = signal(false);
   readonly error = signal('');
   readonly payments = signal<FinancePayment[]>([]);
@@ -439,6 +460,14 @@ export class FinanceComponent implements OnInit, OnDestroy {
 
   ngOnInit() { this.restore(); this.load(); this.loadPayments(); this.loadRefunds(); }
   ngOnDestroy() { this.destroyed.next(); this.destroyed.complete(); }
+  loadNotifications() {
+    if(this.notificationsLoading()) return;
+    this.notificationsLoading.set(true);this.notificationsLoaded.set(false);this.notificationsError.set('');this.notifications.set([]);
+    this.api.notifications().pipe(takeUntil(this.destroyed)).subscribe({
+      next: rows => {this.notifications.set(rows);this.notificationsLoading.set(false);this.notificationsLoaded.set(true);},
+      error: () => {this.notificationsLoading.set(false);this.notificationsError.set('Email status is unavailable. This does not establish whether an email was delivered; check the finance queue and keep the operation reference.');}
+    });
+  }
   load() {
     if (this.loading()) return;
     this.loading.set(true);
@@ -504,10 +533,10 @@ export class FinanceComponent implements OnInit, OnDestroy {
       const reason = this.refundReason.trim();
       if (!payment || latest?.canRequestRefund !== true || !this.paymentsLoaded()) return;
       if (amountMinor === null || amountMinor > latest.availableRefundMinor || !reason || reason.length > 500) {
-        this.actionError.set('Enter a positive USD amount with at most two decimal places, within the available refund balance, and a reason of at most 500 characters.');
+        this.actionError.set('Enter a positive amount in '+payment.currency+' with at most two decimal places, within the available refund balance, and a reason of at most 500 characters.');
         return;
       }
-      request = { intentId: payment.id, amountMinor, reason, key: crypto.randomUUID() };
+      request = { intentId: payment.id, currency: payment.currency, amountMinor, reason, key: crypto.randomUUID() };
       if (!this.persistRequest(request)) return;
       this.refundRequest.set(request);
     }

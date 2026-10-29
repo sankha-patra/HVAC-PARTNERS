@@ -36,6 +36,18 @@ describe('Finance cases', () => {
     component.refundAmount = '1.10';
     component.refundReason = refund.reason;
   }
+  it('retains INR currency with the saved refund request', () => {
+    initialize();component.payments.set([{...payment,currency:'INR'}]);draft();component.sendRefundRequest();
+    const request=http.expectOne(`${base}/intents/intent-a/refunds`);
+    expect(component.refundRequest()?.currency).toBe('INR');expect(request.request.body.amountMinor).toBe(110);
+    request.flush(refund);refreshLists();
+  });
+  it('shows email review ownership and clears stale results after a failed refresh', () => {
+    component.loadNotifications();http.expectOne(`${base}/notifications`).flush([{id:'notice-1',eventType:'REFUND_REQUESTED',state:'REVIEW',attempts:8}]);
+    expect(component.notificationsLoaded()).toBe(true);expect(component.notifications()[0].state).toBe('REVIEW');
+    component.loadNotifications();http.expectOne(`${base}/notifications`).flush({}, {status:503,statusText:'Unavailable'});
+    expect(component.notifications()).toEqual([]);expect(component.notificationsLoaded()).toBe(false);expect(component.notificationsError()).toContain('does not establish');
+  });
   function refreshLists(refunds = [refund]) {
     http.expectOne(`${base}/refunds`).flush(refunds);
     http.expectOne(`${base}/payments`).flush([payment]);

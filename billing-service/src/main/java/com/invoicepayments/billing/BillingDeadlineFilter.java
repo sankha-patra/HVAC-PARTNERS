@@ -26,7 +26,7 @@ public class BillingDeadlineFilter extends OncePerRequestFilter {
         this.budget = budget;
     }
     @Override protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !request.getRequestURI().startsWith("/api/v1/billing/");
+        return !(request.getRequestURI().startsWith("/api/v1/billing/") || request.getRequestURI().startsWith("/api/v1/commerce/"));
     }
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
             FilterChain chain) throws ServletException, IOException {
