@@ -198,4 +198,28 @@ The first Step Functions run failed before claiming the payment. It was a **warm
 
 **Deployment for the retest:** reuse the Codex kit in `Documents/Codex/2026-10-26/pl/work/aws-hybrid-runtime/application` (CloudFormation template, `recovery.asl.json`, deploy and run scripts). Its Lambda timeout is already 60 s; the pool's `connectionTimeout` is now 10 s instead of the 3 s that timed out.
 
-**Not yet verified on AWS.** Pass condition for the retest: a cold-start execution claims and resolves the payment without a connection error, and a forced tunnel outage still ends with zero captures and the case owned by review.
+## 12. AWS retest with the fixes (29 Oct 2026, 18:51–19:06 UTC): all passed
+
+Code from commit `e7b164f`, deployed as stack `payments-recovery-failure-lab-v2` (Lambda version 1, Standard workflow version 1, Sydney) with the Codex kit copied to `aws-hybrid-runtime/application-v2`. Laptop database, fake Razorpay, app, Kafka, Debezium and mail ran locally; the Lambda reached them over Tailscale.
+
+| Check | Result |
+|---|---|
+| Direct guards: extra input field; operation outside the campaign | Both rejected, no money or provider change |
+| App stopped, "workflow started" reply lost and resent | Captured once (1 Lambda attempt) |
+| Postgres killed mid-payment, restarted | Captured once |
+| App JVM killed mid-payment | Captured once |
+| Lambda process exits after claiming | Captured once after retries (5 attempts, real `Runtime.ExitError`) |
+| Lambda times out after claiming | Captured once after retries (4 attempts) |
+| Lambda throws after claiming | No capture; handed to finance review |
+| Razorpay has no record of the payment | GET only, no new payment, stays UNKNOWN for review |
+| Expired campaign | Rejected |
+| **Warm Lambda, idle DB socket killed (the original failure)** | **Same execution environment detected the dead socket, reconnected, answered correctly** |
+| Downstream: Kafka → buyer order → email | 5 recovered payments became one PAID order and one confirmation email each; 2 unresolved produced no capture and no receipt |
+
+Usage: 6 workflow starts (7 submissions), 6 direct calls, 15 Lambda requests. The campaign journal keeps one released reservation: a direct call the AWS CLI rejected locally before sending.
+
+Harness fixes needed on this machine: Docker nanosecond timestamps, and `lambda invoke` needing `--function-name` as a flag on AWS CLI 2.38. The resumed run skipped the warm probe, so it was run separately (`run_warm_probe.py`); it kills any idle pooled socket, since the fixed gate reuses connections instead of opening a fresh one.
+
+Cleanup verified: stack, bucket, function, layer, workflow, roles and fixture parameter gone (only the pre-existing Tailscale key remains); Tailscale routes removed; lab database role and its local credential removed; lab containers stopped with volumes kept.
+
+Still not covered: real Razorpay (a synthetic provider stood in), the production `StepFunctionsRecoveryRemote` SDK transport (a CLI bridge drove the real dispatcher), and the production network path (Lambda in a VPC to RDS).
