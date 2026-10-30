@@ -125,11 +125,17 @@ public class BillingStore {
     @Transactional(transactionManager="transactionManager",propagation=Propagation.MANDATORY,rollbackFor=Exception.class,label="billing")
     public void caseFor(UUID intent,UUID refund,String reason,String reference) {
         requireTransaction();
-        update("""
+        int opened=update("""
             INSERT INTO billing.cases(id,merchant_id,intent_id,refund_id,reason,reference)
             SELECT ?,a.merchant_id,i.id,?,?,? FROM billing.intents i JOIN billing.accounts a ON a.id=i.account_id
             WHERE i.id=? ON CONFLICT(reason,reference) DO NOTHING
             """,UUID.randomUUID(),refund,reason,reference,intent);
+        if(opened>0)caseAlert(intent,refund,reason,false);
+    }
+    private static void caseAlert(UUID intent,UUID refund,String reason,boolean reopened) {
+        OperationalAlert.raise("FINANCE_CASE_OPENED",OperationalAlert.Severity.WARNING,
+            reopened?"A resolved finance case reopened because the problem recurred":"A payment or refund needs a finance decision",
+            "caseReason",reason,"intentId",intent,"refundId",refund);
     }
     /** Recurring-problem case: opened once, and reopened with an audit entry if the problem recurs after resolution. */
     @Transactional(transactionManager="transactionManager",propagation=Propagation.MANDATORY,rollbackFor=Exception.class,label="billing")
@@ -143,7 +149,11 @@ public class BillingStore {
             WHERE billing.cases.status='RESOLVED'
             RETURNING id,(xmax<>0) AS reopened
             """,UUID.randomUUID(),refund,reason,reference,intent);
-        for(var row:changed) if(Boolean.TRUE.equals(row.get("reopened"))) caseAction(id(row.get("id")),"REOPENED","system",note,null);
+        for(var row:changed) {
+            boolean reopened=Boolean.TRUE.equals(row.get("reopened"));
+            if(reopened) caseAction(id(row.get("id")),"REOPENED","system",note,null);
+            caseAlert(intent,refund,reason,reopened);
+        }
     }
     /** Resolves the open cases of one operation for the given reasons; every resolution is audited. */
     @Transactional(transactionManager="transactionManager",propagation=Propagation.MANDATORY,rollbackFor=Exception.class,label="billing")

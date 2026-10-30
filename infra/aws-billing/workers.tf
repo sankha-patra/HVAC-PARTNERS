@@ -107,7 +107,7 @@ resource "aws_iam_role" "worker" {
 resource "aws_ecs_task_definition" "worker" {
   lifecycle {
     precondition {
-      condition = local.maximum_app_connections <= var.database_application_connection_budget
+      condition     = local.maximum_app_connections <= var.database_application_connection_budget
       error_message = "Maximum rollout database pools exceed the allocated database connection budget."
     }
   }
@@ -132,7 +132,7 @@ resource "aws_ecs_task_definition" "worker" {
     environment = [for name, value in merge(local.common_environment, local.service_environment.billing, {
       BILLING_ROLE                                = "worker", BILLING_WORKERS_ENABLED = "true", BILLING_OUTBOX_PUBLISHER_ENABLED = var.cdc_enabled ? "false" : "true",
       SPRING_FLYWAY_ENABLED                       = "false", SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE = "12", BILLING_WORKER_SHUTDOWN_SECONDS = "60",
-      SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE = "110s"
+      SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE = "110s", BILLING_ALERTS_WATCH_ENABLED = "true"
     }) : { name = name, value = value }],
     secrets = [
       { name = "SPRING_DATASOURCE_USERNAME", valueFrom = "${var.worker_database_secret_arn}:username::" },

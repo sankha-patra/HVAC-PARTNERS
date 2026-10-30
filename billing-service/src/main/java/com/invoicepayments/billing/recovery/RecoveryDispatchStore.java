@@ -1,6 +1,7 @@
 package com.invoicepayments.billing.recovery;
 
 import com.invoicepayments.billing.BillingStore;
+import com.invoicepayments.billing.OperationalAlert;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Timestamp;
@@ -84,7 +85,7 @@ public final class RecoveryDispatchStore {
             var c=campaign();
             if(!Boolean.TRUE.equals(c.get("live"))) {
                 var ended=db.rows("UPDATE billing.recovery_dispatch SET state='REVIEW',owner='DEADLINE_REVIEW',last_error='CAMPAIGN_DEADLINE' WHERE campaign_id=? AND state IN ('PENDING','STARTING','RUNNING') RETURNING *",settings.campaign());
-                for(var endedJob:ended)financeReview(endedJob);
+                for(var endedJob:ended){financeReview(endedJob);reviewAlert(endedJob,"CAMPAIGN_DEADLINE");}
                 return null;
             }
             var rows=db.rows("""
@@ -130,7 +131,7 @@ public final class RecoveryDispatchStore {
                 next_at=NOW()+INTERVAL '15 seconds',last_error=NULL,updated_at=NOW() WHERE id=?
                 """,state,owner,e.status(),id(job.get("id")));
             audit(id(job.get("id")),closed?"TERMINAL_OBSERVED":"RUNNING_OBSERVED",e.status());
-            if("REVIEW".equals(state))financeReview(job);
+            if("REVIEW".equals(state)){financeReview(job);reviewAlert(job,"WORKFLOW_"+e.status());}
         });
     }
     public void uncertain(Map<String,Object> job,String code) {
@@ -155,6 +156,12 @@ public final class RecoveryDispatchStore {
         db.update("UPDATE billing.recovery_dispatch SET state='REVIEW',owner='MANUAL_REVIEW',last_error=?,token=NULL,claim_until=NULL,updated_at=NOW() WHERE id=?",reason,id(job.get("id")));
         audit(id(job.get("id")),"REVIEW_REQUIRED",reason);
         financeReview(job);
+        reviewAlert(job,reason);
+    }
+    private static void reviewAlert(Map<String,Object> job,String reason) {
+        OperationalAlert.raise("RECOVERY_NEEDS_REVIEW",OperationalAlert.Severity.WARNING,
+            "Step Functions recovery ended without a money result; a person must decide",
+            "operationKind",job.get("operationKind"),"operationId",job.get("operationId"),"cause",reason);
     }
     private void financeReview(Map<String,Object> job){
         UUID operation=id(job.get("operationId"));

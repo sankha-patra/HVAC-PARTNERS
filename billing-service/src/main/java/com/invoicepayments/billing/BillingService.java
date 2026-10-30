@@ -132,6 +132,8 @@ public class BillingService {
         } catch(RuntimeException failure) {
             // Identifiers and the exception only: provider exceptions carry no credential or response body.
             log.warn("Payment submission outcome uncertain; recovery will reconcile intentId={}",intent,failure);
+            OperationalAlert.raise("PAYMENT_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
+                "Payment provider did not confirm the request ("+failure.getClass().getSimpleName()+"); kept as UNKNOWN for recovery","intentId",intent);
             result=new ProviderResult(null,"UNKNOWN",null,"Payment outcome is unconfirmed; recovery will check the original operation",BillingProviderEvidence.from(failure));
         }
         recordResult(intent,token,result);

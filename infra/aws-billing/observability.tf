@@ -15,8 +15,8 @@ resource "aws_cloudwatch_metric_alarm" "no_healthy_targets" {
     LoadBalancer = aws_lb.billing.arn_suffix
     TargetGroup  = aws_lb_target_group.application[each.key].arn_suffix
   }
-  alarm_actions = var.alarm_action_arns
-  ok_actions    = var.alarm_action_arns
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
 }
 resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
   for_each            = local.enabled_services
@@ -34,8 +34,8 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
     LoadBalancer = aws_lb.billing.arn_suffix
     TargetGroup  = aws_lb_target_group.application[each.key].arn_suffix
   }
-  alarm_actions = var.alarm_action_arns
-  ok_actions    = var.alarm_action_arns
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
 }
 resource "aws_cloudwatch_metric_alarm" "api_errors" {
   count               = var.application_enabled ? 1 : 0
@@ -71,8 +71,8 @@ resource "aws_cloudwatch_metric_alarm" "api_errors" {
       dimensions  = { LoadBalancer = aws_lb.billing.arn_suffix }
     }
   }
-  alarm_actions = var.alarm_action_arns
-  ok_actions    = var.alarm_action_arns
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
 }
 resource "aws_cloudwatch_metric_alarm" "database_storage" {
   alarm_name          = "${var.name}-database-storage"
@@ -86,8 +86,8 @@ resource "aws_cloudwatch_metric_alarm" "database_storage" {
   period              = 60
   treat_missing_data  = "missing"
   dimensions          = { DBInstanceIdentifier = aws_db_instance.billing.identifier }
-  alarm_actions       = var.alarm_action_arns
-  ok_actions          = var.alarm_action_arns
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
 }
 resource "aws_cloudwatch_metric_alarm" "kafka_replicas" {
   for_each            = toset(["1", "2", "3"])
@@ -102,6 +102,6 @@ resource "aws_cloudwatch_metric_alarm" "kafka_replicas" {
   period              = 60
   treat_missing_data  = "missing"
   dimensions          = { "Cluster Name" = aws_msk_cluster.billing.cluster_name, "Broker ID" = each.key }
-  alarm_actions       = var.alarm_action_arns
-  ok_actions          = var.alarm_action_arns
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
 }

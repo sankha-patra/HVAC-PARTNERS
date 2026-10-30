@@ -74,7 +74,11 @@ public class BillingRecovery {
         catch(RuntimeException failure) {
             // A temporary database failure is not evidence: the claim's lease expires and recovery tries again.
             // The failed unit has already rolled back; its escalation is a separate unit.
-            if(isTransient(failure)) log.warn("Payment recovery hit a temporary database failure; will retry intentId={}",intent,failure);
+            if(isTransient(failure)) {
+                log.warn("Payment recovery hit a temporary database failure; will retry intentId={}",intent,failure);
+                if(OperationalAlert.databaseUnavailable(failure))OperationalAlert.raise("DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,
+                    "Payment recovery could not reach the database; the claim expires and recovery retries","intentId",intent);
+            }
             else {
                 log.error("Payment recovery could not record provider evidence intentId={}",intent,failure);
                 commands.escalate(intent,null,"RECOVERY_EVIDENCE_MISMATCH",intent.toString(),"Recovery again could not record provider evidence");
@@ -164,7 +168,11 @@ public class BillingRecovery {
         }
         try {refundCommands.record(refund,token,result);}
         catch(RuntimeException failure) {
-            if(isTransient(failure)) log.warn("Refund recovery hit a temporary database failure; will retry refundId={} intentId={}",refund,intent,failure);
+            if(isTransient(failure)) {
+                log.warn("Refund recovery hit a temporary database failure; will retry refundId={} intentId={}",refund,intent,failure);
+                if(OperationalAlert.databaseUnavailable(failure))OperationalAlert.raise("DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,
+                    "Refund recovery could not reach the database; the claim expires and recovery retries","refundId",refund,"intentId",intent);
+            }
             else {
                 log.error("Refund recovery could not record provider evidence refundId={} intentId={}",refund,intent,failure);
                 commands.escalate(intent,refund,"REFUND_UNRESOLVED",refund.toString(),"Refund evidence could not be recorded");

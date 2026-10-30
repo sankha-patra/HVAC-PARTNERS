@@ -48,6 +48,8 @@ public class BillingRefundService {
         }
         catch(RuntimeException failure) {
             log.warn("Refund submission outcome uncertain; recovery will reuse the saved request refundId={} intentId={}",refund,intent,failure);
+            OperationalAlert.raise("REFUND_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
+                "Payment provider did not confirm the refund ("+failure.getClass().getSimpleName()+"); kept as UNKNOWN for recovery","refundId",refund,"intentId",intent);
             result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request",BillingProviderEvidence.from(failure));
         }
         commands.record(refund,token,result);

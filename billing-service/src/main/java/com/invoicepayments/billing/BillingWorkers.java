@@ -117,7 +117,11 @@ public class BillingWorkers {
         ClaimedTask(Runnable action,Runnable abandoned){this.action=action;this.abandoned=abandoned;}
         public void run(){if(started.compareAndSet(false,true))try{action.run();}catch(RuntimeException failure){log(failure);}}
         void release(){if(started.compareAndSet(false,true))try{abandoned.run();}catch(RuntimeException failure){log(failure);}}
-        private static void log(RuntimeException failure){org.slf4j.LoggerFactory.getLogger(BillingWorkers.class).error("Billing background operation remains durable and will be retried",failure);}
+        private static void log(RuntimeException failure){
+            org.slf4j.LoggerFactory.getLogger(BillingWorkers.class).error("Billing background operation remains durable and will be retried",failure);
+            if(OperationalAlert.databaseUnavailable(failure))OperationalAlert.raise("DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,
+                "A background job could not reach the database; its work stays saved and is retried");
+        }
     }
     @PreDestroy public void close() {
         synchronized(this){stopping=true;io.shutdown();publishers.shutdown();}
