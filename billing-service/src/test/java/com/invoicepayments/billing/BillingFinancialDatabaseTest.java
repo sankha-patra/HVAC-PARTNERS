@@ -1482,6 +1482,17 @@ class BillingFinancialDatabaseTest {
         }
     }
 
+    @Test void savedPaymentAttemptCannotBeDeletedOrRewritten() {
+        UUID intent=submitted("CARD");
+        assertThatThrownBy(()->db.update("DELETE FROM billing.attempts WHERE intent_id=?",intent))
+            .isInstanceOf(org.springframework.dao.DataAccessException.class).hasMessageContaining("cannot be deleted");
+        for(String assignment:List.of("original_request='{}'::jsonb","request_version='changed'","operation_key='changed-key'"))
+            assertThatThrownBy(()->db.update("UPDATE billing.attempts SET "+assignment+" WHERE intent_id=?",intent))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class).hasMessageContaining("Original payment submission is immutable");
+        db.update("UPDATE billing.attempts SET status='PROCESSING',updated_at=NOW() WHERE intent_id=?",intent);
+        assertThat(db.one("SELECT COUNT(*) AS n FROM billing.attempts WHERE intent_id=?",intent).get("n")).isEqualTo(1L);
+    }
+
     @Test void refundApproverCannotBeReplacedAndUnsentApprovedRefundCanStillBeRejected() {
         UUID intent=captured("CARD"),refund=requestedRefund(intent,500);
         try(var context=BillingTestWiring.context(db,provider,new MockEnvironment(),true,"http://localhost:4200",MERCHANT.toString())) {

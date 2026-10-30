@@ -13,9 +13,14 @@ public final class RecoveryConnectionGate {
         if(mx!=null&&mx.getActiveConnections()!=0)throw new IllegalStateException("Recovery invocation still has a borrowed database connection");
         // No blanket eviction: Hikari validates a connection idle past its bypass window on borrow and replaces a socket
         // broken by freeze/thaw within connectionTimeout. Evicting healthy ones forced a fresh tunnel handshake every time.
+        // A socket that died inside the bypass window is handed out unvalidated, so evict only that one and retry once.
         // Translate only after close completes: neither causes nor suppressed driver errors may escape.
-        try(var connection=pool.getConnection()) {
-            if(!connection.isValid(2))throw new SQLException("Connection failed validation","08006");
-        }catch(SQLException failure){throw RecoveryConnectionFailures.sanitized(failure);}
+        for(int attempt=1;;attempt++) {
+            try(var connection=pool.getConnection()) {
+                if(connection.isValid(2))return;
+                pool.evictConnection(connection);
+                if(attempt==2)throw new SQLException("Connection failed validation","08006");
+            }catch(SQLException failure){throw RecoveryConnectionFailures.sanitized(failure);}
+        }
     }
 }

@@ -39,6 +39,12 @@
       <artifactId>sfn</artifactId>
     </dependency>
     <dependency>
+      <!-- Lets the dispatcher's profile credentials use an `aws login` session (login_session in ~/.aws/config). -->
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>signin</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>ssm</artifactId>
     </dependency>

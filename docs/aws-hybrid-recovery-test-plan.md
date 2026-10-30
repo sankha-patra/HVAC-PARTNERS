@@ -223,3 +223,19 @@ Harness fixes needed on this machine: Docker nanosecond timestamps, and `lambda 
 Cleanup verified: stack, bucket, function, layer, workflow, roles and fixture parameter gone (only the pre-existing Tailscale key remains); Tailscale routes removed; lab database role and its local credential removed; lab containers stopped with volumes kept.
 
 Still not covered: real Razorpay (a synthetic provider stood in), the production `StepFunctionsRecoveryRemote` SDK transport (a CLI bridge drove the real dispatcher), and the production network path (Lambda in a VPC to RDS).
+
+## 13. Real-provider run: the six requested failure scenarios (30 Oct 2026)
+
+Real Razorpay test mode (the `rzp_test_` key from the ebusiness project), the production `RecoveryLambdaHandler` on Lambda + Standard Step Functions in Sydney (stack `payments-rzp-recovery`), and the app's own `RecoveryDispatcher` / `StepFunctionsRecoveryRemote` starting workflows through the `payments-lab` `aws login` profile (needs the `signin` SDK module). The app tier ran from `Documents/Codex/2026-10-26/pl/work/razorpay-failure-e2e` with a persistent PostgreSQL volume; buyers paid on Razorpay's hosted checkout test bank page.
+
+| Scenario | Outcome |
+|---|---|
+| 1 Razorpay unreachable at Pay | UNKNOWN, one attempt despite 6 presses; workflow checked 12 times (no order at Razorpay), then TERMINAL_REVIEW + finance case; stock held |
+| 2 Deletes while 30 Pay presses | Order/intent deletes blocked by FKs; attempt delete **succeeded** and left a captured payment unrecordable → V37 blocks it; re-run: all deletes refused, captured once |
+| 3 PostgreSQL SIGKILL mid-payment | Dispatcher started the workflow 25 s after restart; Lambda captured once; PAID, one email |
+| 4 Billing JVM SIGKILL mid-payment | Restarted app started the workflow itself; captured once; PAID, one email |
+| 5 Kafka SIGKILL after capture | Capture + outbox event in one commit; PAID 4 s after Kafka returned; one email |
+| 6 Kafka SIGKILL during Debezium write, then Connect SIGKILL | Resumed from stored offset; one event receipt, one email; no duplicates on earlier orders |
+| Refund | Approval email to app owners, independent approval, real Razorpay refund confirmed by the workflow (after granting `SELECT, UPDATE ON billing.refunds` to the Lambda's role) |
+
+Findings: (1) attempt rows were deletable — fixed by V37; (2) `RecoveryConnectionGate` failed when a pooled socket died inside Hikari's alive-bypass window — now evicts that connection and retries once (`BillingAwsRecoveryDatabaseTest` covers it; Lambda version 2 in AWS still runs the earlier code); (3) `RecoveryDispatchStore.claim` counts REVIEW rows as in flight, so two unresolved reviews stop all new starts in a campaign — design decision pending; (4) the lab grants for the Lambda role omit refunds.

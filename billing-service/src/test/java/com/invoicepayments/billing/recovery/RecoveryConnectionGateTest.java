@@ -32,7 +32,14 @@ class RecoveryConnectionGateTest {
         when(pool.getConnection()).thenReturn(connection);when(connection.isValid(2)).thenReturn(false);
         assertThatThrownBy(()->RecoveryLambdaRuntime.runGuarded(pool,task,"PAYMENT",UUID.randomUUID(),()->true))
             .isExactlyInstanceOf(RecoveryConnectionUnavailableException.class).hasMessage("Recovery database is unavailable before claim");
-        verify(connection).close();verifyNoInteractions(task);
+        verify(pool,times(2)).evictConnection(connection);verify(connection,times(2)).close();verifyNoInteractions(task);
+    }
+    @Test void deadSocketHandedOutUnvalidatedIsEvictedAndReplacedOnce() throws Exception {
+        var pool=mock(HikariDataSource.class);var dead=mock(Connection.class);var fresh=mock(Connection.class);var task=mock(RecoveryTask.class);UUID operation=UUID.randomUUID();
+        when(pool.getConnection()).thenReturn(dead,fresh);when(dead.isValid(2)).thenReturn(false);when(fresh.isValid(2)).thenReturn(true);
+        when(task.run("PAYMENT",operation)).thenReturn(Map.of("ran",true));
+        assertThat(RecoveryLambdaRuntime.runGuarded(pool,task,"PAYMENT",operation,()->true)).containsEntry("ran",true);
+        verify(pool).evictConnection(dead);verify(pool,never()).evictConnection(fresh);verify(dead).close();verify(fresh).close();
     }
     @Test void borrowedConnectionInvariantIsNotAnInfrastructureRetry() throws Exception {
         var pool=mock(HikariDataSource.class);var mx=mock(HikariPoolMXBean.class);when(pool.getHikariPoolMXBean()).thenReturn(mx);when(mx.getActiveConnections()).thenReturn(1);
