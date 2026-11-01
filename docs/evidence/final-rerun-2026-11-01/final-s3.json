@@ -1,0 +1,310 @@
+{
+  "scenario": "s3",
+  "code": "1259f62",
+  "steps": [
+    {
+      "at": "22:13:30",
+      "utc": "2026-11-01T16:43:30Z",
+      "step": "public webhook path on?",
+      "value": false
+    },
+    {
+      "at": "22:13:32",
+      "utc": "2026-11-01T16:43:32Z",
+      "step": "buyer presses Pay x1",
+      "value": {
+        "orderId": "4ae41fea-3683-4209-95f9-d0e8c37b8863",
+        "intentId": "9f68de6f-b6f7-47e2-8839-90aaee09cb0b",
+        "accountId": "20000000-0000-0000-0000-000000000001",
+        "amountMinor": 100,
+        "productId": "60000000-0000-0000-0000-000000000001",
+        "providerOrder": "order_TuytcBtQDWXb8p",
+        "submitAnswers": [
+          "REQUIRES_ACTION"
+        ]
+      }
+    },
+    {
+      "at": "22:13:33",
+      "utc": "2026-11-01T16:43:33Z",
+      "step": "Postgres killed (SIGKILL)",
+      "value": null
+    },
+    {
+      "at": "22:14:38",
+      "utc": "2026-11-01T16:44:38Z",
+      "step": "Razorpay oracle while Postgres down",
+      "value": [
+        {
+          "orderId": "order_TuytcBtQDWXb8p",
+          "status": "created",
+          "amount": 100,
+          "amountPaid": null,
+          "payments": [
+            {
+              "id": "pay_TuyuKBAOWtpfHW",
+              "status": "created",
+              "method": "netbanking",
+              "amountRefunded": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": "22:15:23",
+      "utc": "2026-11-01T16:45:23Z",
+      "step": "Postgres restarted and accepting connections",
+      "value": null
+    },
+    {
+      "at": "",
+      "utc": "",
+      "step": "VOID: first attempt invalid - the browser click on Success did not happen (Claude window not drawing); Postgres was restarted without a payment. Scenario 3 is repeated below.",
+      "value": null
+    },
+    {
+      "at": "22:25:11",
+      "utc": "2026-11-01T16:55:11Z",
+      "step": "state of the unpaid first-attempt order",
+      "value": {
+        "status": "REQUIRES_ACTION",
+        "providerId": "order_TuytcBtQDWXb8p",
+        "recoveryCount": 5,
+        "captures": 0,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [
+          {
+            "state": "PENDING",
+            "owner": "DISPATCH",
+            "remote": null,
+            "submissions": 0,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-eae5773c076b787fc77fd20b3dade78ab7accee27bef7a1af944ed23e7170675",
+            "error": null
+          },
+          {
+            "state": "SUPERSEDED",
+            "owner": "NEXT_ATTEMPT",
+            "remote": "FAILED",
+            "submissions": 1,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-3aab026f10a99aac5e63afa0e822c03ee247df507884de74b0c4db118f4a48e8",
+            "error": null
+          }
+        ],
+        "outboxEvents": [],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:43:31",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:43:31",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "16:43:31",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:45:35",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:45:55",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:46:28",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:47:20",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:48:54",
+            "type": "REQUIRES_ACTION"
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:26:13",
+      "utc": "2026-11-01T16:56:13Z",
+      "step": "buyer presses Pay x1",
+      "value": {
+        "orderId": "c7251e14-9233-4943-8ff2-2ad0d962da61",
+        "intentId": "6a07d316-1762-40c1-9324-aaaf261302b8",
+        "accountId": "20000000-0000-0000-0000-000000000001",
+        "amountMinor": 100,
+        "productId": "60000000-0000-0000-0000-000000000001",
+        "providerOrder": "order_Tuz70kCvGAjjqj",
+        "submitAnswers": [
+          "REQUIRES_ACTION"
+        ]
+      }
+    },
+    {
+      "at": "22:26:53",
+      "utc": "2026-11-01T16:56:53Z",
+      "step": "Postgres killed (SIGKILL) - repeat run",
+      "value": null
+    },
+    {
+      "at": "22:27:13",
+      "utc": "2026-11-01T16:57:13Z",
+      "step": "buyer paid at Razorpay while Postgres was down (pay_Tuz7OjlWxeVkz3 authorized)",
+      "value": null
+    },
+    {
+      "at": "22:27:24",
+      "utc": "2026-11-01T16:57:24Z",
+      "step": "Razorpay oracle while Postgres down",
+      "value": [
+        {
+          "orderId": "order_Tuz70kCvGAjjqj",
+          "status": "paid",
+          "amount": 100,
+          "amountPaid": 100,
+          "payments": [
+            {
+              "id": "pay_Tuz7OjlWxeVkz3",
+              "status": "captured",
+              "method": "netbanking",
+              "amountRefunded": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": "22:27:57",
+      "utc": "2026-11-01T16:57:57Z",
+      "step": "Postgres restarted and accepting connections",
+      "value": null
+    },
+    {
+      "at": "22:27:57",
+      "utc": "2026-11-01T16:57:57Z",
+      "step": "dispatch right after restart",
+      "value": [
+        {
+          "state": "PENDING",
+          "owner": "DISPATCH",
+          "remote": null,
+          "submissions": 1,
+          "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-decf16cacaf63fcfb497fcd65e6000e5ce5e17391253627eef92a3117ddc1826",
+          "error": "START_ACKNOWLEDGED"
+        }
+      ]
+    },
+    {
+      "at": "22:28:17",
+      "utc": "2026-11-01T16:58:17Z",
+      "step": "captured after restart",
+      "value": {
+        "status": "CAPTURED",
+        "providerId": "order_Tuz70kCvGAjjqj",
+        "recoveryCount": 2,
+        "captures": 1,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [
+          {
+            "state": "RUNNING",
+            "owner": "WORKFLOW",
+            "remote": "RUNNING",
+            "submissions": 1,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-decf16cacaf63fcfb497fcd65e6000e5ce5e17391253627eef92a3117ddc1826",
+            "error": null
+          }
+        ],
+        "outboxEvents": [
+          "PAYMENT_CAPTURED"
+        ],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:56:12",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:56:12",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "16:56:12",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:56:46",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:58:08",
+            "type": "CAPTURED"
+          },
+          {
+            "at": "16:58:15",
+            "type": "ERP_ACKNOWLEDGED"
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:28:18",
+      "utc": "2026-11-01T16:58:18Z",
+      "step": "capture recorded at (UTC, database clock)",
+      "value": "2026-11-01T16:58:08.268Z"
+    },
+    {
+      "at": "22:28:18",
+      "utc": "2026-11-01T16:58:18Z",
+      "step": "seconds from Postgres ready to capture observed",
+      "value": 21
+    },
+    {
+      "at": "22:28:28",
+      "utc": "2026-11-01T16:58:28Z",
+      "step": "downstream (order + buyer email)",
+      "value": {
+        "orderNumber": "10118",
+        "orderEventReceipts": [
+          "PAYMENT_CAPTURED"
+        ],
+        "buyerEmails": [
+          "[TEST] Carrier shop \u00b7 Payment received \u00b7 Order #10118"
+        ]
+      }
+    },
+    {
+      "at": "22:28:29",
+      "utc": "2026-11-01T16:58:29Z",
+      "step": "Razorpay oracle",
+      "value": [
+        {
+          "orderId": "order_Tuz70kCvGAjjqj",
+          "status": "paid",
+          "amount": 100,
+          "amountPaid": 100,
+          "payments": [
+            {
+              "id": "pay_Tuz7OjlWxeVkz3",
+              "status": "captured",
+              "method": "netbanking",
+              "amountRefunded": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": "22:28:46",
+      "utc": "2026-11-01T16:58:46Z",
+      "step": "RESULT: Postgres ready 16:57:57Z, capture recorded 16:58:08.268Z = 11 s; via Step Functions (webhook path off); one capture, one receipt, one buyer email",
+      "value": null
+    }
+  ]
+}

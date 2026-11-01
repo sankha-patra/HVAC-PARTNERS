@@ -20,3 +20,18 @@ Both folders were first saved under `C:\Users\sankh\ebusiness-platform\output\be
 | Status-read index | `../payment-timeline-benchmark-2026-10-22.md` | 111 → 405 status reads/s (3.6×), p95 −49%, 100,000 timeline rows | Checkout or payment TPS |
 
 Not backed by any evidence in this repository: "5,000 payments in one hour during a three-broker outage", and "43 → 380 TPS per pod" / "457 → 5.8 ms HikariCP hold". The second set came from an earlier checkout study whose results were not saved.
+
+## Rerun on current code (1 Nov 2026)
+
+The same harness (adapted to today's `@Transactional` outbox commands; now `billing-service/src/test/.../OutboxConnectionBenchmarkTest.java`, run with `-Dbilling.benchmark=outbox`) on commit `1259f62`. Result file: `outbox-connection-20261018/rerun-2026-11-01-current-code.json`.
+
+| Measure (per event, 384 publishes per design, 200 ms simulated Kafka acknowledgement) | Inside the transaction | Current (outside) |
+| --- | --- | --- |
+| p95 total connection-hold time | 346.0 ms | 115.5 ms (−67%) |
+| Median total connection-hold time | 266.9 ms | 47.9 ms (−82%) |
+| Connections held while 8 sends wait | 8 of 8 | 0 |
+| Unrelated query during the wait | timed out at 500 ms | answered in 8–11 ms |
+
+The pool-exhaustion result reproduces exactly. The absolute times are higher than on 17 Oct (215.6 → 7.8 ms) because two unrelated crash-looping lab containers used about 74% CPU during the run and the current publisher does more database work per event (lease checks, CDC fields). Quote the 17 Oct figures with their run, or the quiet rerun below.
+
+Quiet rerun the same evening (two crash-looping containers stopped; `outbox-connection-20261018/rerun-2026-11-01-quiet.json`): p95 total connection-hold per event **237.8 → 70.4 ms (−70%)**, median **223.2 → 19.8 ms (−91%)**, mean 222.7 → 27.7 ms; 8 waiting sends held 8 vs 0 connections; unrelated query timed out vs answered in 2–6 ms. The remaining gap to 17 Oct's 7.8 ms is the current publisher's extra database work per event (ownership/lease checks and CDC fields).

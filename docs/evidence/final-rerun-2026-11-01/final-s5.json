@@ -1,0 +1,181 @@
+{
+  "scenario": "s5",
+  "code": "1259f62",
+  "steps": [
+    {
+      "at": "22:31:47",
+      "utc": "2026-11-01T17:01:47Z",
+      "step": "public webhook path on?",
+      "value": true
+    },
+    {
+      "at": "22:31:52",
+      "utc": "2026-11-01T17:01:52Z",
+      "step": "Kafka stopped",
+      "value": null
+    },
+    {
+      "at": "22:31:58",
+      "utc": "2026-11-01T17:01:58Z",
+      "step": "buyer presses Pay x1",
+      "value": {
+        "orderId": "f670b414-37e0-4444-90a6-7cfed9038109",
+        "intentId": "d0c7bc95-2b4a-4aca-8652-9d244181ecd0",
+        "accountId": "20000000-0000-0000-0000-000000000001",
+        "amountMinor": 100,
+        "productId": "60000000-0000-0000-0000-000000000001",
+        "providerOrder": "order_TuzD67tNdGH0H0",
+        "submitAnswers": [
+          "REQUIRES_ACTION"
+        ]
+      }
+    },
+    {
+      "at": "22:32:44",
+      "utc": "2026-11-01T17:02:44Z",
+      "step": "buyer paid at Razorpay while Kafka was down (pay_TuzDTAYKQ66CIU)",
+      "value": null
+    },
+    {
+      "at": "22:32:46",
+      "utc": "2026-11-01T17:02:46Z",
+      "step": "captured while Kafka down",
+      "value": {
+        "status": "CAPTURED",
+        "providerId": "order_TuzD67tNdGH0H0",
+        "recoveryCount": 1,
+        "captures": 1,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [
+          {
+            "state": "PENDING",
+            "owner": "DISPATCH",
+            "remote": null,
+            "submissions": 1,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-ca8bef944a36d52f01c4444f9b8638ef67daefe8ee8551be2625d8a0fff018d7",
+            "error": "START_ACKNOWLEDGED"
+          }
+        ],
+        "outboxEvents": [
+          "PAYMENT_CAPTURED"
+        ],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "17:01:57",
+            "type": "CREATED"
+          },
+          {
+            "at": "17:01:57",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "17:01:58",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "17:02:34",
+            "type": "CAPTURED"
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:32:47",
+      "utc": "2026-11-01T17:02:47Z",
+      "step": "capture recorded at (UTC)",
+      "value": "2026-11-01T17:02:34.783Z"
+    },
+    {
+      "at": "22:32:47",
+      "utc": "2026-11-01T17:02:47Z",
+      "step": "outbox while Kafka down",
+      "value": "CDC_PENDING PAYMENT_CAPTURED"
+    },
+    {
+      "at": "22:32:48",
+      "utc": "2026-11-01T17:02:48Z",
+      "step": "downstream while Kafka down",
+      "value": {
+        "orderNumber": "10152",
+        "orderEventReceipts": [],
+        "buyerEmails": []
+      }
+    },
+    {
+      "at": "22:34:18",
+      "utc": "2026-11-01T17:04:18Z",
+      "step": "Kafka restarted and healthy",
+      "value": null
+    },
+    {
+      "at": "22:34:30",
+      "utc": "2026-11-01T17:04:30Z",
+      "step": "seconds from Kafka healthy to buyer email",
+      "value": 12
+    },
+    {
+      "at": "22:34:31",
+      "utc": "2026-11-01T17:04:31Z",
+      "step": "downstream after Kafka returned",
+      "value": {
+        "orderNumber": "10152",
+        "orderEventReceipts": [
+          "PAYMENT_CAPTURED"
+        ],
+        "buyerEmails": [
+          "[TEST] Carrier shop \u00b7 Payment received \u00b7 Order #10152"
+        ]
+      }
+    },
+    {
+      "at": "22:34:31",
+      "utc": "2026-11-01T17:04:31Z",
+      "step": "order status",
+      "value": "PAID"
+    },
+    {
+      "at": "22:34:31",
+      "utc": "2026-11-01T17:04:31Z",
+      "step": "connector",
+      "value": {
+        "name": "customer-email-outbox",
+        "connector": {
+          "state": "RUNNING",
+          "worker_id": "192.168.112.7:8083",
+          "version": "3.6.3.Final"
+        },
+        "tasks": [
+          {
+            "id": 0,
+            "state": "RUNNING",
+            "worker_id": "192.168.112.7:8083",
+            "version": "3.6.3.Final"
+          }
+        ],
+        "type": "source"
+      }
+    },
+    {
+      "at": "22:34:52",
+      "utc": "2026-11-01T17:04:52Z",
+      "step": "downstream 20 s later (duplicates?)",
+      "value": {
+        "orderNumber": "10152",
+        "orderEventReceipts": [
+          "PAYMENT_CAPTURED"
+        ],
+        "buyerEmails": [
+          "[TEST] Carrier shop \u00b7 Payment received \u00b7 Order #10152"
+        ]
+      }
+    },
+    {
+      "at": "22:35:13",
+      "utc": "2026-11-01T17:05:13Z",
+      "step": "RESULT: captured 17:02:34Z with Kafka down; event held CDC_PENDING; Kafka healthy 22:34:18 local -> order PAID + one buyer email 12 s later; no duplicates 20 s after",
+      "value": null
+    }
+  ]
+}

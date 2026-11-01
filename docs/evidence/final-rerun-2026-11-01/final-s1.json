@@ -1,0 +1,134 @@
+{
+  "scenario": "s1",
+  "code": "1259f62",
+  "steps": [
+    {
+      "at": "21:56:54",
+      "utc": "2026-11-01T16:26:54Z",
+      "step": "Razorpay made unreachable from the app",
+      "value": "64:ff9b::4101:cfb1 cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:8e5c cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:8e5c cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:cfb1 cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:cfb1 cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:8e5c cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:8e5c cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:cfb1 cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:cfb1 cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:8e5c cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:cfb1 cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com\n64:ff9b::4101:8e5c cde-blue-ext-v2.razorpay.com api.razorpay.com prod-api.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com prod-api-weighted.razorpay.com cde-blue-ext-v2.razorpay.com"
+    },
+    {
+      "at": "21:57:39",
+      "utc": "2026-11-01T16:27:39Z",
+      "step": "Razorpay reachable again (script stopped at first press: client 30 s timeout)",
+      "value": null
+    },
+    {
+      "at": "21:59:10",
+      "utc": "2026-11-01T16:29:10Z",
+      "step": "app restarted on the same jar (lab glitch: NoClassDefFoundError while the first press was in flight)",
+      "value": null
+    },
+    {
+      "at": "21:59:11",
+      "utc": "2026-11-01T16:29:11Z",
+      "step": "stuck press: local state after restart",
+      "value": {
+        "status": "SUBMITTING",
+        "providerId": null,
+        "recoveryCount": 0,
+        "captures": 0,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [
+          {
+            "state": "PENDING",
+            "owner": "DISPATCH",
+            "remote": null,
+            "submissions": 0,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-db86aa4e4f6bce95792733ff71d1280e5eace026247e06a7ac72df21fcebdf38",
+            "error": null
+          }
+        ],
+        "outboxEvents": [],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:26:58",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:26:58",
+            "type": "SUBMITTING"
+          }
+        ]
+      }
+    },
+    {
+      "at": "21:59:11",
+      "utc": "2026-11-01T16:29:11Z",
+      "step": "Razorpay oracle for that press",
+      "value": []
+    },
+    {
+      "at": "21:59:23",
+      "utc": "2026-11-01T16:29:23Z",
+      "step": "Razorpay made unreachable from the app (clean run)",
+      "value": null
+    },
+    {
+      "at": "21:59:32",
+      "utc": "2026-11-01T16:29:32Z",
+      "step": "buyer presses Pay x6",
+      "value": {
+        "orderId": "f7afae5c-617c-41e4-9400-0947dcc0ab15",
+        "intentId": "00ee76cb-565a-4f39-b95d-f17a0aed0f9a",
+        "accountId": "20000000-0000-0000-0000-000000000001",
+        "amountMinor": 100,
+        "productId": "60000000-0000-0000-0000-000000000001",
+        "providerOrder": "",
+        "submitAnswers": [
+          "UNKNOWN",
+          "UNKNOWN",
+          "UNKNOWN",
+          "UNKNOWN",
+          "UNKNOWN",
+          "UNKNOWN"
+        ]
+      }
+    },
+    {
+      "at": "21:59:33",
+      "utc": "2026-11-01T16:29:33Z",
+      "step": "Razorpay reachable again",
+      "value": null
+    },
+    {
+      "at": "21:59:35",
+      "utc": "2026-11-01T16:29:35Z",
+      "step": "local after six presses",
+      "value": {
+        "status": "UNKNOWN",
+        "providerId": null,
+        "recoveryCount": 0,
+        "captures": 0,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [],
+        "outboxEvents": [],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:29:29",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:29:29",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "16:29:32",
+            "type": "UNKNOWN"
+          }
+        ]
+      }
+    },
+    {
+      "at": "21:59:35",
+      "utc": "2026-11-01T16:29:35Z",
+      "step": "Razorpay oracle (any order for this receipt?)",
+      "value": []
+    }
+  ]
+}

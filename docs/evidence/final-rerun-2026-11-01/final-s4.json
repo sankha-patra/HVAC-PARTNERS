@@ -1,0 +1,191 @@
+{
+  "scenario": "s4",
+  "code": "1259f62",
+  "steps": [
+    {
+      "at": "22:28:47",
+      "utc": "2026-11-01T16:58:47Z",
+      "step": "buyer presses Pay x1",
+      "value": {
+        "orderId": "61679dab-7492-4aff-b377-7dc555a037c5",
+        "intentId": "4a6d89b6-5b7c-4de7-89fa-c2011fe06fc2",
+        "accountId": "20000000-0000-0000-0000-000000000001",
+        "amountMinor": 100,
+        "productId": "60000000-0000-0000-0000-000000000001",
+        "providerOrder": "order_Tuz9jTaghQW4Im",
+        "submitAnswers": [
+          "REQUIRES_ACTION"
+        ]
+      }
+    },
+    {
+      "at": "22:29:23",
+      "utc": "2026-11-01T16:59:23Z",
+      "step": "Spring Boot billing JVM killed (SIGKILL)",
+      "value": null
+    },
+    {
+      "at": "22:29:37",
+      "utc": "2026-11-01T16:59:37Z",
+      "step": "buyer paid at Razorpay while the app was down (pay_TuzA6yTLsWhd4j authorized)",
+      "value": null
+    },
+    {
+      "at": "22:29:48",
+      "utc": "2026-11-01T16:59:48Z",
+      "step": "Razorpay oracle while app down",
+      "value": [
+        {
+          "orderId": "order_Tuz9jTaghQW4Im",
+          "status": "paid",
+          "amount": 100,
+          "amountPaid": 100,
+          "payments": [
+            {
+              "id": "pay_TuzA6yTLsWhd4j",
+              "status": "captured",
+              "method": "netbanking",
+              "amountRefunded": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": "22:29:48",
+      "utc": "2026-11-01T16:59:48Z",
+      "step": "local while app down (database still up)",
+      "value": {
+        "status": "REQUIRES_ACTION",
+        "providerId": "order_Tuz9jTaghQW4Im",
+        "recoveryCount": 2,
+        "captures": 0,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [
+          {
+            "state": "PENDING",
+            "owner": "DISPATCH",
+            "remote": null,
+            "submissions": 1,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-e08c8d6934f00ce657e5e8393b179041af7b4dbebfb4c60a5603adadc1cfdc0b",
+            "error": "START_ACKNOWLEDGED"
+          }
+        ],
+        "outboxEvents": []
+      }
+    },
+    {
+      "at": "22:31:08",
+      "utc": "2026-11-01T17:01:08Z",
+      "step": "app restarted and healthy",
+      "value": null
+    },
+    {
+      "at": "22:31:11",
+      "utc": "2026-11-01T17:01:11Z",
+      "step": "captured after restart",
+      "value": {
+        "status": "CAPTURED",
+        "providerId": "order_Tuz9jTaghQW4Im",
+        "recoveryCount": 2,
+        "captures": 1,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [
+          {
+            "state": "PENDING",
+            "owner": "DISPATCH",
+            "remote": null,
+            "submissions": 1,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-e08c8d6934f00ce657e5e8393b179041af7b4dbebfb4c60a5603adadc1cfdc0b",
+            "error": "START_ACKNOWLEDGED"
+          }
+        ],
+        "outboxEvents": [
+          "PAYMENT_CAPTURED"
+        ],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:58:46",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:58:46",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "16:58:47",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:59:22",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:59:44",
+            "type": "CAPTURED"
+          },
+          {
+            "at": "17:01:07",
+            "type": "ERP_ACKNOWLEDGED"
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:31:11",
+      "utc": "2026-11-01T17:01:11Z",
+      "step": "capture recorded at (UTC, database clock)",
+      "value": "2026-11-01T16:59:44.534Z"
+    },
+    {
+      "at": "22:31:11",
+      "utc": "2026-11-01T17:01:11Z",
+      "step": "seconds from app healthy to capture observed",
+      "value": 3
+    },
+    {
+      "at": "22:31:22",
+      "utc": "2026-11-01T17:01:22Z",
+      "step": "downstream (order + buyer email)",
+      "value": {
+        "orderNumber": "10151",
+        "orderEventReceipts": [
+          "PAYMENT_CAPTURED"
+        ],
+        "buyerEmails": [
+          "[TEST] Carrier shop \u00b7 Payment received \u00b7 Order #10151"
+        ]
+      }
+    },
+    {
+      "at": "22:31:23",
+      "utc": "2026-11-01T17:01:23Z",
+      "step": "Razorpay oracle",
+      "value": [
+        {
+          "orderId": "order_Tuz9jTaghQW4Im",
+          "status": "paid",
+          "amount": 100,
+          "amountPaid": 100,
+          "payments": [
+            {
+              "id": "pay_TuzA6yTLsWhd4j",
+              "status": "captured",
+              "method": "netbanking",
+              "amountRefunded": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": "22:31:47",
+      "utc": "2026-11-01T17:01:47Z",
+      "step": "RESULT: buyer paid 16:59:37Z while app dead; Lambda recorded the capture 16:59:44.534Z (7 s) before the app restarted at 17:01:08Z; downstream order update and buyer email after restart; one capture",
+      "value": null
+    }
+  ]
+}

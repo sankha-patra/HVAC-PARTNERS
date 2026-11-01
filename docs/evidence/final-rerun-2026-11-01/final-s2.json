@@ -1,0 +1,96 @@
+{
+  "scenario": "s2",
+  "code": "1259f62",
+  "steps": [
+    {
+      "at": "21:59:58",
+      "utc": "2026-11-01T16:29:58Z",
+      "step": "buyer presses Pay x1",
+      "value": {
+        "orderId": "ec6f028a-3648-4be6-b2c4-12d705eeabf4",
+        "intentId": "e813a8a0-2884-4217-88a5-4d6b1223fc4f",
+        "accountId": "20000000-0000-0000-0000-000000000001",
+        "amountMinor": 100,
+        "productId": "60000000-0000-0000-0000-000000000001",
+        "providerOrder": "",
+        "submitAnswers": [
+          "UNKNOWN"
+        ]
+      }
+    },
+    {
+      "at": "22:00:02",
+      "utc": "2026-11-01T16:30:02Z",
+      "step": "30 presses from 10 sessions + delete/truncate attempts",
+      "value": {
+        "pressAnswers": [
+          "UNKNOWN"
+        ],
+        "presses": 30,
+        "deletes": [
+          {
+            "sql": "DELETE FROM billing.attempts WHERE intent_id='e813a8a0-2884-",
+            "refused": true,
+            "error": "ERROR:  Saved payment attempt cannot be deleted"
+          },
+          {
+            "sql": "DELETE FROM billing.intents WHERE id='e813a8a0-2884-4217-88a",
+            "refused": true,
+            "error": "ERROR:  update or delete on table \"intents\" violates foreign key constraint \"allocations_intent_id_fkey\" on ta"
+          },
+          {
+            "sql": "DELETE FROM commerce.orders WHERE id='ec6f028a-3648-4be6-b2c",
+            "refused": true,
+            "error": "ERROR:  update or delete on table \"orders\" violates foreign key constraint \"order_lines_order_id_fkey\" on tabl"
+          },
+          {
+            "sql": "TRUNCATE billing.attempts CASCADE",
+            "refused": true,
+            "error": "ERROR:  Table billing.attempts cannot be truncated: it holds payment or order records"
+          },
+          {
+            "sql": "TRUNCATE commerce.orders CASCADE",
+            "refused": true,
+            "error": "NOTICE:  truncate cascades to table \"order_lines\""
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:00:03",
+      "utc": "2026-11-01T16:30:03Z",
+      "step": "local after the storm",
+      "value": {
+        "status": "UNKNOWN",
+        "providerId": null,
+        "recoveryCount": 0,
+        "captures": 0,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [],
+        "outboxEvents": [],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:29:54",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:29:55",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "16:29:58",
+            "type": "UNKNOWN"
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:00:03",
+      "utc": "2026-11-01T16:30:03Z",
+      "step": "Razorpay oracle (orders for this receipt)",
+      "value": []
+    }
+  ]
+}

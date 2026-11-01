@@ -239,3 +239,22 @@ Real Razorpay test mode (the `rzp_test_` key from the ebusiness project), the pr
 | Refund | Approval email to app owners, independent approval, real Razorpay refund confirmed by the workflow (after granting `SELECT, UPDATE ON billing.refunds` to the Lambda's role) |
 
 Findings: (1) attempt rows were deletable — fixed by V37; (2) `RecoveryConnectionGate` failed when a pooled socket died inside Hikari's alive-bypass window — now evicts that connection and retries once (`BillingAwsRecoveryDatabaseTest` covers it; Lambda version 2 in AWS still runs the earlier code); (3) `RecoveryDispatchStore.claim` counts REVIEW rows as in flight, so two unresolved reviews stop all new starts in a campaign — design decision pending; (4) the lab grants for the Lambda role omit refunds.
+
+## 14. Final-code rerun of the six scenarios (1 Nov 2026, commit `1259f62`)
+
+Same lab (laptop app, PostgreSQL, Kafka, Debezium; AWS Step Functions + Lambda v3, campaign `8bb64520…`, automatic enrollment), real Razorpay test-mode payments made through the hosted checkout. Times come from the database clock. Evidence: `docs/evidence/final-rerun-2026-11-01/final-s*.json`. Full billing suite on the same code: 723 run, 0 failures, 8 skipped.
+
+| # | Scenario | What was done | Result |
+| --- | --- | --- | --- |
+| 1 | Payment provider down | Razorpay made unreachable from the app; buyer pressed Pay 6 times | Every press answered UNKNOWN; one saved attempt; no Razorpay order; nothing charged; `PAYMENT_OUTCOME_UNKNOWN` alert. Recovery attempts then ran 5 min, 15 min, ~1 h, then hours apart, each failing with `LabLoopBudgetExhausted` (nothing to find), as designed |
+| 2 | Delete the order while the buyer retries | 30 presses from 10 sessions while DELETE on attempts/intents/orders and TRUNCATE on attempts/orders ran | All 5 refused (V37 trigger, foreign keys, V38 truncate guard); all 30 presses returned the same Razorpay order; one attempt; paid → captured once, one order update, one buyer email |
+| 3 | PostgreSQL down during payment | Order ready, PostgreSQL SIGKILLed, buyer paid, PostgreSQL restarted ~40 s later; public webhook off | PostgreSQL ready 16:57:57Z → capture recorded 16:58:08Z: **11 s**, by Step Functions/Lambda; one capture, one order update, one email |
+| 4 | Spring Boot crash during payment | Order ready, billing JVM SIGKILLed, buyer paid, app restarted ~90 s later; public webhook off | Capture recorded **7 s after paying while the app was still down** (Lambda writes to the database directly); order update and buyer email after the app returned; one capture |
+| 5 | Kafka down after a successful payment | Kafka stopped, buyer paid, Kafka down ~90 s | Capture recorded with Kafka down; event held `CDC_PENDING`; Kafka healthy → order PAID and one buyer email **12 s** later; no duplicate 20 s after |
+| 6 | Kafka down while Debezium writes | Kafka stopped, buyer paid, Debezium retrying, Connect SIGKILLed, Kafka then Connect restarted | Order PAID and one email **85 s** after Connect restarted; totals across all orders rose by exactly one (receipts 17→18, customer emails 17→18) |
+
+Compared with 30 Oct (older code): database recovery 57 s → 11 s; app-crash recovery 42 s after restart → recorded before the restart, because with automatic enrollment the workflow is already running when the app dies.
+
+Incidents during the run, kept in the evidence: one first press hit `NoClassDefFoundError` inside the long-running lab container (Docker Desktop file sharing; fixed by restarting the same image) — that payment stayed saved and recovery picked it up; one scenario 2 order did not reach Razorpay because the JVM caches DNS for 30 s after scenario 1's block (deletes were still refused; rerun as 2b); one scenario 3 attempt was voided because the browser click did not happen (window not drawing) and was repeated.
+
+Outbox benchmark on the same code, quiet machine (`docs/benchmarks/outbox-connection-20261018/rerun-2026-11-01-quiet.json`): p95 connection-hold per event 238 → 70 ms (−70%), median 223 → 20 ms (−91%); with 8 sends waiting the in-transaction design held all 8 connections and an unrelated query timed out, the current design held none and the query answered in 2–6 ms.

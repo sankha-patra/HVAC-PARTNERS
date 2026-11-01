@@ -1,0 +1,220 @@
+{
+  "scenario": "s2b",
+  "code": "1259f62",
+  "steps": [
+    {
+      "at": "22:00:32",
+      "utc": "2026-11-01T16:30:32Z",
+      "step": "buyer presses Pay x1",
+      "value": {
+        "orderId": "0710a046-81f7-428b-bfa9-3ec4135d5a08",
+        "intentId": "574e6515-788c-4b27-88a2-be28a10c62eb",
+        "accountId": "20000000-0000-0000-0000-000000000001",
+        "amountMinor": 100,
+        "productId": "60000000-0000-0000-0000-000000000001",
+        "providerOrder": "order_TuyftNA8HJEh37",
+        "submitAnswers": [
+          "REQUIRES_ACTION"
+        ]
+      }
+    },
+    {
+      "at": "22:00:37",
+      "utc": "2026-11-01T16:30:37Z",
+      "step": "30 presses from 10 sessions + 5 delete/truncate attempts",
+      "value": {
+        "pressAnswers": [
+          "REQUIRES_ACTION"
+        ],
+        "presses": 30,
+        "allRefused": true,
+        "deletes": [
+          {
+            "sql": "DELETE FROM billing.attempts WHERE intent_id='574e6515-788c-",
+            "refused": true
+          },
+          {
+            "sql": "DELETE FROM billing.intents WHERE id='574e6515-788c-4b27-88a",
+            "refused": true
+          },
+          {
+            "sql": "DELETE FROM commerce.orders WHERE id='0710a046-81f7-428b-bfa",
+            "refused": true
+          },
+          {
+            "sql": "TRUNCATE billing.attempts CASCADE",
+            "refused": true
+          },
+          {
+            "sql": "TRUNCATE commerce.orders CASCADE",
+            "refused": true
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:00:39",
+      "utc": "2026-11-01T16:30:39Z",
+      "step": "local after the storm",
+      "value": {
+        "status": "REQUIRES_ACTION",
+        "providerId": "order_TuyftNA8HJEh37",
+        "recoveryCount": 0,
+        "captures": 0,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [],
+        "outboxEvents": [],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:30:31",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:30:31",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "16:30:32",
+            "type": "REQUIRES_ACTION"
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:00:40",
+      "utc": "2026-11-01T16:30:40Z",
+      "step": "Razorpay oracle before paying",
+      "value": []
+    },
+    {
+      "at": "22:01:24",
+      "utc": "2026-11-01T16:31:24Z",
+      "step": "buyer paid at Razorpay",
+      "value": null
+    },
+    {
+      "at": "22:12:59",
+      "utc": "2026-11-01T16:42:59Z",
+      "step": "buyer paid at Razorpay",
+      "value": null
+    },
+    {
+      "at": "22:13:02",
+      "utc": "2026-11-01T16:43:02Z",
+      "step": "captured",
+      "value": {
+        "status": "CAPTURED",
+        "providerId": "order_TuyftNA8HJEh37",
+        "recoveryCount": 5,
+        "captures": 1,
+        "attempts": 1,
+        "openCases": 0,
+        "dispatch": [
+          {
+            "state": "PENDING",
+            "owner": "DISPATCH",
+            "remote": null,
+            "submissions": 0,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-2750030cf4d08ba6ad6b51d0796e0d71339d4255f596fc8729a1601fe85a26ea",
+            "error": null
+          },
+          {
+            "state": "SUPERSEDED",
+            "owner": "NEXT_ATTEMPT",
+            "remote": "FAILED",
+            "submissions": 1,
+            "arn": "arn:aws:states:ap-southeast-2:014805809443:execution:payments-rzp-recovery-recovery:recovery-8d7c8689e98fa62923d02ac922ba77357057ba790171baf11730223ee6352b75",
+            "error": null
+          }
+        ],
+        "outboxEvents": [
+          "PAYMENT_CAPTURED"
+        ],
+        "webhooks": [],
+        "timeline": [
+          {
+            "at": "16:30:31",
+            "type": "CREATED"
+          },
+          {
+            "at": "16:30:31",
+            "type": "SUBMITTING"
+          },
+          {
+            "at": "16:30:32",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:35:43",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:36:06",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:36:42",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:37:36",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:39:06",
+            "type": "REQUIRES_ACTION"
+          },
+          {
+            "at": "16:43:00",
+            "type": "PROCESSING"
+          },
+          {
+            "at": "16:43:00",
+            "type": "CAPTURED"
+          },
+          {
+            "at": "16:43:02",
+            "type": "ERP_ACKNOWLEDGED"
+          }
+        ]
+      }
+    },
+    {
+      "at": "22:13:11",
+      "utc": "2026-11-01T16:43:11Z",
+      "step": "Razorpay oracle",
+      "value": [
+        {
+          "orderId": "order_TuyftNA8HJEh37",
+          "status": "attempted",
+          "amount": 100,
+          "amountPaid": null,
+          "payments": [
+            {
+              "id": "pay_TuygShb2UKyCN1",
+              "status": "captured",
+              "method": "netbanking",
+              "amountRefunded": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": "22:13:12",
+      "utc": "2026-11-01T16:43:12Z",
+      "step": "downstream (order + buyer email)",
+      "value": {
+        "orderNumber": "10084",
+        "orderEventReceipts": [
+          "PAYMENT_CAPTURED"
+        ],
+        "buyerEmails": [
+          "[TEST] Carrier shop \u00b7 Payment received \u00b7 Order #10084"
+        ]
+      }
+    }
+  ]
+}
