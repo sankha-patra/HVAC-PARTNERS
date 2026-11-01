@@ -119,8 +119,8 @@ public class BillingWorkers {
         void release(){if(started.compareAndSet(false,true))try{abandoned.run();}catch(RuntimeException failure){log(failure);}}
         private static void log(RuntimeException failure){
             org.slf4j.LoggerFactory.getLogger(BillingWorkers.class).error("Billing background operation remains durable and will be retried",failure);
-            if(OperationalAlert.databaseUnavailable(failure))OperationalAlert.raise("DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,
-                "A background job could not reach the database; its work stays saved and is retried");
+            if(OperationalAlert.databaseUnavailable(failure))OperationalAlert.raiseAtMostEvery(java.time.Duration.ofMinutes(1),"worker","DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,
+                "A background job could not reach the database; its work stays saved and is retried","source","worker");
         }
     }
     @PreDestroy public void close() {

@@ -94,7 +94,8 @@ public class BillingService {
         ProviderResult result;
         try { result=provider.recoverPayment(saved,text(attempt,"requestVersion"),Instant.parse(text(attempt,"createdAt")),text(row,"providerId")); }
         catch(ProviderUncertainException uncertain) { return get(user,intent); }
-        // A browser lookup cannot clear another owner's live orchestration lease. Definitive capture is still recorded.
+        // Only a definitive capture is recorded here. Recording it without a fence takes the lease, which is safe: the capture
+        // is idempotent, and a recovery worker that still holds an older claim finds nothing left to do.
         if("CAPTURED".equals(result.state()))recordResult(intent,null,result);
         return get(user,intent);
     }
@@ -103,6 +104,8 @@ public class BillingService {
         try { return provider.admitNewPayment(); }
         catch(ProviderBusyException busy) {
             log.warn("New payment refused before anything was saved or sent intentId={} reason={}",intent,busy.getMessage());
+            OperationalAlert.raiseAtMostEvery(java.time.Duration.ofMinutes(15),"admission","PROVIDER_PAUSED",OperationalAlert.Severity.WARNING,
+                "New payments are being refused before anything is saved or sent (provider paused after repeated failures, or all call slots busy); nothing was charged","intentId",intent);
             throw new BillingProblem(503,"PROVIDER_BUSY","Payments are very busy right now. Nothing was charged. Please try again in a minute.");
         }
     }
@@ -120,7 +123,7 @@ public class BillingService {
             throw failure;
         }
         if(work==null) return get(user,intent);
-        ProviderResult result;
+        ProviderResult result;String uncertain=null;
         // The slot is handed back as soon as Stripe answers, before the answer is saved.
         try (var permit=slot.get(); var ignored=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
             result=provider.submitSaved(ProviderCommand.fromJson(text(work,"originalRequest")),
@@ -132,11 +135,19 @@ public class BillingService {
         } catch(RuntimeException failure) {
             // Identifiers and the exception only: provider exceptions carry no credential or response body.
             log.warn("Payment submission outcome uncertain; recovery will reconcile intentId={}",intent,failure);
-            OperationalAlert.raise("PAYMENT_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
-                "Payment provider did not confirm the request ("+failure.getClass().getSimpleName()+"); kept as UNKNOWN for recovery","intentId",intent);
+            uncertain=failure.getClass().getSimpleName();
             result=new ProviderResult(null,"UNKNOWN",null,"Payment outcome is unconfirmed; recovery will check the original operation",BillingProviderEvidence.from(failure));
         }
-        recordResult(intent,token,result);
+        try {recordResult(intent,token,result);}
+        catch(RuntimeException failure) {
+            // The provider answered (or not) but the answer was not saved: the payment stays SUBMITTING with its saved
+            // request, and recovery asks the provider again.
+            OperationalAlert.raise("PAYMENT_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
+                "Provider answer ("+result.state()+") could not be saved ("+failure.getClass().getSimpleName()+"); payment stays SUBMITTING with its saved request for recovery","intentId",intent);
+            throw failure;
+        }
+        if(uncertain!=null)OperationalAlert.raise("PAYMENT_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
+            "Payment provider did not confirm the request ("+uncertain+"); kept as UNKNOWN with its saved request for recovery","intentId",intent);
         return get(user,intent);
     }
     /** Rejection describes this request, not a provider operation another worker may have created. */

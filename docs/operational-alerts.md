@@ -1,47 +1,71 @@
-# Operational alerts on AWS
+# Operational alerts
 
-Every failure that needs a person reaches one encrypted SNS topic and is emailed to the subscribed group mailboxes. Three sources feed it.
+Every failure that needs a person reaches one encrypted SNS topic and is emailed to the subscribed mailboxes, with what broke and why. Two deployments share the same application code:
 
-## 1. ALERT log lines from the billing service
+- **Full AWS** (`infra/aws-billing/alerts.tf`): ECS, RDS, MSK. ALERT lines are matched by CloudWatch metric filters on the billing, worker and recovery-Lambda log groups; ECS task stops and RDS events come from EventBridge.
+- **Hybrid lab** (`infra/aws-hybrid-alerts`, `infra/hybrid-lab`): Java, PostgreSQL, Kafka and Debezium on the laptop; Step Functions, the recovery Lambda, SNS, CloudWatch and EventBridge in AWS. Fluent Bit ships the laptop's billing and PostgreSQL logs and container stop events to CloudWatch Logs.
 
-`OperationalAlert.raise(...)` writes one line per alert, in a fixed shape that CloudWatch metric filters match:
+## 1. ALERT lines from the billing service
+
+`OperationalAlert.raise(...)` writes one line on logger `operational-alerts`:
 
 ```
-ALERT code=PAYMENT_OUTCOME_UNKNOWN severity=WARNING intentId=8643c96f-dc6e-4576-8576-ebb448f9a7c7 reason="Payment provider did not confirm the request (ProviderUncertainException); kept as UNKNOWN for recovery"
+ALERT code=PAYMENT_OUTCOME_UNKNOWN severity=WARNING intentId=8643c96f-dc6e-4576-8576-ebb448f9a7c7 reason="Payment provider did not confirm the request (ProviderUncertainException); kept as UNKNOWN with its saved request for recovery"
 ```
 
-Inside a transaction the line is written only after commit, so a rolled-back change never alerts. Fields are identifiers and short reason text only; never provider messages, request bodies or personal data.
+Inside a transaction the line is written after commit; a rolled-back change never alerts. Fields are identifiers and short reason text only. Outage alerts raised on every request use `raiseAtMostEvery` (one line per source per minute).
 
-| Code | Severity | Raised by | Meaning |
-| --- | --- | --- | --- |
-| `PAYMENT_OUTCOME_UNKNOWN` | WARNING | `BillingService` submit | Provider gave no definite answer; payment kept `UNKNOWN` for recovery |
-| `REFUND_OUTCOME_UNKNOWN` | WARNING | `BillingRefundService` | Same for a refund |
-| `DATABASE_UNAVAILABLE` | CRITICAL | `BillingAdvice`, `CommerceAdvice`, `BillingWorkers`, `BillingRecovery` | The database could not be reached (connection failure, not a query error) |
-| `FINANCE_CASE_OPENED` | WARNING | `BillingStore.caseFor` / `escalate` | A finance case was opened or reopened; `caseReason` names it |
-| `RECOVERY_NEEDS_REVIEW` | WARNING | `RecoveryDispatchStore` | A Step Functions recovery ended without a money result |
-| `OUTBOX_NOT_DRAINING` | WARNING | `OperationalWatch` | Oldest committed event older than 60 s (Kafka or Debezium down) |
-| `RECOVERY_WORK_NOT_CLAIMED` | WARNING | `OperationalWatch` | Due payment/refund recovery unclaimed for over 180 s |
-| `CDC_SLOT_INACTIVE` | CRITICAL | `OperationalWatch` | CDC expected but slot `billing_outbox_cdc` not active |
-| `MONEY_OPERATION_STUCK` | WARNING | `OperationalWatch` | Payments/refunds out of automatic recovery for a technical reason |
+**One-off events** (emailed one by one with the exact line):
 
-`OperationalWatch` reads the existing `BillingMetrics` gauges every minute (thresholds match `monitoring/prometheus/billing-rules.yml`), raises when a condition starts, repeats every 15 minutes, and logs `RESOLVED alert code=<CODE>` when it clears. Enable it in exactly one deployment with `BILLING_ALERTS_WATCH_ENABLED=true`; on AWS the payment worker task sets it (`infra/aws-billing/workers.tf`).
+| Code | Raised by | Meaning |
+| --- | --- | --- |
+| `PAYMENT_OUTCOME_UNKNOWN` / `REFUND_OUTCOME_UNKNOWN` | `BillingService` / `BillingRefundService` after the save | Provider gave no definite answer (kept UNKNOWN), or its answer could not be saved (stays SUBMITTING). Recovery asks again |
+| `DATABASE_UNAVAILABLE` | HTTP advice, workers, scheduler error handler, recovery, the watch's `SELECT 1` probe (`source=`) | PostgreSQL unreachable; requests fail safely. In the hybrid stack this is an alarm (one email when it starts, one OK), not one email per line |
+| `FINANCE_CASE_OPENED` | `BillingStore.caseFor/escalate`, settlement checks | A person must decide; `caseReason` says which |
+| `RECOVERY_NEEDS_REVIEW` | `RecoveryDispatchStore` | Last recovery attempt ended without a money result; `cause` carries the workflow's error |
+| `RECOVERY_DISPATCH_FAILING` | `RecoveryDispatcher` (3 consecutive AWS failures, repeats every 15 min) | Dispatcher cannot call Step Functions; `errorCode` says why |
+| `PROVIDER_PAUSED` | `BillingService` admission (every 5 min at most) | New payments refused before anything is sent; nothing charged |
 
-## 2. AWS events and database log
+**Conditions** (written by `OperationalWatch` every check while they hold; the alarm emails once on start and once after five clear minutes):
 
-`infra/aws-billing/alerts.tf`:
+| Code | Holds when |
+| --- | --- |
+| `OUTBOX_NOT_DRAINING` | Oldest committed event older than 60 s |
+| `RECOVERY_WORK_NOT_CLAIMED` | Due recovery owned by no workflow, claim or finance case for over 180 s |
+| `CDC_SLOT_INACTIVE` / `DEBEZIUM_STALLED` | CDC mode and the slot (`billing.cdc.slot-name`) is inactive / the Debezium heartbeat is older than 60 s |
+| `DEBEZIUM_TASK_NOT_RUNNING` | Connect REST (`billing.alerts.connect-url`) reports the connector or a task not RUNNING (optional auto-restart) |
+| `KAFKA_UNREACHABLE` | Broker not reachable twice in a row |
+| `CDC_WAL_RETAINED` | Slot holds over 512 MB of WAL |
+| `MONEY_OPERATION_STUCK` | A payment/refund uncertain over 15 min with no open finance case |
+| `DEAD_LETTER_OPEN` | A Kafka event was parked (lasting failure; database outages are waited out for 6 h first) |
+| `NOTIFICATION_DELIVERY_FAILING` | Emails retrying, given up, or dropped for lack of a recipient |
+| `PROVIDER_CREDENTIALS_REJECTED` | Provider rejected the API key |
+| `RECOVERY_CAMPAIGN_EXPIRING` | Campaign ends within a day or used 80% of its starts |
 
-- Metric filter per code on `/<name>/billing` and `/<name>/payment-worker`, alarm per code (namespace `InvoicePayments/Alerts`). Each alarm description says what broke, why, what to check and how to find the line in Logs Insights.
-- RDS PostgreSQL log filter for blocked deletes/rewrites (`cannot be deleted`, `is immutable`, `update or delete on table`) → `protected-row-change-blocked`.
-- EventBridge → SNS with AWS's reason in the email: ECS task stopped (`EssentialContainerExited`, `TaskFailedToStart`), RDS availability/failover/failure/recovery/low-storage events, and, when `recovery_state_machine_arns` is set, failed/timed-out/aborted recovery executions. `recovery_function_names` adds a Lambda `Errors` alarm.
+A value that cannot be read (database down) keeps and repeats its last state, so no false OK is sent. The watch also writes `HEARTBEAT service=billing db=up|down` every check. Enable it in exactly one deployment with `BILLING_ALERTS_WATCH_ENABLED=true`.
 
-## 3. Infrastructure alarms
+## 2. Hybrid stack (`infra/aws-hybrid-alerts`)
 
-The alarms in `observability.tf` and `cdc-monitoring.tf` now notify the same topic (`local.alarm_actions`), plus any extra ARNs in `alarm_action_arns`.
+- KMS-encrypted SNS topic `payments-hybrid-alerts`, email subscriptions.
+- Log groups `/payments-hybrid/{billing,postgres,docker-events,shipper}` (30 days).
+- **Forwarder Lambda**: subscription filters on billing, the recovery Lambda log group, PostgreSQL (blocked delete/truncate, PANIC, shutdown, disk full) and container die/oom events. Each batch becomes one email with the lines and what to do.
+- **Alarms**: one per condition code (plus `DATABASE_UNAVAILABLE`); heartbeat alarms with composites `payments-hybrid-billing-app-down` (app heartbeat missing while the shipper is alive: crash or hang; suppressed for 3 minutes when the shipper heartbeat also stops) and `payments-hybrid-laptop-telemetry-lost` (laptop asleep, Docker stopped, key revoked); recovery Lambda errors and throttles; forwarder errors.
+- **EventBridge**: a recovery execution aborted by a person. Failed and timed-out executions are routine (a later attempt follows); the last attempt raises `RECOVERY_NEEDS_REVIEW` with the workflow's error. Delivery failures of the rule are an alarm.
+- **IAM users** with narrow inline policies: `payments-hybrid-telemetry` (write log events to these groups only) and `payments-hybrid-dispatcher` (start and describe recovery executions only). Their access keys are created outside Terraform and kept in the lab's `private/` folder.
 
-## Turning it on
+Laptop side (`infra/hybrid-lab`): `fluent-bit.conf` (forward input for the fluentd log driver, `docker_events`, a heartbeat, disk buffering) and `telemetry.yml` (compose overlay: Fluent Bit service, fluentd logging for billing and PostgreSQL, PostgreSQL `log_line_prefix` with user/database/application/client, `log_statement=ddl`, `max_slot_wal_keep_size`).
 
-Set `alert_email_addresses` (group mailboxes; each must confirm the AWS subscription email), and optionally `recovery_state_machine_arns` / `recovery_function_names` for the separately deployed recovery stack. Tests: `terraform test` in `infra/aws-billing` (`tests/alerts.tftest.hcl`), `OperationalAlertTest` in the billing service.
+## 3. Scenario coverage
 
-## Verified so far
+| Scenario | What emails |
+| --- | --- |
+| 1 Provider down | `PAYMENT_OUTCOME_UNKNOWN` (exact line); later `RECOVERY_NEEDS_REVIEW` + `FINANCE_CASE_OPENED` if all attempts fail; `PROVIDER_PAUSED` if the breaker opens |
+| 2 Delete/truncate a saved order or attempt | PostgreSQL `cannot be deleted` / `cannot be truncated` line with user, application and client |
+| 3 PostgreSQL down | `DATABASE_UNAVAILABLE` (watch probe, with or without traffic), `POSTGRES_FAILURE` from the database log, container stop event |
+| 4 Spring Boot crash | `billing-app-down` composite (heartbeat), container stop event with exit code |
+| 5 Kafka down after payment | `OUTBOX_NOT_DRAINING`, `KAFKA_UNREACHABLE`, kafka container stop event |
+| 6 Kafka down during the Debezium write | `OUTBOX_NOT_DRAINING`, `DEBEZIUM_STALLED` / `DEBEZIUM_TASK_NOT_RUNNING`, `CDC_SLOT_INACTIVE` |
 
-On 30 Oct 2026 the ALERT lines were produced by the running service for a provider outage, a database outage, a Kafka outage (raised after 62 s, resolved after a connector restart) and the stuck recovery work; the blocked deletes appeared in the PostgreSQL log. Evidence: `Documents/Codex/2026-10-26/pl/work/razorpay-failure-e2e/evidence/alert-lines.txt`. The SNS topic, alarms and EventBridge rules pass `terraform test` but have not been deployed. In that lab the replication slot is named `rzp_failures_outbox`, so `CDC_SLOT_INACTIVE` fired falsely there; production uses `billing_outbox_cdc`.
+## Tests
+
+`OperationalAlertTest`, `BillingAwsRecoveryDatabaseTest`, `terraform test` in `infra/aws-billing` and `infra/aws-hybrid-alerts`, `python -I -m unittest discover -s infra/aws-hybrid-alerts/forwarder -p 'test_*.py'`.

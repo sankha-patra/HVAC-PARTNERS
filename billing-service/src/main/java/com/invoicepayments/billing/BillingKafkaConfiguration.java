@@ -51,6 +51,10 @@ public class BillingKafkaConfiguration {
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         var recoverer=new DeadLetterPublishingRecoverer(template);recoverer.setFailIfSendResultIsError(true);
         var errors=new DefaultErrorHandler(recoverer,new FixedBackOff(1000,4));
+        // A database outage is not a bad event: parking a captured payment's order update or buyer email as a dead
+        // letter after a few seconds loses it until someone replays it. Wait it out (up to 30 s apart, for 6 hours),
+        // keeping the partition's order; only a lasting failure becomes a dead letter, which is alerted.
+        errors.setBackOffFunction((record,failure)->OperationalAlert.transientDatabaseFailure(failure)?databaseOutageBackOff():null);
         errors.addNotRetryableExceptions(IllegalArgumentException.class);errors.setCommitRecovered(true);
         factory.setCommonErrorHandler(errors);factory.setConcurrency(2);return factory;
     }
@@ -61,6 +65,11 @@ public class BillingKafkaConfiguration {
         // Keep the original DLT record unacknowledged while the database is unavailable.
         factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000,FixedBackOff.UNLIMITED_ATTEMPTS)));
         return factory;
+    }
+    static org.springframework.util.backoff.ExponentialBackOff databaseOutageBackOff() {
+        var backOff=new org.springframework.util.backoff.ExponentialBackOff(1000,2.0);
+        backOff.setMaxInterval(30000);backOff.setMaxElapsedTime(java.time.Duration.ofHours(6).toMillis());
+        return backOff;
     }
     // Boot attaches Kafka client metrics only to the factory it builds itself. These factories are built here,
     // so without this the consumer lag behind BillingKafkaConsumerLagging would never be exported.

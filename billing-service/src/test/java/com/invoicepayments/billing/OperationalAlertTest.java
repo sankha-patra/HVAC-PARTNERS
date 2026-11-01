@@ -60,19 +60,52 @@ class OperationalAlertTest {
         assertThat(OperationalAlert.databaseUnavailable(new org.springframework.dao.DataIntegrityViolationException("constraint"))).isFalse();
         assertThat(OperationalAlert.databaseUnavailable(new IllegalStateException("bug"))).isFalse();
     }
-    @Test void watchRaisesOnStartRepeatsEveryFifteenMinutesAndResolvesOnce() {
+    @Test void watchWritesTheConditionEveryCheckWhileItHoldsThenResolvesOnce() {
         var registry=new SimpleMeterRegistry();var outbox=new double[]{0};
         Gauge.builder("billing.outbox.oldest.seconds",outbox,v->v[0]).register(registry);
-        var now=new AtomicReference<>(Instant.parse("2026-10-30T04:51:00Z"));
-        var watch=new OperationalWatch(registry,new Clock(){
-            public ZoneId getZone(){return ZoneOffset.UTC;}public Clock withZone(ZoneId z){return this;}public Instant instant(){return now.get();}});
-        watch.check();assertThat(lines.list).isEmpty();
-        outbox[0]=125;watch.check();
-        assertThat(lines.list).singleElement().extracting(ILoggingEvent::getFormattedMessage).asString()
-            .startsWith("ALERT code=OUTBOX_NOT_DRAINING severity=WARNING oldestSeconds=125 reason=");
-        now.set(now.get().plusSeconds(600));watch.check();assertThat(lines.list).hasSize(1);
-        now.set(now.get().plusSeconds(300));watch.check();assertThat(lines.list).hasSize(2);
+        var watch=new OperationalWatch(registry,Clock.systemUTC());
+        watch.check();assertThat(alerts()).isEmpty();
+        assertThat(lines.list).extracting(ILoggingEvent::getFormattedMessage).containsExactly("HEARTBEAT service=billing db=up");
+        outbox[0]=125;watch.check();outbox[0]=190;watch.check();
+        assertThat(alerts()).containsExactly(
+            "ALERT code=OUTBOX_NOT_DRAINING severity=WARNING oldestSeconds=125 reason=\"Committed events are not reaching Kafka; payments are safe, order updates and emails wait\"",
+            "ALERT code=OUTBOX_NOT_DRAINING severity=WARNING oldestSeconds=190 reason=\"Committed events are not reaching Kafka; payments are safe, order updates and emails wait\"");
         outbox[0]=0;watch.check();watch.check();
-        assertThat(lines.list).hasSize(3).last().extracting(ILoggingEvent::getFormattedMessage).isEqualTo("RESOLVED alert code=OUTBOX_NOT_DRAINING");
+        assertThat(lines.list).extracting(ILoggingEvent::getFormattedMessage).filteredOn(m->m.startsWith("ALERT_RESOLVED")).containsExactly("ALERT_RESOLVED code=OUTBOX_NOT_DRAINING");
     }
+    @Test void anUnreadableValueKeepsARaisedConditionInsteadOfReportingItCleared() {
+        var registry=new SimpleMeterRegistry();var outbox=new double[]{125};
+        Gauge.builder("billing.outbox.oldest.seconds",outbox,v->v[0]).register(registry);
+        var watch=new OperationalWatch(registry,Clock.systemUTC());
+        watch.check();outbox[0]=Double.NaN;watch.check();watch.check();
+        assertThat(alerts()).hasSize(3).allMatch(m->m.contains("oldestSeconds=125"));
+        assertThat(lines.list).extracting(ILoggingEvent::getFormattedMessage).noneMatch(m->m.startsWith("ALERT_RESOLVED"));
+    }
+    @Test void stuckMoneyAndDeadLettersAreConditionsWithTheirCount() {
+        var registry=new SimpleMeterRegistry();
+        Gauge.builder("billing.payments.stuck.unowned",()->2).register(registry);Gauge.builder("billing.refunds.stuck.unowned",()->1).register(registry);
+        Gauge.builder("billing.deadletters.open",()->4).register(registry);
+        new OperationalWatch(registry,Clock.systemUTC()).check();
+        assertThat(alerts()).anyMatch(m->m.startsWith("ALERT code=MONEY_OPERATION_STUCK severity=WARNING count=3 "))
+            .anyMatch(m->m.startsWith("ALERT code=DEAD_LETTER_OPEN severity=WARNING count=4 "));
+    }
+    @Test void anOutageAlertRaisedOnEveryRequestIsWrittenAtMostOncePerInterval() {
+        OperationalAlert.resetThrottle();
+        var now=new AtomicReference<>(Instant.parse("2026-11-01T04:51:00Z"));
+        OperationalAlert.clock=new Clock(){public ZoneId getZone(){return ZoneOffset.UTC;}public Clock withZone(ZoneId z){return this;}public Instant instant(){return now.get();}};
+        try {
+            for(int i=0;i<5;i++)OperationalAlert.raiseAtMostEvery(Duration.ofMinutes(1),"http","DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,"down","source","http");
+            OperationalAlert.raiseAtMostEvery(Duration.ofMinutes(1),"watch","DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,"down","source","watch");
+            assertThat(alerts()).hasSize(2);
+            now.set(now.get().plusSeconds(61));
+            OperationalAlert.raiseAtMostEvery(Duration.ofMinutes(1),"http","DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,"down","source","http");
+            assertThat(alerts()).hasSize(3);
+        } finally {OperationalAlert.clock=Clock.systemUTC();OperationalAlert.resetThrottle();}
+    }
+    @Test void transientDatabaseFailuresAreWaitedOutByConsumers() {
+        assertThat(OperationalAlert.transientDatabaseFailure(new org.springframework.transaction.CannotCreateTransactionException("no connection"))).isTrue();
+        assertThat(OperationalAlert.transientDatabaseFailure(new RuntimeException(new org.springframework.dao.QueryTimeoutException("slow")))).isTrue();
+        assertThat(OperationalAlert.transientDatabaseFailure(new IllegalStateException("Paid order has no active stock reservation"))).isFalse();
+    }
+    private List<String> alerts(){return lines.list.stream().map(ILoggingEvent::getFormattedMessage).filter(m->m.startsWith("ALERT code=")).toList();}
 }

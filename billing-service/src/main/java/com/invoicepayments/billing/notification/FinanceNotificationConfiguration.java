@@ -17,6 +17,17 @@ public class FinanceNotificationConfiguration {
         if(!new BillingRuntimeSettings(env).jobEnabled("notifications"))throw new IllegalArgumentException("Email sender needs the notification worker role enabled");
         return new FinanceNotificationWorker(store,mail);
     }
+    /**
+     * Production finance route: the merchant's Carrier app-owner mailbox from deployment configuration. Refund approval
+     * and finance case emails go there; without it they are dropped as NO_ACTIVE_ROUTE (and alerted).
+     */
+    @Bean @ConditionalOnProperty(name="billing.notifications.finance-recipient")
+    ApplicationListener<ApplicationReadyEvent> financeRoute(BillingStore db,Environment env){return event->{
+        if(env.getProperty("billing.notifications.test-mode",Boolean.class,false))return;
+        String recipient=SmtpFinanceMailTransport.address(env.getRequiredProperty("billing.notifications.finance-recipient"));
+        UUID merchant=UUID.fromString(env.getRequiredProperty("billing.provider-merchant-id"));
+        db.update("INSERT INTO billing.notification_routes(merchant_id,recipient,enabled) VALUES(?,?,true) ON CONFLICT(merchant_id) DO UPDATE SET recipient=EXCLUDED.recipient,enabled=true",merchant,recipient);
+    };}
     /** Lab-only opt-in. Production routing is explicit merchant configuration, never an arbitrary request field. */
     @Bean @ConditionalOnProperty(name="billing.notifications.test-mode",havingValue="true")
     ApplicationListener<ApplicationReadyEvent> testFinanceRoute(BillingStore db,Environment env){return event->{

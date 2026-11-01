@@ -7,6 +7,8 @@ import java.util.function.Supplier;
 
 /** Immutable-version Lambda entry. Input carries saved operation identity, never amounts, credentials or payment claims. */
 public final class RecoveryLambdaHandler implements RequestHandler<Map<String,Object>,Map<String,Object>> {
+    // Before any logger exists: INFO logging without HTTP wire output (recovery-logback.xml explains why).
+    static {if(System.getProperty("logback.configurationFile")==null)System.setProperty("logback.configurationFile","recovery-logback.xml");}
     private static RecoveryLambdaRuntime runtime;
     private final Runnable bootstrap;
     private final Supplier<RecoveryLambdaRuntime> runtimeSupplier;

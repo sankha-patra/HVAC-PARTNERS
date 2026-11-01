@@ -37,7 +37,7 @@ public class BillingRefundService {
         UUID token=UUID.randomUUID(); UUID intent=id(raw(refund).get("intentId"));
         var work=commands.prepareSubmission(refund,token,provider.name(),provider.refundRequestVersion());
         if(work==null) return;
-        ProviderResult result;
+        ProviderResult result;String uncertain=null;
         try(var budget=BillingExecutionBudget.lease(Instant.parse(text(work,"leaseUntil")))) {
             result=provider.refund(RefundCommand.fromJson(text(work,"originalRequest")));
         }
@@ -48,11 +48,17 @@ public class BillingRefundService {
         }
         catch(RuntimeException failure) {
             log.warn("Refund submission outcome uncertain; recovery will reuse the saved request refundId={} intentId={}",refund,intent,failure);
-            OperationalAlert.raise("REFUND_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
-                "Payment provider did not confirm the refund ("+failure.getClass().getSimpleName()+"); kept as UNKNOWN for recovery","refundId",refund,"intentId",intent);
+            uncertain=failure.getClass().getSimpleName();
             result=new ProviderResult(null,"UNKNOWN",null,"Refund outcome is uncertain; recovery will reuse the saved request",BillingProviderEvidence.from(failure));
         }
-        commands.record(refund,token,result);
+        try {commands.record(refund,token,result);}
+        catch(RuntimeException failure) {
+            OperationalAlert.raise("REFUND_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
+                "Provider answer ("+result.state()+") to the refund could not be saved ("+failure.getClass().getSimpleName()+"); refund stays SUBMITTING with its saved request for recovery","refundId",refund,"intentId",intent);
+            throw failure;
+        }
+        if(uncertain!=null)OperationalAlert.raise("REFUND_OUTCOME_UNKNOWN",OperationalAlert.Severity.WARNING,
+            "Payment provider did not confirm the refund ("+uncertain+"); kept as UNKNOWN with its saved request for recovery","refundId",refund,"intentId",intent);
     }
     static String operationKey(UUID refund) { return BillingRefundAccess.operationKey(refund); }
     Map<String,Object> leaseForRelease(UUID refund,UUID token) { return commands.leaseForRelease(refund,token); }

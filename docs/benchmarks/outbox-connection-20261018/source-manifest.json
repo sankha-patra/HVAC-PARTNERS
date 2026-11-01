@@ -1,0 +1,262 @@
+[
+  {
+    "path": "pom.xml",
+    "sha256": "CD8AB3459126EC8E17FC94DEF2D1B955B0C958A29090406F7A90C0ABB7B9BDC5"
+  },
+  {
+    "path": "api-gateway\\pom.xml",
+    "sha256": "BBB2FAECE48029187A1153E8EDA31FAAE2ABF3281D68B5BA49CDBFC1DAE44B83"
+  },
+  {
+    "path": "billing-service\\pom.xml",
+    "sha256": "753A2DD2D6C5BA50635E90882AF8F3369AE032EBF08AC8CE9724D7A622B58CA9"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingAdvice.java",
+    "sha256": "2CE73676E7E66210CF355169E557C5DD0DE75DB512224D5FAEE2B0A1E1FC6577"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingApplication.java",
+    "sha256": "24550921CA47A27145C122C903A68BE73701B89A715908DE2DD4F1D37F394E13"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingConfiguration.java",
+    "sha256": "91D03F44455329390239DB84D91EB0C6F61FB4FC0D52D861192EE16C3AC961CC"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingController.java",
+    "sha256": "FDEBF1DC86410A7022F0EFF1167F31E1DBAFB39B9BCD88DFF3188E0A07F7E2E0"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingDemoSeeder.java",
+    "sha256": "A56DA4102519A7DDC82D4368FA1ACA6950B590E40FFBB5C8998C95B1C064CBE7"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingEvents.java",
+    "sha256": "7E16CAE9CDB73838DC53608E0EB24FA8D080270B4B633F6EA507A35B2032D9E6"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingInbox.java",
+    "sha256": "878158176805C6EA51ACF73B4BB275F0F802783A60D1411A382A7C6466220A7F"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingKafkaConfiguration.java",
+    "sha256": "F10C4A08516BA44156C06ED1DA4C0C565BCC98D5E96D9482F7878B91EBA3E216"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingMetrics.java",
+    "sha256": "A800FE05E4551DAD74D7D4C159F993C0F60B91ED82CBF2C74055F7D9DB3E42DB"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingProblem.java",
+    "sha256": "0B11E2136D6C7E152512C4C4FC4E7C7BDE407B1E46FEC7D75A4573844414DDE2"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingReconciliation.java",
+    "sha256": "737DF34DF9C9668678BEB916EC53383BE1B8513AEE2E15FB818753B970E0A470"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingRecovery.java",
+    "sha256": "7AC153CD03432A96AE9EB6DE7C58CFFDC2B4639A31E147ABDB69E70CC7C67C13"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingRefundService.java",
+    "sha256": "B936658946F5AA63A3449F236A9377A1471F91F266AD04A8485B2FADFCA54150"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingRequestLimit.java",
+    "sha256": "7F74AA6BAC01F212C14C29C2713F7354DC100BA4FEE3A9D4852B5E68B4D6670F"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingSecurity.java",
+    "sha256": "B78E36C8FFA17E14A4BF13360706A434D5D2E413B32D89C8601CC9CBAB009B02"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingService.java",
+    "sha256": "53E3A6AC957B7DDC58537C020CB91C9402D404DE1C1BBBC52C456BF26CAA946A"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingStore.java",
+    "sha256": "5C08305C29AF4FDD571E9BC25668FDAF0D6F2FBA536B38DFD2AB1BA256F6A145"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\BillingWorkers.java",
+    "sha256": "EFE1CB833B27FFCBC62C721ED9A9532A7B7B8721902AF3B646551753E0B2E19C"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\BillingProvider.java",
+    "sha256": "C46FA84EF2D9E88FE0232286E1920DD3AA071D3458580B0C08BAE4E4F784A5D4"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\InvalidProviderWebhookException.java",
+    "sha256": "D3C1477F0C731C0871DC851ACC5BA86A1D1939B979B3FD3B6C3BB586A35A7D91"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\package-info.java",
+    "sha256": "9478A47E75334F2001441DB70329E8F585C315F5DFDADB56CFC19D8DC3F39B11"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\ProviderCommand.java",
+    "sha256": "91E34D86EB091B02DEAD5FC7F7DC6F329961DD40C5A08A45441A6E707C6A2F3A"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\ProviderResult.java",
+    "sha256": "E29DA8C9587F95A88BE87D809628163C202E9A6E74B0C8F1F7D90A010B2168D5"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\ProviderUncertainException.java",
+    "sha256": "33EF2E83C3ECABA54D3ADB9C2E21AA1AC703576168174DBDF55C9262ACAC1A73"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\ProviderValidation.java",
+    "sha256": "E39E90EFA3AB7C85B5C458F186B9A0A1F945612C7D350574BC5BF403A555FF32"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\ProviderWebhookEvent.java",
+    "sha256": "3CF76FE6EEC274A456E70BC946B62F137F72BF79D8AB944022CE1631A58817CA"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\RefundCommand.java",
+    "sha256": "247D0E1ADC3AA60AA0A10233B2229BF94D76A1EDC3D4116AAA769871D19C1CDA"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\SimulatorBillingProvider.java",
+    "sha256": "BACA5B5FB7EBFF3DD658B1CF91176338A47CC2544B5B8FBB5DA1B9C3D5AC3FAC"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\StripeBillingProvider.java",
+    "sha256": "015A9E6F56BCC3CE38B2AB5A035FC2BD5E0D6AFBFC0BE997747225D9D871F7A3"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\billing\\provider\\StripeWebhookVerifier.java",
+    "sha256": "B79EF7DEDFA4CA02F6D181D5F8AE1211F1B1BD46F759B5CD1543D2831C516250"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\monitoring\\LocalMonitoringSecurityConfig.java",
+    "sha256": "3584644D9E9841BF070CB87FC20EAD59889C65A90C91F2CF2544D3A2B64DE306"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\security\\JwtAuthFilter.java",
+    "sha256": "D1CE1CAA2E750E3F171815EE71F504F3624C1FDA92A5AC9B6D74245246AEA5B5"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\security\\JwtService.java",
+    "sha256": "879A2C86144AD2837BA992B8A3CC0D88A9F1E2925460417DFC57513C396FA954"
+  },
+  {
+    "path": "billing-service\\src\\main\\java\\com\\invoicepayments\\security\\SecurityConfig.java",
+    "sha256": "094CDD53558D73C929A1A99DAAE3EC7BC79B91BFD40977BDB44E1FF3CF9E3195"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\application-billing.yml",
+    "sha256": "BC399A37229F54B85DA2152D07FFEF0926CB8820063863BB6CFC92E5CB78169E"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\application-local-observability.yml",
+    "sha256": "E9AB4EFD0E4401CEEF63E909000D1212F1C6431F77DEC1DB57F210375B08DE02"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\application-prod.yml",
+    "sha256": "F6A90C3E91DDF6B074DDDE11B1A2F15EC1996F0C1D9E1A0B28D621084D0504EC"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\application.yml",
+    "sha256": "DA0A804806902678196CA4CCEA56C27101FE95CE0B5DE0488F84D34588D015ED"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V1__billing_operations.sql",
+    "sha256": "F64CE443C9D2AD0E1F7D1DF1E48236E40E016E7C58DA3B1D50A49B2F5633D67C"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V10__outbox_quarantine.sql",
+    "sha256": "25DA3AC63F2776BC5CE2ED69242D4343EFF31004CE838561ED29480B56D6A420"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V2__dead_letter_audit.sql",
+    "sha256": "D2636DDFAD0027162865DEC61E4A3EAB303E927E033705102D3F619D470D695A"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V3__consumer_effect_idempotency.sql",
+    "sha256": "B31908E2C205AC10814CA8E3BF4117994E0330F31CD3B0C7082190AE03942B9C"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V4__settlement_evidence.sql",
+    "sha256": "66EA78821C4C46A3E7A0FF549D544724F404FDE58B362A14BD8AF47DFEB6D05F"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V5__safe_unsubmitted_cancellation.sql",
+    "sha256": "DB0F29AFE698EDF6136F61D6F66CFDCD781BAB302DE7422B60A011B4944E827F"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V6__unique_bank_credit.sql",
+    "sha256": "D3161CE8D031C832ADD828331FF134D65F64652DD8C6CEE1C49CF32E578F53F4"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V7__approved_refund_recovery_index.sql",
+    "sha256": "0CF2725B0A8A899824A0E04CFFCC0874A1EDB6158DBCF6BE9135DA62858A204D"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V8__preserve_bank_reference_case.sql",
+    "sha256": "AADF87E2EFFE986EE35EDEFB8C5D5AB32A1EBDE48F9E96F83DCCB60BFEA70AD6"
+  },
+  {
+    "path": "billing-service\\src\\main\\resources\\db\\billing\\V9__ordered_outbox.sql",
+    "sha256": "9D025A34F051B685F9FBA73E762F7BA1747BC1BB0A22015E78F0C0774335B81E"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingConfigurationTest.java",
+    "sha256": "2851F746DE66426E70760C1E77004DA9106D0090AAAAA1AD6DB953B55B8AF3A7"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingFinancialDatabaseTest.java",
+    "sha256": "198195ED93C3490819E8C25DF92D495B9287914F15F3BCC6BD7C863F249AED9C"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingHttpSecurityDatabaseTest.java",
+    "sha256": "228BBB0EDDB1FE9EA3B471A62C4158F424DE7803D8113E74F66352D492B7F67A"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingKafkaIntegrationTest.java",
+    "sha256": "FBE593E3BDD3BB2C45F318BE87E6109E91C30190645B1CD93590DF36EA542575"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingMetricsDatabaseTest.java",
+    "sha256": "30E41C0F8AF019742C0574458E577BB784DE95004148C39B7CC9C503ABA3DFFF"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingMskIamConfigurationTest.java",
+    "sha256": "9D12C5998C72E58C8BA79292B3895BAE08693C54C997CAC3569AB2B5287B9CD4"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingProducerSafetyTest.java",
+    "sha256": "6350F7DC08D86CA389F132B0AF7BF6FF472C06521A2507150CB87A0FA88E8C77"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\BillingSimulationLabTest.java",
+    "sha256": "697FDD93DE8647BFD6296D1EDC6D56CA8298B23E052B18AB2CD8FA558C4FF460"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\provider\\LocalPaymentLab.java",
+    "sha256": "EC206509802D5EE88750416FDD9B3809384229A31175AEF49E787DB2E64E5985"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\provider\\SimulatorBillingProviderDatabaseTest.java",
+    "sha256": "17045E2ADD7E625D3068A8449F69E01E3B9C9B6A415BC4730E4D712AB3C15858"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\provider\\StripeBillingProviderTest.java",
+    "sha256": "C77EC2DAA3A994458529710B872032503EE95A11AC2D8FCA09ECF26B6F672CC3"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\billing\\provider\\StripeWebhookVerifierTest.java",
+    "sha256": "F956317F14A477C3256FFFAEDAE7483F125A25CAEA22EF97E5F32C8AAEC58FCA"
+  },
+  {
+    "path": "billing-service\\src\\test\\java\\com\\invoicepayments\\monitoring\\LocalMonitoringSecurityConfigTest.java",
+    "sha256": "41976A389F21406C5D75A6BF18C4A6B407FC849FF7201CE92D1A3E34DEE530BB"
+  },
+  {
+    "path": "identity-service\\pom.xml",
+    "sha256": "A900510ADF47E146EE951D6AA835342ED938581496AD337BEEB91EF1135D731D"
+  }
+]

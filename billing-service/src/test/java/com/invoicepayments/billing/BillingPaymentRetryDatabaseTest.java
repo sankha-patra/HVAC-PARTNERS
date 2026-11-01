@@ -54,7 +54,7 @@ class BillingPaymentRetryDatabaseTest {
     }
 
     @BeforeEach void cleanAndSeedDedicatedDatabase() {
-        jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");
+        jdbc.execute("BEGIN;SET LOCAL billing.maintenance='truncate';TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE;COMMIT");
         db = new BillingStore(jdbc);
         provider = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions);
         payments = BillingTestWiring.payments(db, provider, new MockEnvironment(), true, "http://localhost:4200", MERCHANT.toString());

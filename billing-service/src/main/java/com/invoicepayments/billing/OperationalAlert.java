@@ -7,7 +7,11 @@ import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.sql.SQLTransientConnectionException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * One log line per operational alert, in the fixed shape CloudWatch metric filters match:
@@ -18,7 +22,21 @@ import java.util.*;
 public final class OperationalAlert {
     private static final Logger log=LoggerFactory.getLogger("operational-alerts");
     public enum Severity { CRITICAL, WARNING }
+    private static final Map<String,Instant> lastRaised=new ConcurrentHashMap<>();
+    static Clock clock=Clock.systemUTC();
     private OperationalAlert(){}
+
+    /**
+     * For alerts that a single outage raises on every request or tick (DATABASE_UNAVAILABLE, PROVIDER_PAUSED): at most
+     * one line per key per interval, so an outage is one email a minute, not one per request.
+     */
+    public static void raiseAtMostEvery(Duration interval,String key,String code,Severity severity,String reason,Object... fields) {
+        Instant now=clock.instant();
+        boolean[] due={false};
+        lastRaised.compute(code+"/"+key,(k,last)->{if(last==null||!now.isBefore(last.plus(interval))){due[0]=true;return now;}return last;});
+        if(due[0])raise(code,severity,reason,fields);
+    }
+    static void resetThrottle(){lastRaised.clear();}
 
     /** fields are key/value pairs, e.g. "intentId",intent. */
     public static void raise(String code,Severity severity,String reason,Object... fields) {
@@ -43,6 +61,14 @@ public final class OperationalAlert {
         for(Throwable t=failure;t!=null&&seen.add(t);t=t.getCause())
             if(t instanceof DataAccessResourceFailureException||t instanceof TransientDataAccessResourceException
                 ||t instanceof SQLTransientConnectionException)return true;
+        return false;
+    }
+    /** Unreachable, or a transient failure that succeeds on retry (timeouts, a commit that could not start). */
+    public static boolean transientDatabaseFailure(Throwable failure) {
+        if(databaseUnavailable(failure))return true;
+        Set<Throwable> seen=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(Throwable t=failure;t!=null&&seen.add(t);t=t.getCause())
+            if(t instanceof org.springframework.dao.TransientDataAccessException||t instanceof org.springframework.transaction.CannotCreateTransactionException)return true;
         return false;
     }
     private static void emit(Severity severity,String line){if(severity==Severity.CRITICAL)log.error(line);else log.warn(line);}

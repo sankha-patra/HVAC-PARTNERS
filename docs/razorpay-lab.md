@@ -60,3 +60,17 @@ managed AWS workflow execution. Passing them does not establish those external o
 - [Normal refunds](https://razorpay.com/docs/api/refunds/create-normal/)
 - [Refund idempotency](https://github.com/razorpay/markdown-docs/blob/master/api/refunds/normal-refunds-idempotent.md)
 - [Webhook signature validation](https://razorpay.com/docs/webhooks/validate-test/)
+
+## Webhooks in the hybrid lab (1 Nov 2026)
+
+Razorpay test webhooks reach the laptop through Tailscale Funnel, which publishes exactly one path:
+
+```
+tailscale funnel --bg --set-path /api/v1/billing/webhooks/razorpay http://127.0.0.1:28380/api/v1/billing/webhooks/razorpay
+```
+
+- Public URL: `https://<laptop>.<tailnet>.ts.net/api/v1/billing/webhooks/razorpay` (through the gateway, which lets only this POST through unauthenticated). Every other path returns 404 from the public side; PostgreSQL's Tailscale serve stays tailnet-only.
+- The app needs `BILLING_RAZORPAY_WEBHOOK_SECRET` (the secret entered in the Razorpay Dashboard webhook) and `BILLING_RAZORPAY_ACCOUNT_ID` (`acc_…`); events from another account or with a wrong signature are rejected with 400. Supported events: `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, `refund.created`, `refund.processed`, `refund.failed`; others are accepted and ignored.
+- Webhooks are the fast path; recovery polling (Step Functions) still confirms anything a webhook misses.
+- Verified 1 Nov through the public relay: wrong signature 400, other account 400, valid signature 202.
+- Rejected webhooks log `Razorpay webhook rejected stage=<HEADERS|SIGNATURE|ENVELOPE|ACCOUNT|PAYLOAD>` and raise `WEBHOOK_REJECTED` (at most once per stage per 15 minutes; emailed by the hybrid forwarder). On 1 Nov this found that the Dashboard had saved the whole `KEY=value` line as the secret; the app's secret was matched to it, Razorpay's retries were then accepted, and a fresh ₹1 payment was captured from the webhook about 4 s after paying.

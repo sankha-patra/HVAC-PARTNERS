@@ -87,7 +87,7 @@ class BillingKafkaIntegrationTest {
                 .locations("classpath:db/billing").cleanDisabled(true).load().migrate();
         jdbc = new JdbcTemplate(source);
         // Exactly one reset before any Kafka consumer is running, never an application database.
-        jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");
+        jdbc.execute("BEGIN;SET LOCAL billing.maintenance='truncate';TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE;COMMIT");
         store = new FaultingAuditStore(jdbc, new DataSourceTransactionManager(source));
         store.update("INSERT INTO billing.merchants(id,name) VALUES(?,'Kafka integration merchant')", MERCHANT);
         events = BillingTestWiring.events(store, MERCHANT.toString());

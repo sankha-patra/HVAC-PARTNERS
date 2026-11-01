@@ -53,7 +53,7 @@ public class BillingReconciliationCommands {
         BillingExecutionBudget.requireTime();requireTransaction();
         var batch=db.one("SELECT merchant_id FROM billing.reconciliation_imports WHERE id=?",importId);
         db.update("UPDATE billing.reconciliation_imports SET state='EXCEPTION' WHERE id=?",importId);
-        db.update("INSERT INTO billing.cases(id,merchant_id,reason,reference) VALUES(?,?,'SETTLEMENT_REPORT_MISMATCH',?) ON CONFLICT(reason,reference) DO NOTHING",UUID.randomUUID(),id(batch.get("merchantId")),importId.toString());
+        if(db.update("INSERT INTO billing.cases(id,merchant_id,reason,reference) VALUES(?,?,'SETTLEMENT_REPORT_MISMATCH',?) ON CONFLICT(reason,reference) DO NOTHING",UUID.randomUUID(),id(batch.get("merchantId")),importId.toString())>0)settlementCaseAlert("SETTLEMENT_REPORT_MISMATCH",importId.toString());
     }
     public Map<String,Object> confirmBank(String user,UUID settlement,BillingReconciliation.BankCredit credit) {
         BillingExecutionBudget.requireTime();requireTransaction();
@@ -68,12 +68,12 @@ public class BillingReconciliationCommands {
         db.one("SELECT id FROM billing.merchants WHERE id=? FOR UPDATE",id(report.get("merchantId")));
         if(db.exists("SELECT 1 FROM billing.settlement_reports WHERE merchant_id=? AND bank_reference COLLATE \"C\"=? COLLATE \"C\" AND status='MATCHED' AND id<>?",id(report.get("merchantId")),credit.bankReference(),settlement)) {
             db.update("UPDATE billing.settlement_reports SET status='EXCEPTION' WHERE id=?",settlement);
-            db.update("INSERT INTO billing.cases(id,merchant_id,reason,reference) VALUES(?,?,'DUPLICATE_BANK_CREDIT',?) ON CONFLICT(reason,reference) DO NOTHING",UUID.randomUUID(),id(report.get("merchantId")),settlement.toString());
+            if(db.update("INSERT INTO billing.cases(id,merchant_id,reason,reference) VALUES(?,?,'DUPLICATE_BANK_CREDIT',?) ON CONFLICT(reason,reference) DO NOTHING",UUID.randomUUID(),id(report.get("merchantId")),settlement.toString())>0)settlementCaseAlert("DUPLICATE_BANK_CREDIT",settlement.toString());
             return db.one("SELECT id,status FROM billing.settlement_reports WHERE id=?",settlement);
         }
         if(!Objects.equals(credit.bankReference(),report.get("bankReference")) || credit.amountMinor()!=amount(report,"netMinor")) {
             db.update("UPDATE billing.settlement_reports SET status='EXCEPTION',bank_credit_minor=? WHERE id=?",credit.amountMinor(),settlement);
-            db.update("INSERT INTO billing.cases(id,merchant_id,reason,reference) VALUES(?,?,'BANK_CREDIT_MISMATCH',?) ON CONFLICT(reason,reference) DO NOTHING",UUID.randomUUID(),id(report.get("merchantId")),settlement.toString());
+            if(db.update("INSERT INTO billing.cases(id,merchant_id,reason,reference) VALUES(?,?,'BANK_CREDIT_MISMATCH',?) ON CONFLICT(reason,reference) DO NOTHING",UUID.randomUUID(),id(report.get("merchantId")),settlement.toString())>0)settlementCaseAlert("BANK_CREDIT_MISMATCH",settlement.toString());
             return db.one("SELECT * FROM billing.settlement_reports WHERE id=?",settlement);
         }
         UUID journal=UUID.randomUUID();
@@ -83,5 +83,10 @@ public class BillingReconciliationCommands {
         db.update("INSERT INTO billing.ledger_entries(journal_id,line,account,side,amount_minor) VALUES(?,3,'PROVIDER_CLEARING','CREDIT',?)",journal,amount(report,"grossMinor"));
         db.update("UPDATE billing.settlement_reports SET status='MATCHED',bank_credit_minor=?,bank_confirmed_by=?,bank_evidence_hash=? WHERE id=?",credit.amountMinor(),user,credit.evidenceHash().toLowerCase(Locale.ROOT),settlement);
         return db.one("SELECT id,status,source,external_id,net_minor,bank_reference FROM billing.settlement_reports WHERE id=?",settlement);
+    }
+    /** Settlement cases have no payment, so the per-payment case alert and finance email do not cover them. */
+    private static void settlementCaseAlert(String reason,String reference) {
+        OperationalAlert.raise("FINANCE_CASE_OPENED",OperationalAlert.Severity.WARNING,
+            "A settlement or bank-credit check needs a finance decision (no single payment is involved)","caseReason",reason,"reference",reference);
     }
 }

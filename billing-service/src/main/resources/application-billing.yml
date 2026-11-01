@@ -65,6 +65,11 @@ billing:
   alerts:
     # Run in exactly one deployment (the payment worker on AWS): turns stuck-work gauges into ALERT log lines.
     watch-enabled: ${BILLING_ALERTS_WATCH_ENABLED:false}
+    # Optional Kafka Connect REST URL for the connector check (hybrid lab); restart a failed task automatically.
+    connect-url: ${BILLING_ALERTS_CONNECT_URL:}
+    connect-auto-restart: ${BILLING_ALERTS_CONNECT_AUTO_RESTART:false}
+  cdc:
+    slot-name: ${BILLING_CDC_SLOT_NAME:billing_outbox_cdc}
   role: ${BILLING_ROLE:combined}
   require-separated-role: ${BILLING_REQUIRE_SEPARATED_ROLE:false}
   worker-shutdown-seconds: ${BILLING_WORKER_SHUTDOWN_SECONDS:60}

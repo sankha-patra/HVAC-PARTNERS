@@ -39,7 +39,7 @@ class RecoveryInputTest {
     }
     @Test void testInjectionCannotChangeTheProviderProtocol(){
         var provider=mock(BillingProvider.class);when(provider.name()).thenReturn("SIMULATOR");
-        assertThatThrownBy(()->new RecoveryLambdaRuntime(Map.of(),provider)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Razorpay protocol");
+        assertThatThrownBy(()->new RecoveryLambdaRuntime(Map.of(),provider)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Razorpay or Stripe protocol");
     }
     @Test void malformedLambdaInputIsRejectedBeforeAnyDatabaseOrProviderSetup(){
         var handler=new RecoveryLambdaHandler();
@@ -73,7 +73,7 @@ class RecoveryInputTest {
     @Test void peerWaitIsBoundedWhenTheLaptopNeverAnswers(){
         var attempts=new AtomicInteger();long start=System.nanoTime();
         assertThatThrownBy(()->RecoveryBootstrap.awaitPeer(()->{attempts.incrementAndGet();return false;},java.time.Duration.ofMillis(200),java.time.Duration.ofMillis(20)))
-            .isInstanceOf(IllegalStateException.class).hasMessageContaining("unreachable");
+            .isInstanceOf(RecoveryTunnelUnavailableException.class).hasMessage("PEER_UNREACHABLE");
         assertThat(System.nanoTime()-start).isLessThan(java.time.Duration.ofSeconds(1).toNanos());assertThat(attempts.get()).isBetween(2,11);
     }
     @Test void bootstrapAllowsOnlyTheExactReviewedTailnetDatabaseRoute(){

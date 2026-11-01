@@ -99,8 +99,9 @@ public final class RazorpayBillingProvider implements BillingProvider {
                 if (match != null) return unknown(null, "Multiple matching orders require manual reconciliation");
                 match = candidate;
             }
+            // Empty is never proof by itself; with a recorded Razorpay Dashboard check, a second approver may release it.
             if (items.length() < PAGE_SIZE) return match == null
-                    ? unknown(null, "No exact order was found; this does not prove that creation failed")
+                    ? new ProviderResult(null, "UNKNOWN", null, "No exact order was found; this does not prove that creation failed", null, ProviderResult.SEARCH_EMPTY)
                     : verifiedOrder(saved, match.getString("id"));
         }
         return unknown(null, "Order discovery exceeded its bound; no new order was submitted");
@@ -150,7 +151,11 @@ public final class RazorpayBillingProvider implements BillingProvider {
     @Override public ProviderResult closePayment(ProviderCommand saved, String version, Instant preparedAt, String providerId) {
         // Orders have no Checkout Session expiry endpoint. Never manufacture ABSENT or permit release.
         ProviderResult result = recoverPayment(saved, version, preparedAt, providerId);
-        return "CAPTURED".equals(result.state()) ? result : unknown(result.providerId(), "Razorpay orders cannot be expired by this adapter; release requires review");
+        if ("CAPTURED".equals(result.state())) return result;
+        // No order exists at all: keep the finding, so a recorded Dashboard check may support a release. An existing order
+        // can still be paid, so it is never released this way.
+        if (providerId == null && ProviderResult.SEARCH_EMPTY.equals(result.finding())) return result;
+        return unknown(result.providerId(), "Razorpay orders cannot be expired by this adapter; release requires review");
     }
     @Override public ProviderResult refund(RefundCommand command) {
         return operation(() -> {
@@ -198,8 +203,11 @@ public final class RazorpayBillingProvider implements BillingProvider {
                     if (found != null) return unknown(null, "Multiple matching refunds require review");
                     found = refund;
                 }
+                // Recovery never resends a Razorpay refund, so an empty search after the wait plus a recorded Dashboard check
+                // lets a second approver release the refund capacity. Never proof by itself.
                 if (items.length() < PAGE_SIZE) return found == null
-                        ? unknown(null, "No matching refund found; do not submit a replacement") : verifyRefund(found, saved, paymentId);
+                        ? new ProviderResult(null, "UNKNOWN", null, "No matching refund found; do not submit a replacement", null, ProviderResult.SEARCH_EMPTY)
+                        : verifyRefund(found, saved, paymentId);
             }
             return unknown(null, "Refund search exceeded its bound");
         });

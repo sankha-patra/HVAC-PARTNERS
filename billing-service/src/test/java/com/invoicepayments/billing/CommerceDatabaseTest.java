@@ -28,7 +28,7 @@ class CommerceDatabaseTest {
         Flyway.configure().dataSource(source).schemas("billing").defaultSchema("billing").locations("classpath:db/billing").cleanDisabled(true).load().migrate();jdbc=new JdbcTemplate(source);
     }
     @BeforeEach void seed(){
-        jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");db=new BillingStore(jdbc);
+        jdbc.execute("BEGIN;SET LOCAL billing.maintenance='truncate';TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE;COMMIT");db=new BillingStore(jdbc);
         var provider=BillingTestWiring.simulator(jdbc,null);
         context=BillingTestWiring.context(db,provider,new MockEnvironment(),true,"http://localhost:4200",MERCHANT.toString());
         context.register(CommerceCommands.class);context.refresh();payments=context.getBean(BillingService.class);commerce=context.getBean(CommerceCommands.class);
@@ -131,6 +131,20 @@ class CommerceDatabaseTest {
         jdbc.update("UPDATE commerce.orders SET hold_until=NOW()-INTERVAL '1 hour'");
         assertThat(commerce.expireHolds(20)).isZero();assertThat(stock("reserved_qty")).isEqualTo(1);
         assertThatThrownBy(()->commerce.cancel("payer",id(order.get("id")))).isInstanceOf(BillingProblem.class);
+    }
+    @Test void anUnconfirmedPaymentsStockIsReleasedADayAfterTheHoldWhileThePaymentStaysRecoverable(){
+        var order=checkout();UUID intent=intent(order);payments.submit("payer",intent);
+        String status=text(payments.get("payer",intent),"status");
+        jdbc.update("UPDATE commerce.orders SET hold_until=NOW()-INTERVAL '25 hours'");
+        assertThat(commerce.expireHolds(20)).isEqualTo(1);
+        assertThat(commerce.order("payer",id(order.get("id"))).get("status")).isEqualTo("EXPIRED");assertThat(stock("reserved_qty")).isZero();
+        assertThat(payments.get("payer",intent).get("status")).isEqualTo(status);
+        assertThat(db.rows("SELECT 1 FROM billing.timeline WHERE intent_id=? AND type='ORDER_EXPIRED_PAYMENT_UNRESOLVED'",intent)).hasSize(1);
+        // A capture that arrives later is still recorded once, and the order goes to finance review instead of shipping.
+        payments.simulate("payer",intent,"CAPTURED");
+        commerce.applyPaymentEvent(new JSONObject(text(db.one("SELECT payload FROM billing.outbox WHERE type='PAYMENT_CAPTURED'"),"payload")));
+        assertThat(commerce.order("payer",id(order.get("id"))).get("status")).isEqualTo("NEEDS_REVIEW");assertThat(count("commerce.fulfilments")).isZero();
+        assertThat(db.rows("SELECT 1 FROM billing.cases WHERE intent_id=? AND reason='ORDER_PAID_AFTER_EXPIRY' AND status='OPEN'",intent)).hasSize(1);
     }
     @Test void unsentHoldExpiryClosesTheOrderAndPaymentTogether(){
         var order=checkout();jdbc.update("UPDATE commerce.orders SET hold_until=NOW()-INTERVAL '1 hour'");

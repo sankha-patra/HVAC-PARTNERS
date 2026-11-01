@@ -13,8 +13,8 @@ public class CommerceAdvice {
     public ResponseEntity<?> invalid(Exception failure){return ResponseEntity.badRequest().body(Map.of("code","INVALID_REQUEST","message","Check the company, product quantities and saved basket version"));}
     @ExceptionHandler(Exception.class) public ResponseEntity<?> uncertain(Exception failure){
         String reference=UUID.randomUUID().toString();org.slf4j.LoggerFactory.getLogger(CommerceAdvice.class).error("Commerce request failed reference={}",reference,failure);
-        if(com.invoicepayments.billing.OperationalAlert.databaseUnavailable(failure))com.invoicepayments.billing.OperationalAlert.raise("DATABASE_UNAVAILABLE",
-            com.invoicepayments.billing.OperationalAlert.Severity.CRITICAL,"A shop request could not reach the database; nothing new was recorded","reference",reference);
+        if(com.invoicepayments.billing.OperationalAlert.databaseUnavailable(failure))com.invoicepayments.billing.OperationalAlert.raiseAtMostEvery(java.time.Duration.ofMinutes(1),"shop","DATABASE_UNAVAILABLE",
+            com.invoicepayments.billing.OperationalAlert.Severity.CRITICAL,"A shop request could not reach the database and failed safely; the buyer is told to check the saved order","source","shop","reference",reference);
         return ResponseEntity.internalServerError().body(Map.of("code","OUTCOME_UNCERTAIN","reference",reference,"message","The result could not be confirmed. Check the same saved request before placing another order."));
     }
 }

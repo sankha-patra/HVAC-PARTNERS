@@ -14,8 +14,12 @@ import java.util.function.ToDoubleFunction;
 @Profile("billing")
 public class BillingMetrics {
     private final JdbcTemplate jdbc;
-    public BillingMetrics(JdbcTemplate jdbc,MeterRegistry registry) {
+    public BillingMetrics(JdbcTemplate jdbc,MeterRegistry registry){this(jdbc,registry,"billing_outbox_cdc");}
+    @org.springframework.beans.factory.annotation.Autowired
+    public BillingMetrics(JdbcTemplate jdbc,MeterRegistry registry,
+            @org.springframework.beans.factory.annotation.Value("${billing.cdc.slot-name:billing_outbox_cdc}") String slot) {
         this.jdbc=jdbc;
+        if(!slot.matches("[a-z0-9_]{1,63}"))throw new IllegalArgumentException("Replication slot names are lower-case letters, digits and underscores");
         register(registry,"billing.payments.unresolved", "SELECT COUNT(*) FROM billing.intents WHERE status IN ('UNKNOWN','SUBMITTING','PROCESSING','REQUIRES_ACTION')");
         register(registry,"billing.payments.oldest.unresolved.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MIN(created_at)),0) FROM billing.intents WHERE status IN ('UNKNOWN','SUBMITTING','PROCESSING','REQUIRES_ACTION')");
         // Local escalation policy; retries update updated_at, so measure from
@@ -61,9 +65,36 @@ public class BillingMetrics {
         register(registry,"billing.refunds.due.oldest.seconds", "SELECT COALESCE(GREATEST(EXTRACT(EPOCH FROM NOW()-MIN(next_recovery_at)),0),0) FROM billing.refunds WHERE status IN ('APPROVED','UNKNOWN','SUBMITTING','PROCESSING') AND next_recovery_at<=NOW() AND (lease_until IS NULL OR lease_until<NOW())");
         register(registry,"billing.outbox.cdc.pending", "SELECT COUNT(*) FROM billing.outbox WHERE state='CDC_PENDING'");
         register(registry,"billing.cdc.expected", "SELECT CASE WHEN mode='CDC' THEN 1 ELSE 0 END FROM billing.outbox_relay_control WHERE id");
-        register(registry,"billing.cdc.slot.active", "SELECT COALESCE(MAX(CASE WHEN active THEN 1 ELSE 0 END),0) FROM pg_replication_slots WHERE slot_name='billing_outbox_cdc'");
-        register(registry,"billing.cdc.wal.retained.bytes", "SELECT COALESCE(MAX(pg_wal_lsn_diff(pg_current_wal_lsn(),restart_lsn)),0) FROM pg_replication_slots WHERE slot_name='billing_outbox_cdc'");
+        register(registry,"billing.cdc.slot.active", "SELECT COALESCE(MAX(CASE WHEN active THEN 1 ELSE 0 END),0) FROM pg_replication_slots WHERE slot_name='"+slot+"'");
+        register(registry,"billing.cdc.wal.retained.bytes", "SELECT COALESCE(MAX(pg_wal_lsn_diff(pg_current_wal_lsn(),restart_lsn)),0) FROM pg_replication_slots WHERE slot_name='"+slot+"'");
+        // Debezium rewrites this row every few seconds while it reads the outbox, with or without payment traffic.
+        register(registry,"billing.cdc.heartbeat.age.seconds", "SELECT COALESCE(EXTRACT(EPOCH FROM NOW()-MAX(touched_at)),0) FROM billing.cdc_heartbeat");
         register(registry,"billing.cases.open", "SELECT COUNT(*) FROM billing.cases WHERE status='OPEN'");
+        // For operational alerts: uncertain for 15 minutes and not yet owned by an open finance case (a case already
+        // emailed finance, so repeating it every minute helps nobody).
+        register(registry,"billing.payments.stuck.unowned", "SELECT COUNT(*) FROM billing.intents i WHERE i.status IN ('UNKNOWN','SUBMITTING') AND i.created_at<NOW()-INTERVAL '15 minutes' AND NOT EXISTS(SELECT 1 FROM billing.cases c WHERE c.intent_id=i.id AND c.refund_id IS NULL AND c.status='OPEN' AND c.reason IN ('PAYMENT_UNRESOLVED','PAYMENT_REPLAY_UNSAFE'))");
+        register(registry,"billing.refunds.stuck.unowned", """
+            SELECT COUNT(*) FROM billing.refunds r WHERE ((r.status='APPROVED' AND COALESCE(r.approved_at,r.created_at)<NOW()-INTERVAL '15 minutes')
+              OR (r.status IN ('SUBMITTING','UNKNOWN') AND COALESCE(r.submitted_at,r.created_at)<NOW()-INTERVAL '15 minutes'))
+              AND NOT EXISTS(SELECT 1 FROM billing.cases c WHERE c.refund_id=r.id AND c.status='OPEN' AND c.reason IN ('REFUND_UNRESOLVED','REFUND_REPLAY_UNSAFE'))
+            """);
+        // Due recovery that nothing owns: no live or scheduled workflow (AWS mode), no local claim, no open case. A workflow
+        // waiting for its next attempt counts as owned; one overdue by three minutes does not.
+        register(registry,"billing.recovery.unowned.oldest.seconds", """
+            SELECT COALESCE(GREATEST(EXTRACT(EPOCH FROM NOW()-MIN(o.next_recovery_at)),0),0) FROM (
+              SELECT 'PAYMENT' AS kind,i.id,i.next_recovery_at,i.lease_until FROM billing.intents i WHERE i.status IN ('UNKNOWN','SUBMITTING','PROCESSING','REQUIRES_ACTION')
+              UNION ALL
+              SELECT 'REFUND',r.id,r.next_recovery_at,r.lease_until FROM billing.refunds r WHERE r.status IN ('APPROVED','UNKNOWN','SUBMITTING','PROCESSING')
+            ) o WHERE o.next_recovery_at<=NOW() AND (o.lease_until IS NULL OR o.lease_until<NOW())
+              AND NOT EXISTS(SELECT 1 FROM billing.recovery_dispatch d WHERE d.operation_kind=o.kind AND d.operation_id=o.id
+                AND (d.state IN ('STARTING','RUNNING','REVIEW') OR (d.state='PENDING' AND d.next_at>NOW()-INTERVAL '3 minutes')))
+              AND NOT EXISTS(SELECT 1 FROM billing.cases c WHERE c.status='OPEN' AND c.reason IN ('PAYMENT_UNRESOLVED','PAYMENT_REPLAY_UNSAFE','REFUND_UNRESOLVED','REFUND_REPLAY_UNSAFE')
+                AND (c.refund_id=o.id OR (o.kind='PAYMENT' AND c.intent_id=o.id AND c.refund_id IS NULL)))
+            """);
+        // Emails the mail server keeps refusing (retrying or given up within the last day), and emails dropped because no
+        // recipient is configured for the merchant within the last hour.
+        register(registry,"billing.notifications.failing", "SELECT COUNT(*) FROM billing.notification_deliveries WHERE (state IN ('PENDING','IN_FLIGHT') AND attempts>=2) OR (state='REVIEW' AND created_at>NOW()-INTERVAL '1 day')");
+        register(registry,"billing.notifications.unrouted.recent", "SELECT COUNT(*) FROM billing.notification_deliveries WHERE state='SUPPRESSED' AND last_error='NO_ACTIVE_ROUTE' AND created_at>NOW()-INTERVAL '1 hour'");
         register(registry,"billing.deadletters.open", "SELECT COUNT(*) FROM billing.dead_letters WHERE state<>'REPLAYED'");
         // Bank disputes and inquiries waiting for Carrier finance's answer (or whose result is unclear and needs a look),
         // and those due within 48 hours. Carrier finance decides.

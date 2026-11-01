@@ -34,10 +34,11 @@ public class BillingCaseAccess {
             boolean refundConflict=REFUND_CONFLICT.equals(text(row,"reason"));
             boolean pending=row.get("releaseRequestedBy")!=null;
             boolean releasable=open && unresolved && !replayPossible(row);
-            row.put("canVerifyReference",open && ((stuck && unresolved && maker) || (refundConflict && checker)));
+            boolean awaiting=awaitingProvider(row);
+            row.put("canVerifyReference",open && ((stuck && (unresolved || awaiting) && maker) || (refundConflict && checker)));
             row.put("canRequestRelease",releasable && stuck && maker && !pending);
             row.put("canApproveRelease",releasable && pending && checker && !user.equals(row.get("releaseRequestedBy")));
-            row.put("canClose",open && !unresolved && maker);
+            row.put("canClose",open && !unresolved && !awaiting && maker);
             row.put("canAddNote",true);
             row.put("canRecordExternalConfirmation",releasable && stuck && maker && !pending && externalWaitOver(row));
             if(pending) {
@@ -77,14 +78,14 @@ public class BillingCaseAccess {
         return amount(db.one("SELECT COUNT(*) AS total FROM billing.case_actions WHERE case_id=? AND action='CONTRADICTORY_PROVIDER_EVIDENCE'",caseId),"total");
     }
     public static ExternalConfirmation validConfirmation(ExternalConfirmation c) {
-        if(c==null) throw BillingProblem.invalid("Record what Stripe confirmed");
+        if(c==null) throw BillingProblem.invalid("Record what the payment provider confirmed");
         String source=trim(c.source()), account=trim(c.account()), ticket=trim(c.ticket()), checked=trim(c.checkedAt()), digest=trim(c.evidenceSha256());
-        if(!EXTERNAL_SOURCES.contains(source)) throw BillingProblem.invalid("Choose Stripe Dashboard or Stripe support as the source");
+        if(!EXTERNAL_SOURCES.contains(source)) throw BillingProblem.invalid("Choose the payment provider's Dashboard or support as the source");
         if(!account.matches("acct_[A-Za-z0-9]{6,64}") && !account.matches("[\\p{L}\\p{N} .,&'()\\-]{3,100}"))
-            throw BillingProblem.invalid("Name the original Stripe account: its acct_ ID or the account name shown in the Dashboard");
+            throw BillingProblem.invalid("Name the original provider account: its account ID or the account name shown in the Dashboard");
         String searched=bounded(c.searched(),"Describe what was searched in Stripe, in 10 to 500 characters");
         String result=bounded(c.result(),"Describe what Stripe showed, in 10 to 500 characters");
-        if("STRIPE_SUPPORT".equals(source) && ticket.isEmpty()) throw BillingProblem.invalid("Enter the Stripe support ticket reference");
+        if(source.endsWith("_SUPPORT") && ticket.isEmpty()) throw BillingProblem.invalid("Enter the provider's support ticket reference");
         if(!ticket.isEmpty() && !ticket.matches("[A-Za-z0-9#_\\-]{3,100}")) throw BillingProblem.invalid("Enter the Stripe support ticket reference exactly as Stripe gave it");
         Instant checkedAt;
         try { checkedAt=Instant.parse(checked); } catch(DateTimeParseException ex) { throw BillingProblem.invalid("Enter when Stripe was checked, as a date and time"); }
@@ -106,18 +107,20 @@ public class BillingCaseAccess {
     public Instant databaseNow() { return Instant.parse(text(db.one("SELECT NOW() AS now"),"now")); }
     public Instant externalCheckFrom(Map<String,Object> locked) {
         if(PAYMENT_STUCK.contains(text(locked,"reason"))) {
-            var attempt=db.rows("SELECT created_at FROM billing.attempts WHERE intent_id=?",id(locked.get("intentId")));
-            if(attempt.isEmpty()) throw BillingProblem.conflict("This payment has no recorded submission, so a Stripe confirmation cannot release it");
-            return Instant.parse(text(attempt.get(0),"createdAt")).plus(EXTERNAL_PAYMENT_WAIT);
+            var attempt=db.rows("SELECT a.created_at,i.provider FROM billing.attempts a JOIN billing.intents i ON i.id=a.intent_id WHERE a.intent_id=?",id(locked.get("intentId")));
+            if(attempt.isEmpty()) throw BillingProblem.conflict("This payment has no recorded submission, so a provider confirmation cannot release it");
+            return Instant.parse(text(attempt.get(0),"createdAt")).plus(BillingCaseService.paymentWait(text(attempt.get(0),"provider")));
         }
-        var refund=db.one("SELECT submitted_at FROM billing.refunds WHERE id=?",id(locked.get("refundId")));
-        if(refund.get("submittedAt")==null) throw BillingProblem.conflict("This refund was never sent, so a Stripe confirmation cannot release it");
-        return Instant.parse(text(refund,"submittedAt")).minus(CLOCK_TOLERANCE);
+        var refund=db.one("SELECT r.submitted_at,i.provider FROM billing.refunds r JOIN billing.intents i ON i.id=r.intent_id WHERE r.id=?",id(locked.get("refundId")));
+        if(refund.get("submittedAt")==null) throw BillingProblem.conflict("This refund was never sent, so a provider confirmation cannot release it");
+        // A Razorpay refund is findable seconds after creation; an hour covers a request still in flight when the app stopped.
+        return "RAZORPAY".equals(refund.get("provider")) ? Instant.parse(text(refund,"submittedAt")).plus(BillingCaseService.RAZORPAY_PAYMENT_WAIT)
+            : Instant.parse(text(refund,"submittedAt")).minus(CLOCK_TOLERANCE);
     }
     public boolean externalWaitOver(Map<String,Object> row) {
         if(PAYMENT_STUCK.contains(text(row,"reason")))
-            return db.exists("SELECT 1 FROM billing.attempts WHERE intent_id=?::uuid AND created_at<=NOW()-INTERVAL '48 hours'",text(row,"intentId"));
-        return REFUND_STUCK.contains(text(row,"reason")) && db.exists("SELECT 1 FROM billing.refunds WHERE id=?::uuid AND submitted_at IS NOT NULL",text(row,"refundId"));
+            return db.exists("SELECT 1 FROM billing.attempts a JOIN billing.intents i ON i.id=a.intent_id WHERE a.intent_id=?::uuid AND a.created_at<=NOW()-CASE WHEN i.provider='RAZORPAY' THEN INTERVAL '1 hour' ELSE INTERVAL '48 hours' END",text(row,"intentId"));
+        return REFUND_STUCK.contains(text(row,"reason")) && db.exists("SELECT 1 FROM billing.refunds r JOIN billing.intents i ON i.id=r.intent_id WHERE r.id=?::uuid AND r.submitted_at IS NOT NULL AND (i.provider<>'RAZORPAY' OR r.submitted_at<=NOW()-INTERVAL '1 hour')",text(row,"refundId"));
     }
     public JSONObject pendingConfirmation(UUID caseId) {
         var rows=db.rows("""
@@ -151,6 +154,13 @@ public class BillingCaseAccess {
         if(REFUND_CONFLICT.equals(reason)) return true;
         if(PAYMENT_STUCK.contains(reason)) return Set.of("UNKNOWN","SUBMITTING").contains(text(item,"paymentStatus"));
         if(REFUND_STUCK.contains(reason)) return Set.of("SUBMITTING","UNKNOWN").contains(text(item,"refundStatus"));
+        return false;
+    }
+    /** Still waiting for the provider (an open hosted checkout, a refund in progress): may be verified, never closed or released. */
+    public boolean awaitingProvider(Map<String,Object> item) {
+        String reason=text(item,"reason");
+        if(PAYMENT_STUCK.contains(reason)) return Set.of("REQUIRES_ACTION","PROCESSING").contains(text(item,"paymentStatus"));
+        if(REFUND_STUCK.contains(reason)) return "PROCESSING".equals(text(item,"refundStatus"));
         return false;
     }
     public void requireReleasable(Map<String,Object> item) {

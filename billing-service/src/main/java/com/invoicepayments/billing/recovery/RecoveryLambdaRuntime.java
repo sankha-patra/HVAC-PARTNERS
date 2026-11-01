@@ -18,10 +18,15 @@ public final class RecoveryLambdaRuntime implements AutoCloseable {
     private final HikariDataSource pool;private final AnnotationConfigApplicationContext context;
     private final RecoveryTask task;
     public RecoveryLambdaRuntime() {this(RecoveryBootstrap.runtimeConfiguration());}
-    RecoveryLambdaRuntime(Map<String,String> env) {this(env,new RazorpayBillingProvider(required(env,"BILLING_RAZORPAY_KEY_ID"),required(env,"BILLING_RAZORPAY_KEY_SECRET")));}
-    // The fault artifact supplies a Razorpay adapter with a controlled HTTP transport; no env endpoint switch exists.
+    RecoveryLambdaRuntime(Map<String,String> env) {this(env,provider(env));}
+    /** Recovery uses the provider the payments were made with; only that provider's credentials were read. */
+    private static BillingProvider provider(Map<String,String> env){
+        return "STRIPE".equals(RecoveryBootstrap.provider(env))?new StripeBillingProvider(required(env,"BILLING_STRIPE_SECRET_KEY"))
+            :new RazorpayBillingProvider(required(env,"BILLING_RAZORPAY_KEY_ID"),required(env,"BILLING_RAZORPAY_KEY_SECRET"));
+    }
+    // The fault artifact supplies an adapter with a controlled HTTP transport; no env endpoint switch exists.
     RecoveryLambdaRuntime(Map<String,String> env,BillingProvider provider) {
-        if(!"RAZORPAY".equals(Objects.requireNonNull(provider).name()))throw new IllegalArgumentException("Recovery runtime requires the Razorpay protocol");
+        if(!RecoverySettings.PROVIDERS.contains(Objects.requireNonNull(provider).name()))throw new IllegalArgumentException("Recovery runtime requires the Razorpay or Stripe protocol");
         if(!"true".equals(env.get("RECOVERY_PRIVATE_ROUTE_READY")))throw new IllegalStateException("A reviewed private database route is required");
         String url=required(env,"RECOVERY_JDBC_URL");
         URI route=URI.create(url.substring("jdbc:".length()));
@@ -38,9 +43,10 @@ public final class RecoveryLambdaRuntime implements AutoCloseable {
         pool=new HikariDataSource(config);
         var jdbc=new JdbcTemplate(pool);var db=new BillingStore(jdbc);
         context=new AnnotationConfigApplicationContext();context.getEnvironment().setActiveProfiles("billing");
-        context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("recovery",Map.of("billing.simulator-enabled",false,
-            "billing.public-url",env.getOrDefault("BILLING_PUBLIC_URL","http://localhost:4500"),"billing.provider-merchant-id",required(env,"BILLING_PROVIDER_MERCHANT_ID"),
-            "billing.razorpay.key-id",required(env,"BILLING_RAZORPAY_KEY_ID"))));
+        var properties=new HashMap<String,Object>(Map.of("billing.simulator-enabled",false,"billing.provider",provider.name(),
+            "billing.public-url",env.getOrDefault("BILLING_PUBLIC_URL","http://localhost:4500"),"billing.provider-merchant-id",required(env,"BILLING_PROVIDER_MERCHANT_ID")));
+        if("RAZORPAY".equals(provider.name()))properties.put("billing.razorpay.key-id",required(env,"BILLING_RAZORPAY_KEY_ID"));
+        context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("recovery",properties));
         context.registerBean(javax.sql.DataSource.class,()->pool,definition->definition.setDestroyMethodName(""));
         context.registerBean(JdbcTemplate.class,()->jdbc);context.registerBean(BillingStore.class,()->db);context.registerBean(BillingProvider.class,()->provider);
         context.register(BillingTransactionConfiguration.class);
@@ -48,7 +54,7 @@ public final class RecoveryLambdaRuntime implements AutoCloseable {
         scanner.addIncludeFilter(new RegexPatternTypeFilter(Pattern.compile("com\\.invoicepayments\\.billing\\.Billing.*(Commands|Participants|Access|Locks)$")));
         for(var definition:scanner.findCandidateComponents("com.invoicepayments.billing"))try{context.register(Class.forName(definition.getBeanClassName()));}catch(ClassNotFoundException failure){throw new IllegalStateException(failure);}
         context.registerBean(BillingService.class);context.registerBean(BillingRefundService.class);context.registerBean(BillingRecovery.class);
-        try{context.refresh();task=new RecoveryTask(db,context.getBean(BillingRecovery.class),context.getBean(PlatformTransactionManager.class),UUID.fromString(required(env,"RECOVERY_CAMPAIGN_ID")),UUID.fromString(required(env,"BILLING_PROVIDER_MERCHANT_ID")),"RAZORPAY");}
+        try{context.refresh();task=new RecoveryTask(db,context.getBean(BillingRecovery.class),context.getBean(PlatformTransactionManager.class),UUID.fromString(required(env,"RECOVERY_CAMPAIGN_ID")),UUID.fromString(required(env,"BILLING_PROVIDER_MERCHANT_ID")),provider.name());}
         catch(RuntimeException failure){context.close();pool.close();throw failure;}
     }
     public Map<String,Object> run(String kind,UUID operation,boolean admit){return run(kind,operation,()->admit);}

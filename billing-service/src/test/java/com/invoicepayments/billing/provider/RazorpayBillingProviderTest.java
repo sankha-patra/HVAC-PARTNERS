@@ -59,6 +59,18 @@ class RazorpayBillingProviderTest {
     }
     @Test void twoCapturedPaymentsRequireReviewRatherThanIgnoringMoney() {transport.reply(order("paid"));transport.reply(collection(payment("captured"),payment("captured").put("id","pay_second")));assertThatThrownBy(()->recover("order_original")).isInstanceOf(ProviderUncertainException.class);}
     @Test void changedCredentialsDoNotReplayAnOldRequest() {assertThat(provider.recoverPayment(command(),"old-version",Instant.EPOCH,null).state()).isEqualTo("UNKNOWN");assertThat(transport.requests).isEmpty();}
+    @Test void anEmptySearchIsOnlyAFindingNeverAbsence() {
+        transport.reply(collection());var found=recover(null);
+        assertThat(found.state()).isEqualTo("UNKNOWN");assertThat(found.finding()).isEqualTo(ProviderResult.SEARCH_EMPTY);
+        // A release check keeps the finding when no order exists, so a recorded Dashboard check may support a release ...
+        transport.reply(collection());
+        var check=provider.closePayment(command(),provider.paymentRequestVersion(),Instant.EPOCH,null);
+        assertThat(check.state()).isEqualTo("UNKNOWN");assertThat(check.finding()).isEqualTo(ProviderResult.SEARCH_EMPTY);
+        // ... but an order that exists can still be paid, so it never yields that finding.
+        transport.reply(order("created"));
+        assertThat(provider.closePayment(command(),provider.paymentRequestVersion(),Instant.EPOCH,"order_original").finding()).isNull();
+        assertThat(transport.requests).allMatch(r->r.method().equals("GET"));
+    }
     @Test void orderExpiryIsNeverInvented() {transport.reply(order("created"));assertThat(provider.closePayment(command(),provider.paymentRequestVersion(),Instant.EPOCH,"order_original").state()).isEqualTo("UNKNOWN");assertThat(transport.requests).allMatch(r->r.method().equals("GET"));}
     @Test void initial401IsDefiniteRequestRejectionButDuplicateReceipt400RemainsUnknown() {
         transport.responses.add(new RazorpayBillingProvider.Response(401,"{}"));assertThatThrownBy(()->provider.submit(command())).isInstanceOf(ProviderRejectedException.class);
@@ -75,6 +87,12 @@ class RazorpayBillingProviderTest {
     @Test void lostRefundResponseRecoveryFindsOriginalAndNeverPosts() {
         transport.reply(order("paid"));transport.reply(collection(payment("captured")));transport.reply(collection(refunded("processed")));
         assertThat(provider.recoverRefund(refund(),provider.refundRequestVersion(),Instant.EPOCH,null).state()).isEqualTo("REFUNDED");assertThat(transport.requests).allMatch(r->r.method().equals("GET"));
+    }
+    @Test void anEmptyRefundSearchIsAFindingForAConfirmedReleaseNeverAnAbsence() {
+        transport.reply(order("paid"));transport.reply(collection(payment("captured")));transport.reply(collection());
+        var found=provider.findRefund(refund(),null);
+        assertThat(found.state()).isEqualTo("UNKNOWN");assertThat(found.finding()).isEqualTo(ProviderResult.SEARCH_EMPTY);
+        assertThat(transport.requests).allMatch(r->r.method().equals("GET"));
     }
     @Test void refundParentMismatchDoesNotMoveMoney() {
         transport.reply(order("paid"));transport.reply(collection(payment("captured")));transport.reply(refunded("processed").put("payment_id","pay_other"));

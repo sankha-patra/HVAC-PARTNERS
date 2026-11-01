@@ -76,7 +76,7 @@ class BillingFinancialDatabaseTest {
 
     @BeforeEach void cleanAndSeedDedicatedDatabase() {
         // The hard allowlist above is mandatory: this test must never use an application datasource.
-        jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");
+        jdbc.execute("BEGIN;SET LOCAL billing.maintenance='truncate';TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE;COMMIT");
         db = new BillingStore(jdbc);
         provider = com.invoicepayments.billing.BillingTestWiring.simulator(jdbc, transactions);
         payments = service(provider, MERCHANT);

@@ -42,37 +42,37 @@ mock_provider "aws" {
   }
   mock_resource "aws_db_instance" {
     defaults = {
-      address = "mock.database.internal"
+      address            = "mock.database.internal"
       master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:master-test", kms_key_id = "test-key", secret_status = "active" }]
     }
   }
 }
 mock_provider "random" {}
 override_resource {
-  target = random_password.origin
+  target          = random_password.origin
   override_during = plan
-  values = { result = "test-only-origin-header-not-a-real-secret" }
+  values          = { result = "test-only-origin-header-not-a-real-secret" }
 }
 override_resource {
-  target = aws_db_instance.billing
+  target          = aws_db_instance.billing
   override_during = plan
-  values = { address = "mock.database.internal", master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:master-test", kms_key_id = "test-key", secret_status = "active" }] }
+  values          = { address = "mock.database.internal", master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:master-test", kms_key_id = "test-key", secret_status = "active" }] }
 }
 override_resource {
-  target = aws_msk_cluster.billing
+  target          = aws_msk_cluster.billing
   override_during = plan
-  values = { arn = "arn:aws:kafka:us-east-1:123456789012:cluster/mock/00000000-0000-0000-0000-000000000001-1", bootstrap_brokers_sasl_iam = "mock-broker.example.test:9098" }
+  values          = { arn = "arn:aws:kafka:us-east-1:123456789012:cluster/mock/00000000-0000-0000-0000-000000000001-1", bootstrap_brokers_sasl_iam = "mock-broker.example.test:9098" }
 }
 variables {
-  route53_zone_id = "Z123456789"
-  api_origin_hostname = "origin.example.test"
-  frontend_hostname = "shop.example.test"
-  image_digests = { identity = "sha256:0000000000000000000000000000000000000000000000000000000000000000", billing = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
-  database_secret_arns = { identity = "arn:aws:secretsmanager:us-east-1:123456789012:secret:identity-db", billing = "arn:aws:secretsmanager:us-east-1:123456789012:secret:billing-db" }
+  route53_zone_id            = "Z123456789"
+  api_origin_hostname        = "origin.example.test"
+  frontend_hostname          = "shop.example.test"
+  image_digests              = { identity = "sha256:0000000000000000000000000000000000000000000000000000000000000000", billing = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+  database_secret_arns       = { identity = "arn:aws:secretsmanager:us-east-1:123456789012:secret:identity-db", billing = "arn:aws:secretsmanager:us-east-1:123456789012:secret:billing-db" }
   worker_database_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:worker-db"
-  jwt_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:jwt"
-  stripe_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:stripe"
-  provider_merchant_id = "10000000-0000-0000-0000-000000000001"
+  jwt_secret_arn             = "arn:aws:secretsmanager:us-east-1:123456789012:secret:jwt"
+  stripe_secret_arn          = "arn:aws:secretsmanager:us-east-1:123456789012:secret:stripe"
+  provider_merchant_id       = "10000000-0000-0000-0000-000000000001"
 }
 run "every_alarm_and_failure_event_emails_the_alert_topic" {
   command = plan
@@ -101,13 +101,18 @@ run "every_alarm_and_failure_event_emails_the_alert_topic" {
 run "each_application_alert_code_has_a_filter_per_log_group_and_one_alarm" {
   command = plan
   assert {
-    condition = alltrue([for code in ["PAYMENT_OUTCOME_UNKNOWN", "REFUND_OUTCOME_UNKNOWN", "DATABASE_UNAVAILABLE", "FINANCE_CASE_OPENED", "RECOVERY_NEEDS_REVIEW", "OUTBOX_NOT_DRAINING", "RECOVERY_WORK_NOT_CLAIMED", "CDC_SLOT_INACTIVE", "MONEY_OPERATION_STUCK"] :
-      contains(keys(aws_cloudwatch_metric_alarm.app_alert), code) && length([for f in aws_cloudwatch_log_metric_filter.app_alert : f if f.metric_transformation[0].name == code]) == 2])
+    condition = alltrue([for code in ["PAYMENT_OUTCOME_UNKNOWN", "REFUND_OUTCOME_UNKNOWN", "DATABASE_UNAVAILABLE", "FINANCE_CASE_OPENED", "RECOVERY_NEEDS_REVIEW", "OUTBOX_NOT_DRAINING", "RECOVERY_WORK_NOT_CLAIMED", "CDC_SLOT_INACTIVE", "MONEY_OPERATION_STUCK",
+      "RECOVERY_DISPATCH_FAILING", "PROVIDER_PAUSED", "DEAD_LETTER_OPEN", "NOTIFICATION_DELIVERY_FAILING", "DEBEZIUM_STALLED", "KAFKA_UNREACHABLE", "CDC_WAL_RETAINED", "PROVIDER_CREDENTIALS_REJECTED", "RECOVERY_CAMPAIGN_EXPIRING"] :
+    contains(keys(aws_cloudwatch_metric_alarm.app_alert), code) && length([for f in aws_cloudwatch_log_metric_filter.app_alert : f if f.metric_transformation[0].name == code]) == 2])
     error_message = "Every ALERT code written by OperationalAlert must have a metric filter on the billing and worker log groups and one alarm."
   }
   assert {
-    condition     = alltrue([for f in aws_cloudwatch_log_metric_filter.app_alert : f.pattern == "\"ALERT code=${f.metric_transformation[0].name} \""])
-    error_message = "Filters must match the exact ALERT line prefix so one code cannot match another."
+    condition     = alltrue([for f in aws_cloudwatch_log_metric_filter.app_alert : f.pattern == "\"operational-alerts\" \"ALERT code=${f.metric_transformation[0].name} \""])
+    error_message = "Filters must match the alert logger and the exact ALERT line prefix so one code cannot match another."
+  }
+  assert {
+    condition     = alltrue([for a in aws_cloudwatch_metric_alarm.app_alert : a.evaluation_periods == 5 && a.datapoints_to_alarm == 1])
+    error_message = "Alarms must not flap to OK between repeated condition lines."
   }
   assert {
     condition     = length(aws_cloudwatch_event_rule.recovery_failed) == 0 && length(aws_cloudwatch_metric_alarm.recovery_lambda_errors) == 0
@@ -124,6 +129,10 @@ run "named_recovery_stack_gets_failure_and_error_alerts" {
   assert {
     condition     = length(aws_cloudwatch_event_rule.recovery_failed) == 1 && aws_cloudwatch_event_target.recovery_failed[0].arn == aws_sns_topic.alerts.arn && length(aws_cloudwatch_metric_alarm.recovery_lambda_errors) == 1
     error_message = "A named recovery stack must email failed executions and Lambda errors."
+  }
+  assert {
+    condition     = length([for f in aws_cloudwatch_log_metric_filter.app_alert : f if f.log_group_name == "/aws/lambda/payments-recovery"]) == length(aws_cloudwatch_metric_alarm.app_alert)
+    error_message = "ALERT lines written by the recovery Lambda must be filtered too."
   }
 }
 

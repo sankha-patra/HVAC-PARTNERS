@@ -25,28 +25,49 @@ public final class RazorpayWebhookVerifier {
     }
     public Optional<ProviderWebhookEvent> verify(byte[] body, String signature, String eventId) {
         if (secret.isBlank()) throw new IllegalStateException("Razorpay test webhook signing is not configured");
+        // Which check refused it, so a misconfigured secret or account is visible instead of silently losing webhooks.
+        String stage = "HEADERS";
         try {
             if (body == null || body.length == 0 || body.length > 1_048_576 || signature == null
                     || !signature.matches("[0-9a-fA-F]{64}") || eventId == null || !eventId.matches("[A-Za-z0-9_\\-]{1,200}"))
                 throw new InvalidProviderWebhookException();
+            stage = "SIGNATURE";
             Mac hmac = Mac.getInstance("HmacSHA256");
             hmac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
             if (!MessageDigest.isEqual(hmac.doFinal(body), HexFormat.of().parseHex(signature))) throw new InvalidProviderWebhookException();
             String json = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(body)).toString();
+            stage = "ENVELOPE";
             JSONObject envelope = new JSONObject(json);
+            if (!"event".equals(envelope.getString("entity"))) throw new InvalidProviderWebhookException();
+            stage = "ACCOUNT";
             if (!"event".equals(envelope.getString("entity"))
                     || !RazorpayBillingProvider.validId(envelope.optString("account_id"), "acc_")
                     || (!expectedAccount.isEmpty() && !expectedAccount.equals(envelope.optString("account_id"))))
                 throw new InvalidProviderWebhookException();
+            stage = "PAYLOAD";
             String type = envelope.getString("event");
             if (Set.of("payment.captured", "payment.authorized", "payment.failed", "order.paid").contains(type))
                 return Optional.of(payment(envelope, eventId, type));
             if (Set.of("refund.created", "refund.processed", "refund.failed").contains(type))
                 return Optional.of(refund(envelope, eventId));
             return Optional.empty();
-        } catch (InvalidProviderWebhookException ex) { throw ex; }
-        catch (Exception invalid) { throw new InvalidProviderWebhookException(); }
+        } catch (Exception invalid) {
+            rejected(stage, eventId);
+            throw invalid instanceof InvalidProviderWebhookException known ? known : new InvalidProviderWebhookException();
+        }
+    }
+    private static void rejected(String stage, String eventId) {
+        String reason = switch (stage) {
+            case "SIGNATURE" -> "Razorpay webhook signature does not match: the secret saved in the Razorpay webhook differs from the app's";
+            case "ACCOUNT" -> "Razorpay webhook came from a different merchant account than the configured one";
+            case "HEADERS" -> "Razorpay webhook is missing its signature or event id header";
+            default -> "Razorpay webhook payload is not in the expected shape";
+        };
+        String id = eventId != null && eventId.matches("[A-Za-z0-9_-]{1,200}") ? eventId : "invalid";
+        org.slf4j.LoggerFactory.getLogger(RazorpayWebhookVerifier.class).warn("Razorpay webhook rejected stage={} eventId={}", stage, id);
+        com.invoicepayments.billing.OperationalAlert.raiseAtMostEvery(java.time.Duration.ofMinutes(15), "razorpay-" + stage, "WEBHOOK_REJECTED",
+            com.invoicepayments.billing.OperationalAlert.Severity.WARNING, reason, "provider", "RAZORPAY", "stage", stage, "eventId", id);
     }
     private ProviderWebhookEvent payment(JSONObject event, String eventId, String type) {
         JSONObject payment = event.getJSONObject("payload").getJSONObject("payment").getJSONObject("entity");

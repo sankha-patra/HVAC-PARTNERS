@@ -43,9 +43,13 @@ public class BillingCaseCommands {
         Instant checkedAt=Instant.parse(valid.checkedAt());
         var locked=locks.lock(item); access.requireRole(user,locked,"FINANCE"); access.requireOpen(locked); access.requireReleasable(locked);
         if(locked.get("releaseRequestedBy")!=null) throw BillingProblem.conflict("A release request already awaits a different approver");
+        // The confirmation must come from the provider that handled this payment.
+        String provider=text(db.one("SELECT provider FROM billing.intents WHERE id=?",id(locked.get("intentId"))),"provider");
+        // Razorpay payments need a Razorpay check; every other provider (Stripe, and the simulator that stands in for it) a Stripe one.
+        if("RAZORPAY".equals(provider)!=valid.source().startsWith("RAZORPAY_")) throw BillingProblem.invalid("Record the confirmation from the provider that handled this payment ("+provider+")");
         Instant now=access.databaseNow(), earliest=access.externalCheckFrom(locked);
         if(now.isBefore(earliest))
-            throw BillingProblem.conflict("Wait until 48 hours after the payment was first sent: until then a payment page created for it could still be paid");
+            throw BillingProblem.conflict("Wait until the provider's waiting period after the payment was first sent has passed: until then something it created could still appear");
         if(checkedAt.isBefore(earliest)) throw BillingProblem.invalid("Check Stripe again: the check must be made after the waiting period, so it covers everything this payment could have created");
         if(checkedAt.isAfter(now.plus(CLOCK_TOLERANCE))) throw BillingProblem.invalid("The Stripe check time is in the future");
         if(checkedAt.isBefore(now.minus(EXTERNAL_EVIDENCE_LIFETIME))) throw BillingProblem.invalid("The Stripe check is more than 7 days old; check Stripe again");
@@ -86,6 +90,7 @@ public class BillingCaseCommands {
         var item=access.visible(user,caseId);
         var locked=locks.lock(item); access.requireRole(user,locked,"FINANCE"); access.requireOpen(locked);
         if(access.unresolved(locked)) throw BillingProblem.conflict("The payment or refund is still unresolved. Verify a provider reference or request an approved release instead.");
+        if(access.awaitingProvider(locked)) throw BillingProblem.conflict("The provider may still complete this payment or refund. Verify its provider reference instead of closing the case.");
         db.update("UPDATE billing.cases SET status='RESOLVED',resolved_at=NOW(),resolved_by=?,resolution='CLOSED_AFTER_REVIEW',release_requested_by=NULL,release_note=NULL,release_requested_at=NULL WHERE id=?",user,caseId);
         db.caseAction(caseId,"CLOSED_AFTER_REVIEW",user,reason,null);
         return access.view(caseId);
@@ -183,11 +188,11 @@ public class BillingCaseCommands {
         String note=text(locked,"releaseNote");
         if(payment) {
             paymentCommands.releaseUnresolved(intent,token,
-                "Two authorized Carrier employees approved the release on a recorded Stripe confirmation; Stripe's own search found nothing. Invoice reservations released.");
+                "Two authorized Carrier employees approved the release on a recorded payment provider confirmation; the provider's own search found nothing. Invoice reservations released.");
             db.resolveCases(intent.toString(),"PAYMENT_UNRESOLVED","PAYMENT_REPLAY_UNSAFE",user,"RELEASED_EXTERNAL_CONFIRMATION","APPROVED_EXTERNAL_RELEASE",note);
         } else {
             refunds.releaseUnconfirmed(id(locked.get("refundId")),token,
-                "Two authorized Carrier employees approved the release on a recorded Stripe confirmation; Stripe's own search found no such refund. Refund capacity released.");
+                "Two authorized Carrier employees approved the release on a recorded payment provider confirmation; the provider's own search found no such refund. Refund capacity released.");
             db.resolveCases(text(locked,"refundId"),"REFUND_UNRESOLVED","REFUND_REPLAY_UNSAFE",user,"RELEASED_EXTERNAL_CONFIRMATION","APPROVED_EXTERNAL_RELEASE",note);
         }
         return access.view(caseId);

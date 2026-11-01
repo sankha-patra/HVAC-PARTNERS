@@ -123,10 +123,94 @@ class BillingAwsRecoveryDatabaseTest {
         assertThatThrownBy(()->scoped.run("PAYMENT",payment)).isInstanceOf(IllegalArgumentException.class);
         assertThat(fixture.db.one("SELECT status,recovery_count FROM billing.intents WHERE id=?",payment)).containsEntry("status","PROCESSING").containsEntry("recoveryCount",0);
     }
+    RecoveryDispatchStore auto(int maxAttempts,int maxInFlight){
+        var autoSettings=new RecoverySettings(UUID.randomUUID(),VERSION,8,16,100,maxInFlight,settings.deadline(),true,"SIMULATOR",MERCHANT,maxAttempts);
+        settings=autoSettings;var s=new RecoveryDispatchStore(fixture.db,transactions,autoSettings);s.initialize();return s;
+    }
+    UUID dueUnenrolled(){return dueUnenrolled(INVOICE);}
+    UUID dueUnenrolled(UUID invoice){UUID id=id(fixture.payments.create(PAYER,ACCOUNT,UUID.randomUUID().toString(),List.of(invoice),"CARD").get("id"));
+        fixture.payments.submit(PAYER,id);jdbc.update("UPDATE billing.intents SET next_recovery_at=NOW()-INTERVAL '1 second',lease_until=NULL WHERE id=?",id);return id;}
+    List<Map<String,Object>> dispatches(){return fixture.db.rows("SELECT * FROM billing.recovery_dispatch ORDER BY attempt");}
+    @Test void automaticEnrollmentRecoversOrdinaryTrafficOfTheScopedMerchantAndProvider(){
+        var store=auto(1,1);UUID payment=dueUnenrolled();
+        assertThat(new RecoveryDispatcher(store,remote).tick()).isTrue();assertThat(remote.starts).isEqualTo(1);
+        assertThat(fixture.db.rows("SELECT 1 FROM billing.recovery_campaign_operations WHERE operation_id=?",payment)).hasSize(1);
+        var otherProvider=new RecoverySettings(UUID.randomUUID(),VERSION,8,16,100,1,settings.deadline(),true,"STRIPE",MERCHANT,1);
+        var stripeStore=new RecoveryDispatchStore(fixture.db,transactions,otherProvider);stripeStore.initialize();
+        dueUnenrolled(INVOICE_TWO);assertThat(stripeStore.discover(20)).isZero();
+    }
+    @Test void aFailedWorkflowGetsALaterAttemptWithItsOwnExecutionAndNoFinanceCase(){
+        var store=auto(3,1);UUID payment=dueUnenrolled();var dispatcher=new RecoveryDispatcher(store,remote);
+        dispatcher.tick();next();remote.status="FAILED";remote.error="com.invoicepayments.billing.recovery.RecoveryTunnelUnavailableException";dispatcher.tick();
+        var rows=dispatches();
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0)).containsEntry("state","SUPERSEDED").containsEntry("remoteError","com.invoicepayments.billing.recovery.RecoveryTunnelUnavailableException");
+        assertThat(rows.get(1)).containsEntry("state","PENDING").containsEntry("attempt",2);
+        assertThat(rows.get(1).get("executionName")).isNotEqualTo(rows.get(0).get("executionName"));
+        assertThat(fixture.db.rows("SELECT 1 FROM billing.cases WHERE intent_id=?",payment)).isEmpty();
+        assertThat(fixture.db.one("SELECT next_at>NOW()+INTERVAL '4 minutes' AS later FROM billing.recovery_dispatch WHERE attempt=2")).containsEntry("later",true);
+        remote.status="RUNNING";next();dispatcher.tick();
+        assertThat(remote.starts).isEqualTo(2);assertThat(fixture.db.one("SELECT starts FROM billing.recovery_campaign WHERE id=?",settings.campaign())).containsEntry("starts",2);
+    }
+    @Test void aFailureNoLaterWorkflowCanFixGoesStraightToFinance(){
+        var store=auto(3,1);UUID payment=dueUnenrolled();var dispatcher=new RecoveryDispatcher(store,remote);
+        dispatcher.tick();next();remote.status="FAILED";remote.error="InvalidLabInput";dispatcher.tick();
+        assertThat(dispatches()).singleElement().satisfies(row->assertThat(row).containsEntry("state","REVIEW"));
+        assertThat(fixture.db.rows("SELECT 1 FROM billing.cases WHERE intent_id=? AND reason='PAYMENT_UNRESOLVED'",payment)).hasSize(1);
+    }
+    @Test void aCheckoutStillOpenAfterTheLastAttemptClosesWithoutAFinanceCase(){
+        var store=auto(1,1);UUID payment=dueUnenrolled();var dispatcher=new RecoveryDispatcher(store,remote);
+        dispatcher.tick();jdbc.update("UPDATE billing.intents SET status='REQUIRES_ACTION' WHERE id=?",payment);
+        next();remote.status="FAILED";remote.error="LabLoopBudgetExhausted";dispatcher.tick();
+        assertThat(dispatches()).singleElement().satisfies(row->assertThat(row).containsEntry("state","DONE").containsEntry("owner","CHECKOUT_NOT_COMPLETED"));
+        assertThat(fixture.db.rows("SELECT 1 FROM billing.cases WHERE intent_id=?",payment)).isEmpty();
+    }
+    @Test void theLastAttemptGoesToFinanceAndAReviewNeverBlocksNewStarts(){
+        var store=auto(1,1);UUID first=dueUnenrolled();var dispatcher=new RecoveryDispatcher(store,remote);
+        dispatcher.tick();next();remote.status="FAILED";dispatcher.tick();
+        assertThat(fixture.db.one("SELECT state FROM billing.recovery_dispatch WHERE operation_id=?",first)).containsEntry("state","REVIEW");
+        assertThat(fixture.db.rows("SELECT 1 FROM billing.cases WHERE intent_id=? AND reason='PAYMENT_UNRESOLVED'",first)).hasSize(1);
+        remote.status="RUNNING";UUID second=dueUnenrolled(INVOICE_TWO);dispatcher.tick();
+        assertThat(remote.starts).isEqualTo(2);
+        assertThat(fixture.db.one("SELECT state FROM billing.recovery_dispatch WHERE operation_id=?",second)).containsEntry("state","PENDING");
+    }
+    @Test void aReviewWhoseMoneyIsLaterSettledNeedsNobody(){
+        UUID payment=due();var dispatcher=new RecoveryDispatcher(store,remote);dispatcher.tick();next();remote.status="FAILED";dispatcher.tick();
+        assertThat(dispatch()).containsEntry("state","REVIEW");
+        fixture.payments.recordResult(payment,null,fixture.provider.simulateResult(payment.toString(),"CAPTURED"));
+        dispatcher.tick();
+        assertThat(dispatch()).containsEntry("state","DONE").containsEntry("owner","SETTLED_AFTER_REVIEW");
+    }
+    @Test void anAllocationLimitOnAnAlreadyPaidPaymentOpensNoFinanceCase(){
+        UUID payment=due();var dispatcher=new RecoveryDispatcher(store,remote);dispatcher.tick();
+        fixture.payments.recordResult(payment,null,fixture.provider.simulateResult(payment.toString(),"CAPTURED"));
+        jdbc.update("UPDATE billing.recovery_campaign SET describes=max_describes");next();dispatcher.tick();
+        assertThat(dispatch()).containsEntry("state","DONE");
+        assertThat(fixture.db.rows("SELECT 1 FROM billing.cases WHERE intent_id=? AND reason='PAYMENT_UNRESOLVED'",payment)).isEmpty();
+    }
+    @Test void repeatedAwsFailuresAreAlertedAndFailedDescribesDoNotSpendTheBudget(){
+        var lines=new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();lines.start();
+        var logger=(ch.qos.logback.classic.Logger)org.slf4j.LoggerFactory.getLogger("operational-alerts");logger.addAppender(lines);
+        try {
+            due();remote.offline=true;var dispatcher=new RecoveryDispatcher(store,remote);
+            for(int i=0;i<3;i++){dispatcher.tick();next();}
+            assertThat(fixture.db.one("SELECT describes,submissions FROM billing.recovery_campaign")).containsEntry("describes",0).containsEntry("submissions",0);
+            assertThat(lines.list).extracting(e->e.getFormattedMessage()).filteredOn(m->m.startsWith("ALERT code=RECOVERY_DISPATCH_FAILING"))
+                .singleElement().asString().contains("errorCode=NETWORK_UNAVAILABLE","consecutiveFailures=3");
+            remote.offline=false;dispatcher.tick();
+            assertThat(lines.list).extracting(e->e.getFormattedMessage()).contains("ALERT_RESOLVED code=RECOVERY_DISPATCH_FAILING");
+        } finally {logger.detachAppender(lines);}
+    }
+    @Test void truncatingMoneyTablesIsRefusedUnlessMaintenanceIsDeclared(){
+        due();
+        assertThatThrownBy(()->jdbc.execute("TRUNCATE billing.attempts CASCADE")).hasMessageContaining("cannot be truncated");
+        assertThatThrownBy(()->jdbc.execute("TRUNCATE commerce.orders CASCADE")).hasMessageContaining("cannot be truncated");
+        assertThat(fixture.db.rows("SELECT 1 FROM billing.attempts")).isNotEmpty();
+    }
     final class FakeRemote implements RecoveryRemote {
-        int starts;boolean loseAck,offline,wrongVersion;String status="RUNNING";Map<String,Execution> executions=new HashMap<>();
+        int starts;boolean loseAck,offline,wrongVersion;String status="RUNNING",error;Map<String,Execution> executions=new HashMap<>();
         void outside(){assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();assertThat(TransactionSynchronizationManager.isSynchronizationActive()).isFalse();if(offline)throw new Failure("NETWORK_UNAVAILABLE");}
-        public Execution describe(String arn){outside();var e=executions.get(arn);if(e==null)throw new Failure("ExecutionDoesNotExist");return new Execution(arn,wrongVersion?VERSION.replace(":7",":8"):VERSION,e.input(),status);}
+        public Execution describe(String arn){outside();var e=executions.get(arn);if(e==null)throw new Failure("ExecutionDoesNotExist");return new Execution(arn,wrongVersion?VERSION.replace(":7",":8"):VERSION,e.input(),status,"RUNNING".equals(status)?null:error);}
         public String start(String version,String name,String input){outside();starts++;String arn=settings.executionArn(name);executions.putIfAbsent(arn,new Execution(arn,version,input,"RUNNING"));if(loseAck){loseAck=false;throw new Failure("LOST_START_ACK");}return arn;}
     }
 }

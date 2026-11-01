@@ -90,7 +90,7 @@ class BillingSimulationLabTest {
             assertThat(jdbc.queryForObject("SELECT current_user",String.class)).isEqualTo("billing_test");
         }
         // Never point this destructive fixture reset at an app database. URL/user/name/version are checked above.
-        jdbc.execute("TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE");
+        jdbc.execute("BEGIN;SET LOCAL billing.maintenance='truncate';TRUNCATE billing.merchants,billing.provider_operations,billing.outbox,billing.consumer_inbox RESTART IDENTITY CASCADE;COMMIT");
         lab.reset();
         jdbc.update("INSERT INTO billing.merchants(id,name) VALUES(?,'Synthetic lab merchant')",MERCHANT);
         jdbc.update("INSERT INTO billing.staff(merchant_id,user_id,role) VALUES(?,?,'FINANCE'),(?,?,'REFUND_APPROVER'),(?,?,'REFUND_APPROVER')",MERCHANT,MAKER,MERCHANT,MAKER,MERCHANT,CHECKER);

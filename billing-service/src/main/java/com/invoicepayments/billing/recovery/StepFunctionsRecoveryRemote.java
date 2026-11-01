@@ -11,7 +11,7 @@ public final class StepFunctionsRecoveryRemote implements RecoveryRemote {
     public Execution describe(String arn) {
         requireNoTransaction();
         try {var e=client.describeExecution(DescribeExecutionRequest.builder().executionArn(arn).build());
-            return new Execution(e.executionArn(),e.stateMachineVersionArn(),e.input(),e.statusAsString());
+            return new Execution(e.executionArn(),e.stateMachineVersionArn(),e.input(),e.statusAsString(),e.error());
         }catch(SfnException failure){throw new Failure(failure.awsErrorDetails()==null?"SFN_UNCERTAIN":failure.awsErrorDetails().errorCode());}
     }
     public String start(String version,String name,String input) {

@@ -1,0 +1,50 @@
+# Compose overlay for the hybrid lab: ships billing and PostgreSQL logs plus container stop events to CloudWatch.
+# Use after the lab's compose.yml and recovery.yml:
+#   docker compose -p payments-rzp-failures --env-file private/.env -f compose.yml -f recovery.yml \
+#     -f <repo>/infra/hybrid-lab/telemetry.yml up -d --no-deps fluent-bit postgres billing
+# TELEMETRY_CONFIG_DIR = this folder; TELEMETRY_ENV_FILE = env file with the telemetry user's key (never committed).
+services:
+  fluent-bit:
+    image: fluent/fluent-bit:3.2.10
+    restart: unless-stopped
+    mem_limit: 64m
+    env_file: ["${TELEMETRY_ENV_FILE:-private/telemetry.env}"]
+    environment:
+      AWS_REGION: ap-southeast-2
+    ports: ["127.0.0.1:24224:24224"]
+    volumes:
+      - ${TELEMETRY_CONFIG_DIR}/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - fluent_buffer:/fluent-bit/buffer
+  postgres:
+    # Who did it: the blocked-delete line carries user, database, application and client. DDL (TRUNCATE, DROP
+    # TRIGGER) is logged. WAL kept for a stalled Debezium slot is capped so it cannot fill the disk.
+    command: [postgres, -c, wal_level=logical, -c, "log_line_prefix=%m [%p] user=%u db=%d app=%a client=%h ", -c, log_statement=ddl, -c, max_slot_wal_keep_size=1024MB]
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: 127.0.0.1:24224
+        fluentd-async: "true"
+        tag: hybrid.postgres
+  billing:
+    # Alerting on in the single lab app; the dispatcher uses its own narrow key (payments-hybrid-dispatcher), not the
+    # developer's ~/.aws sign-in, which the override below removes along with recovery.yml's HOME override.
+    env_file: [private/app.env, "${DISPATCHER_ENV_FILE:-private/dispatcher.env}"]
+    environment:
+      BILLING_ALERTS_WATCH_ENABLED: "true"
+      BILLING_ALERTS_CONNECT_URL: http://connect:8083
+      BILLING_ALERTS_CONNECT_AUTO_RESTART: "true"
+      BILLING_CDC_SLOT_NAME: rzp_failures_outbox
+      AWS_REGION: ap-southeast-2
+      HOME: /tmp
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    volumes: !override
+      - ./billing-hybrid.jar:/app/app.jar:ro
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: 127.0.0.1:24224
+        fluentd-async: "true"
+        tag: hybrid.billing
+volumes:
+  fluent_buffer: {}

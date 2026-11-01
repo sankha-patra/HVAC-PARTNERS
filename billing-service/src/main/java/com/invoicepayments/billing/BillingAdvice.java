@@ -44,8 +44,8 @@ public class BillingAdvice {
     @ExceptionHandler(Exception.class) ResponseEntity<?> uncertain(Exception failure) {
         String reference=UUID.randomUUID().toString();
         org.slf4j.LoggerFactory.getLogger(BillingAdvice.class).error("Billing request failed reference={}",reference,failure);
-        if(OperationalAlert.databaseUnavailable(failure))OperationalAlert.raise("DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,
-            "A billing request could not reach the database; nothing new was recorded","reference",reference);
+        if(OperationalAlert.databaseUnavailable(failure))OperationalAlert.raiseAtMostEvery(java.time.Duration.ofMinutes(1),"http","DATABASE_UNAVAILABLE",OperationalAlert.Severity.CRITICAL,
+            "A billing request could not reach the database and failed safely; a payment in flight stays saved and is recovered","source","http","reference",reference);
         return ResponseEntity.internalServerError().body(Map.of("code","OUTCOME_UNCERTAIN","reference",reference,
             "message","The operation could not be confirmed. Refresh its status before retrying."));
     }

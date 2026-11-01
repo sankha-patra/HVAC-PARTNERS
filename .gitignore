@@ -14,3 +14,4 @@
 .vscode/
 *.iml
 **/*.tfvars
+infra/aws-hybrid-alerts/.build/

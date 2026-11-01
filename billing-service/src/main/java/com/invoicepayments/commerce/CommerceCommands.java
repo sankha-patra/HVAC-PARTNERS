@@ -169,14 +169,22 @@ public class CommerceCommands {
         CommercePaymentGuard.withOrderCancellation(()->payments.cancel(user,intent));
         releaseStock(order);close(order,"CANCELLED");return order(user,order);
     }
+    static final Set<String> UNRESOLVED=Set.of("SUBMITTING","UNKNOWN","REQUIRES_ACTION","PROCESSING");
+    /**
+     * Extra wait after the hold before stock is released for a payment whose outcome is still unknown. A sent payment may
+     * already be charged, so its stock is kept well past the hold (recovery normally settles it within minutes), but not
+     * forever: after a day the stock goes back on sale and a late capture sends the order to finance review.
+     */
+    static final int UNRESOLVED_GRACE_MINUTES=24*60;
     public int expireHolds(int limit) {
         var due=db.rows("""
             SELECT o.* FROM commerce.orders o JOIN billing.intents i ON i.payment_reference=o.payment_reference
             AND NOT EXISTS(SELECT 1 FROM billing.intents child WHERE child.retry_of=i.id)
-            WHERE o.status='PAYMENT_PENDING' AND o.hold_until<NOW() AND i.status IN ('CREATED','FAILED','CANCELLED')
+            WHERE o.status='PAYMENT_PENDING' AND o.hold_until<NOW() AND (i.status IN ('CREATED','FAILED','CANCELLED')
+              OR (i.status IN ('SUBMITTING','UNKNOWN','REQUIRES_ACTION','PROCESSING') AND o.hold_until<NOW()-(? * INTERVAL '1 minute')))
             AND NOT EXISTS(SELECT 1 FROM billing.intents captured JOIN billing.journals j ON j.effect_key='capture:'||captured.id WHERE captured.payment_reference=o.payment_reference)
             ORDER BY o.hold_until,o.id FOR UPDATE OF o SKIP LOCKED LIMIT ?
-            """,Math.max(1,Math.min(limit,50)));
+            """,UNRESOLVED_GRACE_MINUTES,Math.max(1,Math.min(limit,50)));
         int expired=0;
         for(var order:due) {
             UUID reference=id(order.get("paymentReference")),orderId=id(order.get("id"));UUID intent=latest(reference);
@@ -190,6 +198,10 @@ public class CommerceCommands {
                 db.update("UPDATE billing.allocations SET state='RELEASED' WHERE intent_id=? AND state='RESERVED'",intent);
                 db.update("UPDATE billing.intents SET status='CANCELLED',updated_at=NOW() WHERE id=?",intent);
                 db.event(intent,"EXPIRED","Unsubmitted order expired; stock and invoice reservations released together");
+            } else if(UNRESOLVED.contains(text(payment,"status"))) {
+                // The payment's outcome is still unknown, but the stock must not be held forever. The payment stays open for
+                // recovery and keeps its invoice reservation; if it is captured later, the order goes to finance review.
+                db.event(intent,"ORDER_EXPIRED_PAYMENT_UNRESOLVED","Stock hold ended a day ago with the payment still unconfirmed; stock released, payment still recovered");
             } else if(!Set.of("FAILED","CANCELLED").contains(text(payment,"status")))continue;
             releaseStock(orderId);close(orderId,"EXPIRED");expired++;
         }
@@ -220,6 +232,8 @@ public class CommerceCommands {
             if(db.exists("SELECT 1 FROM billing.intents WHERE payment_reference=? AND (refunded_minor>0 OR status IN ('REFUNDED','RETURNED'))",id(order.get("paymentReference")))) {
                 review(orderId,intent,"ORDER_MONEY_RETURNED_REVIEW");return;
             }
+            // Paid after the order expired or was cancelled (its stock may be sold): finance decides to refund or fulfil.
+            if(Set.of("EXPIRED","CANCELLED").contains(text(order,"status"))) {review(orderId,intent,"ORDER_PAID_AFTER_EXPIRY");return;}
             if(!"PAYMENT_PENDING".equals(order.get("status")) || !posted || !"CAPTURED".equals(payment.get("status"))) {close(orderId,"NEEDS_REVIEW");return;}
             for(var reservation:db.rows("SELECT * FROM commerce.stock_reservations WHERE order_id=? ORDER BY product_id FOR UPDATE",orderId)) {
                 if(!"RESERVED".equals(reservation.get("state")))throw new IllegalStateException("Paid order has no active stock reservation");

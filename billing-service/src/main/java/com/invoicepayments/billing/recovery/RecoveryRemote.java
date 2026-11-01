@@ -2,7 +2,10 @@ package com.invoicepayments.billing.recovery;
 
 /** The remote boundary is invoked only after local admission has committed. */
 public interface RecoveryRemote {
-    record Execution(String arn, String versionArn, String input, String status) {}
+    /** error is the closed execution's error name (for example States.Timeout or RecoveryConnectionUnavailableException). */
+    record Execution(String arn, String versionArn, String input, String status, String error) {
+        public Execution(String arn,String versionArn,String input,String status){this(arn,versionArn,input,status,null);}
+    }
     Execution describe(String executionArn);
     String start(String versionArn, String name, String input);
     final class Failure extends RuntimeException {

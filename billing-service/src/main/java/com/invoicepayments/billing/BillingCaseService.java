@@ -52,7 +52,8 @@ public class BillingCaseService {
         ProviderResult result;
         if(PAYMENT_STUCK.contains(kind)) {
             var payment=payments.raw(intent); payments.requireProvider(payment);
-            if(!Set.of("UNKNOWN","SUBMITTING").contains(text(payment,"status"))) throw BillingProblem.conflict("This payment is no longer unresolved; refresh the case");
+            // Includes a hosted checkout still marked REQUIRES_ACTION/PROCESSING after recovery gave up: the buyer may have paid.
+            if(!Set.of("UNKNOWN","SUBMITTING","REQUIRES_ACTION","PROCESSING").contains(text(payment,"status"))) throw BillingProblem.conflict("This payment is no longer unresolved; refresh the case");
             if(payment.get("providerId")!=null && !reference.equals(payment.get("providerId")))
                 throw BillingProblem.conflict("This payment already has a different verified provider reference");
             result=provider.verifyPaymentReference(new ProviderCommand(intent.toString(),BillingService.operationKey(intent),
@@ -62,7 +63,7 @@ public class BillingCaseService {
             var row=refunds.raw(refund);
             var payment=payments.raw(intent); payments.requireProvider(payment);
             if(!intent.toString().equals(text(row,"intentId"))) throw BillingProblem.conflict("Refund does not belong to this payment");
-            if(!Set.of("SUBMITTING","UNKNOWN").contains(text(row,"status"))) throw BillingProblem.conflict("This refund is no longer unresolved; refresh the case");
+            if(!Set.of("SUBMITTING","UNKNOWN","PROCESSING").contains(text(row,"status"))) throw BillingProblem.conflict("This refund is no longer unresolved; refresh the case");
             if(row.get("providerId")!=null && !reference.equals(row.get("providerId")))
                 throw BillingProblem.conflict("This refund already has a different verified provider reference");
             if(text(payment,"providerId")==null) throw BillingProblem.conflict("The original verified payment reference is required");
@@ -105,10 +106,16 @@ public class BillingCaseService {
         BillingExecutionBudget.requireTime();return commands.recordExternalConfirmation(user,caseId,confirmation);
     }
 
-    static final Set<String> EXTERNAL_SOURCES=Set.of("STRIPE_DASHBOARD","STRIPE_SUPPORT");
+    static final Set<String> EXTERNAL_SOURCES=Set.of("STRIPE_DASHBOARD","STRIPE_SUPPORT","RAZORPAY_DASHBOARD","RAZORPAY_SUPPORT");
     static final Set<String> EXTERNAL_FINDINGS=Set.of(ProviderResult.SEARCH_EMPTY,ProviderResult.CREDENTIALS_CHANGED);
     /** The last allowed resend is at 23 hours, and a Checkout page created then expires 24 hours later. */
     static final Duration EXTERNAL_PAYMENT_WAIT=Duration.ofHours(48);
+    /**
+     * Razorpay: only the first submitter ever creates the order (recovery never resends), and an order is findable by its
+     * receipt seconds after creation. One hour after the request was saved, an empty search covers anything it created.
+     */
+    static final Duration RAZORPAY_PAYMENT_WAIT=Duration.ofHours(1);
+    static Duration paymentWait(String provider){return "RAZORPAY".equals(provider)?RAZORPAY_PAYMENT_WAIT:EXTERNAL_PAYMENT_WAIT;}
     static final Duration EXTERNAL_EVIDENCE_LIFETIME=Duration.ofDays(7);
     static final Duration CLOCK_TOLERANCE=Duration.ofMinutes(5);
     /** 13 to 19 digits, optionally grouped by spaces or dashes: looks like a card or bank account number. */
