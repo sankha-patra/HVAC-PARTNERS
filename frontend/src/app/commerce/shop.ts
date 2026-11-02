@@ -135,12 +135,17 @@ export class ShopComponent implements OnInit, OnDestroy {
       if (epoch !== this.epoch) return; this.checking.set(false);
       if (this.selected()?.id !== updated.id || mutation !== this.mutation) return;
       this.selected.set(updated); this.orders.update(orders => orders.map(item => item.id === updated.id ? updated : item));
-      if (['PAID', 'CANCELLED', 'EXPIRED', 'NEEDS_REVIEW'].includes(updated.status)) { this.stopPolling(); this.notice.set(''); }
+      if (['PAID', 'CANCELLED', 'EXPIRED', 'NEEDS_REVIEW'].includes(updated.status) && !(updated.status === 'EXPIRED' && this.paymentUnresolved(updated))) { this.stopPolling(); this.notice.set(''); }
     }, error: () => { if (epoch === this.epoch) { this.checking.set(false); this.notice.set('The latest result is unavailable. Your order stays saved; please do not pay again.'); } } }));
   }
   private startPolling() { this.stopPolling(); this.pollUntil = Date.now() + 600000; this.timer = setInterval(() => { if (Date.now() >= this.pollUntil) this.stopPolling(); else this.refreshOrder(); }, 3000); }
   private stopPolling() { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
   paymentReceived(order: Order) { return (order.paymentSummary?.capturedMinor ?? 0) > 0 || order.payment?.status === 'CAPTURED'; }
+  /** The outcome of a sent payment is not known yet: it may still be charged. */
+  paymentUnresolved(order: Order) {
+    return !this.paymentReceived(order) && (['SUBMITTING','UNKNOWN','PROCESSING','REQUIRES_ACTION'].includes(order.payment?.status)
+      || ['PENDING','ACTION_REQUIRED'].includes(order.paymentSummary?.status ?? ''));
+  }
   canPay(order: Order) { return !this.paymentReceived(order) && order.status === 'PAYMENT_PENDING' && ['CREATED', 'REQUIRES_ACTION'].includes(order.payment?.status) && !this.busy(); }
   pay() {
     const order = this.selected(); if (!order || !this.canPay(order)) return;
@@ -222,6 +227,8 @@ export class ShopComponent implements OnInit, OnDestroy {
     if (this.paymentReceived(order) && ['CANCELLED','EXPIRED'].includes(order.status)) return 'We received a payment for this closed order. The store is reviewing it. Please do not pay again.';
     if (this.paymentReceived(order)) return 'Payment received. We are finishing your order update.';
     if (order.status === 'CANCELLED') return 'This order was cancelled before payment.';
+    // The stock hold can lapse while the first payment is still being checked; inviting a new order could charge twice.
+    if (order.status === 'EXPIRED' && this.paymentUnresolved(order)) return `Your item reservation expired. We are still checking your original payment. Please do not pay again. Contact support with ${order.orderNumber ? `order #${order.orderNumber}` : 'this order'}.`;
     if (order.status === 'EXPIRED') return 'The time to pay for this order has ended. You can start a new order from the shop.';
     if (order.payment?.status === 'CREATED') return 'Review the amount, then choose Pay.';
     if (order.payment?.status === 'REQUIRES_ACTION') return 'Complete payment in the secure checkout window.';
@@ -233,6 +240,7 @@ export class ShopComponent implements OnInit, OnDestroy {
     if (order.paymentSummary?.status === 'PARTIALLY_REFUNDED') return 'Partially refunded';
     if (order.paymentSummary?.status === 'RETURNED') return 'Payment returned';
     if (this.paymentReceived(order) && ['CANCELLED','EXPIRED'].includes(order.status)) return 'Payment received · under review';
+    if (order.status === 'EXPIRED' && this.paymentUnresolved(order)) return 'Reservation expired · checking payment';
     if (order.status === 'PAYMENT_PENDING' && this.paymentReceived(order)) return 'Payment received';
     if (order.status === 'PAYMENT_PENDING' && (order.paymentSummary?.status === 'ACTION_REQUIRED' || order.payment?.status === 'REQUIRES_ACTION')) return 'Complete payment';
     if (order.status === 'PAYMENT_PENDING' && (order.paymentSummary?.status === 'PENDING' || ['UNKNOWN','PROCESSING','SUBMITTING','CAPTURED'].includes(order.payment?.status))) return 'Confirming payment';

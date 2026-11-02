@@ -203,6 +203,17 @@ class CommerceDatabaseTest {
             @SuppressWarnings("unchecked") var items=(List<Map<String,Object>>)catalog.catalog("payer",ACCOUNT,"",0).get("items");assertThat(amount(items.get(0),"unitPriceMinor")).isEqualTo(200);assertThat(values).hasSize(2);
         }finally{release.countDown();pool.shutdownNow();}
     }
+    @Test void aPurchaseChangesTheCachedProductCountOnTheNextRead(){
+        var values=new ConcurrentHashMap<String,String>();var reads=new AtomicInteger();
+        var cache=new CommerceCatalog.Cache(){public String get(String key){reads.incrementAndGet();return values.get(key);}public void put(String key,String value,Duration ttl){values.put(key,value);}};
+        var catalog=new CommerceCatalog(db,payments,cache);
+        assertThat(available(catalog)).isEqualTo(5);assertThat(available(catalog)).isEqualTo(5);assertThat(values).hasSize(1);assertThat(reads).hasValue(2);
+        var order=checkout();
+        assertThat(available(catalog)).isEqualTo(4);assertThat(values).hasSize(2);
+        commerce.cancel("payer",id(order.get("id")));
+        assertThat(available(catalog)).isEqualTo(5);assertThat(values).hasSize(3);
+    }
+    long available(CommerceCatalog catalog){@SuppressWarnings("unchecked") var items=(List<Map<String,Object>>)catalog.catalog("payer",ACCOUNT,"",0).get("items");return amount(items.get(0),"availableQty");}
     @Test void cacheOutageFallsThroughAndPoisonedCatalogDoesNotSetCheckoutPrice(){
         var down=new CommerceCatalog.Cache(){public String get(String k){throw new IllegalStateException("Redis down");}public void put(String k,String v,Duration t){throw new IllegalStateException("Redis down");}};
         assertThat((List<?>)new CommerceCatalog(db,payments,down).catalog("payer",ACCOUNT,"",0).get("items")).hasSize(1);

@@ -196,6 +196,28 @@ describe('Commerce checkout safety', () => {
       expect(component.canPay(late)).toBe(false);
     }
   });
+  it('does not invite a new order when the hold expired but the first payment is still unresolved', () => {
+    for (const status of ['UNKNOWN','SUBMITTING','PROCESSING','REQUIRES_ACTION']) {
+      const expired: Order = { ...order, orderNumber: 10082, status: 'EXPIRED', payment: { ...order.payment, status } };
+      expect(component.explanation(expired)).toContain('still checking your original payment');
+      expect(component.explanation(expired)).toContain('do not pay again');
+      expect(component.explanation(expired)).toContain('order #10082');
+      expect(component.explanation(expired)).not.toMatch(/start a new order/);
+      expect(component.statusLabel(expired)).toBe('Reservation expired · checking payment');
+      expect(component.canPay(expired)).toBe(false);
+    }
+    const listRow = { id: order.id, status: 'EXPIRED', totalMinor: 100, currency: 'INR', paymentSummary: { status: 'PENDING', capturedMinor: 0, refundedMinor: 0, currency: 'INR' } } as Order;
+    expect(component.explanation(listRow)).toContain('this order');
+    const settled: Order = { ...order, status: 'EXPIRED', payment: { ...order.payment, status: 'FAILED' } };
+    expect(component.explanation(settled)).toContain('start a new order');
+  });
+  it('keeps checking an expired order while its payment is unresolved', () => {
+    const expired: Order = { ...order, status: 'EXPIRED', payment: { ...order.payment, status: 'UNKNOWN' } };
+    component.openOrder(order);
+    http.expectOne(request => request.url.endsWith(`/orders/${order.id}`)).flush(expired);
+    expect((component as unknown as { timer?: unknown }).timer).toBeDefined();
+    component.ngOnDestroy();
+  });
   it('asks for checkout completion when action is required despite a pending summary', () => {
     const action: Order = { ...order, payment: { ...order.payment, status: 'REQUIRES_ACTION' }, paymentSummary: { status: 'PENDING', capturedMinor: 0, refundedMinor: 0, currency: 'INR' } };
     expect(component.statusLabel(action)).toBe('Complete payment');
